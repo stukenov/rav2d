@@ -1,6 +1,7 @@
+use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::headers::{FrameHeader, WarpedMotionParams, WarpedMotionType};
-use crate::intops::{apply_sign64, iclip};
-use crate::levels::MvXY;
+use crate::intops::{apply_sign64, iclip, imax};
+use crate::levels::{MvXY, RefPair};
 
 #[derive(Clone)]
 pub struct BlockContext {
@@ -236,6 +237,119 @@ pub fn warp_type(mtx: &[i32; 6]) -> WarpedMotionType {
         WarpedMotionType::Translation
     } else {
         WarpedMotionType::Identity
+    }
+}
+
+#[inline(always)]
+pub fn get_partition_ctx(
+    a: &BlockContext,
+    l: &BlockContext,
+    b_dim: &[u8],
+    plane: usize,
+    yb4: usize,
+    xb4: usize,
+) -> i32 {
+    ((a.partition[plane][xb4] >> imax(b_dim[2] as i32 - 1, 0)) & 1) as i32
+        + (((l.partition[plane][yb4] >> imax(b_dim[3] as i32 - 1, 0)) & 1) as i32) * 2
+}
+
+#[inline(always)]
+pub fn get_partition2_ctx(
+    a: &BlockContext,
+    l: &BlockContext,
+    b_dim: &[u8],
+    plane: usize,
+    dir: i32,
+    yb4: usize,
+    xb4: usize,
+) -> i32 {
+    if dir == 0 {
+        let hh4 = (b_dim[1] >> 1) as usize;
+        ((l.partition[plane][yb4 + hh4] >> (b_dim[3] - 2)) & 1) as i32
+            + (((l.partition[plane][yb4] >> (b_dim[3] - 2)) & 1) as i32) * 2
+    } else {
+        let hw4 = (b_dim[0] >> 1) as usize;
+        ((a.partition[plane][xb4 + hw4] >> (b_dim[2] - 2)) & 1) as i32
+            + (((a.partition[plane][xb4] >> (b_dim[2] - 2)) & 1) as i32) * 2
+    }
+}
+
+#[inline(always)]
+pub fn get_filter_ctx(
+    nb: [&BlockContext; 2],
+    boff: [i32; 2],
+    r: RefPair,
+) -> i32 {
+    let (r_ref, comp) = unsafe {
+        (r.r[0], (r.r[1] != -1) as i32)
+    };
+    let flt0 = if boff[0] != -1 {
+        let i = boff[0] as usize;
+        if nb[0].r#ref[0][i] == r_ref || nb[0].r#ref[1][i] == r_ref {
+            nb[0].filter[i] as i32
+        } else {
+            N_SWITCHABLE_FILTERS as i32
+        }
+    } else {
+        N_SWITCHABLE_FILTERS as i32
+    };
+    let flt1 = if boff[1] != -1 {
+        let i = boff[1] as usize;
+        if nb[1].r#ref[0][i] == r_ref || nb[1].r#ref[1][i] == r_ref {
+            nb[1].filter[i] as i32
+        } else {
+            N_SWITCHABLE_FILTERS as i32
+        }
+    } else {
+        N_SWITCHABLE_FILTERS as i32
+    };
+
+    if flt0 == flt1 || flt1 == N_SWITCHABLE_FILTERS as i32 {
+        comp * 4 + flt0
+    } else if flt0 == N_SWITCHABLE_FILTERS as i32 {
+        comp * 4 + flt1
+    } else {
+        comp * 4 + N_SWITCHABLE_FILTERS as i32
+    }
+}
+
+#[inline(always)]
+pub fn get_comp_ctx(
+    nx: [&BlockContext; 2],
+    xoff: [usize; 2],
+    n_ctx: i32,
+    refdir: &[i8],
+) -> i32 {
+    match n_ctx {
+        2 => {
+            let refa2 = nx[0].r#ref[1][xoff[0]];
+            let refb2 = nx[1].r#ref[1][xoff[1]];
+            if refa2 == -1 {
+                let refa1 = nx[0].r#ref[0][xoff[0]] as usize;
+                if refb2 == -1 {
+                    let refb1 = nx[1].r#ref[0][xoff[1]] as usize;
+                    ((refdir[refa1] == 1) ^ (refdir[refb1] == 1)) as i32
+                } else {
+                    2 + (nx[0].intrabc[xoff[0]] == 0 && refdir[refa1] != 0) as i32
+                }
+            } else if refb2 == -1 {
+                let refb1 = nx[1].r#ref[0][xoff[1]] as usize;
+                2 + (nx[1].intrabc[xoff[1]] == 0 && refdir[refb1] != 0) as i32
+            } else {
+                4
+            }
+        }
+        1 => {
+            let ref2 = nx[0].r#ref[1][xoff[0]];
+            if ref2 == -1 {
+                let ref1 = nx[0].r#ref[0][xoff[0]] as usize;
+                (nx[0].intrabc[xoff[0]] == 0 && refdir[ref1] != 0) as i32
+            } else {
+                3
+            }
+        }
+        0 => 1,
+        _ => unreachable!(),
     }
 }
 
