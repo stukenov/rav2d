@@ -290,6 +290,169 @@ pub static WEDGE_ANGLE_DIST2IDX: [[i8; 4]; 20] = [
     [-1, 65, 66, 67],  // WEDGE_346
 ];
 
+#[derive(Clone, Copy)]
+pub struct PartitionConstants {
+    pub part: [[i8; 4]; 2],
+    pub ctx: [i8; 2],
+}
+
+const I: i8 = -1; // BS_INVALID shorthand
+use BlockSize::*;
+
+pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
+    let mut t = [PartitionConstants { part: [[I; 4]; 2], ctx: [I; 2] }; N_BS_SIZES];
+
+    t[Bs256x256 as usize] = PartitionConstants {
+        part: [[Bs256x128 as i8, I, I, Bs128x128 as i8],
+               [Bs128x256 as i8, I, I, Bs128x128 as i8]],
+        ctx: [9, 12],
+    };
+    t[Bs256x128 as usize] = PartitionConstants {
+        part: [[I, I, I, I],
+               [Bs128x128 as i8, I, I, I]],
+        ctx: [8, I],
+    };
+    t[Bs128x256 as usize] = PartitionConstants {
+        part: [[Bs128x128 as i8, I, I, I],
+               [I, I, I, I]],
+        ctx: [7, I],
+    };
+    t[Bs128x128 as usize] = PartitionConstants {
+        part: [[Bs128x64 as i8, I, I, Bs64x64 as i8],
+               [Bs64x128 as i8, I, I, Bs64x64 as i8]],
+        ctx: [6, 9],
+    };
+    t[Bs128x64 as usize] = PartitionConstants {
+        part: [[I, I, I, I],
+               [Bs64x64 as i8, I, I, I]],
+        ctx: [5, I],
+    };
+    t[Bs64x128 as usize] = PartitionConstants {
+        part: [[Bs64x64 as i8, I, I, I],
+               [I, I, I, I]],
+        ctx: [4, I],
+    };
+    t[Bs64x64 as usize] = PartitionConstants {
+        part: [[Bs64x32 as i8, Bs64x16 as i8, Bs64x8 as i8, Bs32x32 as i8],
+               [Bs32x64 as i8, Bs16x64 as i8, Bs8x64 as i8, Bs32x32 as i8]],
+        ctx: [3, 6],
+    };
+    t[Bs64x32 as usize] = PartitionConstants {
+        part: [[Bs64x16 as i8, Bs64x8 as i8, Bs64x4 as i8, Bs32x16 as i8],
+               [Bs32x32 as i8, Bs16x32 as i8, Bs8x32 as i8, Bs32x16 as i8]],
+        ctx: [3, 5],
+    };
+    t[Bs64x16 as usize] = PartitionConstants {
+        part: [[Bs64x8 as i8, Bs64x4 as i8, I, Bs32x8 as i8],
+               [Bs32x16 as i8, Bs16x16 as i8, Bs8x16 as i8, Bs32x8 as i8]],
+        ctx: [15, 14],
+    };
+    t[Bs64x8 as usize] = PartitionConstants {
+        part: [[I, I, I, I], [I, I, I, I]],
+        ctx: [0, 0],
+    };
+    t[Bs64x4 as usize] = PartitionConstants {
+        part: [[I, I, I, I], [I, I, I, I]],
+        ctx: [0, I],
+    };
+    t[Bs32x64 as usize] = PartitionConstants {
+        part: [[Bs32x32 as i8, Bs32x16 as i8, Bs32x8 as i8, Bs16x32 as i8],
+               [Bs16x64 as i8, Bs8x64 as i8, Bs4x64 as i8, Bs16x32 as i8]],
+        ctx: [3, 4],
+    };
+    t[Bs32x32 as usize] = PartitionConstants {
+        part: [[Bs32x16 as i8, Bs32x8 as i8, Bs32x4 as i8, Bs16x16 as i8],
+               [Bs16x32 as i8, Bs8x32 as i8, Bs4x32 as i8, Bs16x16 as i8]],
+        ctx: [2, 3],
+    };
+    t[Bs32x16 as usize] = PartitionConstants {
+        part: [[Bs32x8 as i8, Bs32x4 as i8, I, Bs16x8 as i8],
+               [Bs16x16 as i8, Bs8x16 as i8, Bs4x16 as i8, Bs16x8 as i8]],
+        ctx: [2, 2],
+    };
+    t[Bs32x8 as usize] = PartitionConstants {
+        part: [[Bs32x4 as i8, I, I, I],
+               [Bs16x8 as i8, Bs8x8 as i8, Bs4x8 as i8, Bs16x4 as i8]],
+        ctx: [13, 14],
+    };
+    t[Bs32x4 as usize] = PartitionConstants {
+        part: [[I, I, I, I], [I, I, I, I]],
+        ctx: [0, I],
+    };
+    t[Bs16x64 as usize] = PartitionConstants {
+        part: [[Bs16x32 as i8, Bs16x16 as i8, Bs16x8 as i8, Bs8x32 as i8],
+               [Bs8x64 as i8, Bs4x64 as i8, I, Bs8x32 as i8]],
+        ctx: [14, 13],
+    };
+    t[Bs16x32 as usize] = PartitionConstants {
+        part: [[Bs16x16 as i8, Bs16x8 as i8, Bs16x4 as i8, Bs8x16 as i8],
+               [Bs8x32 as i8, Bs4x32 as i8, I, Bs8x16 as i8]],
+        ctx: [2, 1],
+    };
+    t[Bs16x16 as usize] = PartitionConstants {
+        part: [[Bs16x8 as i8, Bs16x4 as i8, I, Bs8x8 as i8],
+               [Bs8x16 as i8, Bs4x16 as i8, I, Bs8x8 as i8]],
+        ctx: [1, 0],
+    };
+    t[Bs16x8 as usize] = PartitionConstants {
+        part: [[Bs16x4 as i8, I, I, I],
+               [Bs8x8 as i8, Bs4x8 as i8, I, Bs8x4 as i8]],
+        ctx: [1, 2],
+    };
+    t[Bs16x4 as usize] = PartitionConstants {
+        part: [[I, I, I, I],
+               [Bs8x4 as i8, I, I, I]],
+        ctx: [11, I],
+    };
+    t[Bs8x64 as usize] = PartitionConstants {
+        part: [[I, I, I, I], [I, I, I, I]],
+        ctx: [0, 0],
+    };
+    t[Bs8x32 as usize] = PartitionConstants {
+        part: [[Bs8x16 as i8, Bs8x8 as i8, Bs8x4 as i8, Bs4x16 as i8],
+               [Bs4x32 as i8, I, I, I]],
+        ctx: [12, 13],
+    };
+    t[Bs8x16 as usize] = PartitionConstants {
+        part: [[Bs8x8 as i8, Bs8x4 as i8, I, Bs4x8 as i8],
+               [Bs4x16 as i8, I, I, I]],
+        ctx: [1, 1],
+    };
+    t[Bs8x8 as usize] = PartitionConstants {
+        part: [[Bs8x4 as i8, I, I, I],
+               [Bs4x8 as i8, I, I, I]],
+        ctx: [0, 0],
+    };
+    t[Bs8x4 as usize] = PartitionConstants {
+        part: [[I, I, I, I],
+               [Bs4x4 as i8, I, I, I]],
+        ctx: [0, I],
+    };
+    t[Bs4x64 as usize] = PartitionConstants {
+        part: [[I, I, I, I], [I, I, I, I]],
+        ctx: [0, I],
+    };
+    t[Bs4x32 as usize] = PartitionConstants {
+        part: [[I, I, I, I], [I, I, I, I]],
+        ctx: [0, I],
+    };
+    t[Bs4x16 as usize] = PartitionConstants {
+        part: [[Bs4x8 as i8, I, I, I],
+               [I, I, I, I]],
+        ctx: [10, I],
+    };
+    t[Bs4x8 as usize] = PartitionConstants {
+        part: [[Bs4x4 as i8, I, I, I],
+               [I, I, I, I]],
+        ctx: [0, I],
+    };
+    t[Bs4x4 as usize] = PartitionConstants {
+        part: [[I, I, I, I], [I, I, I, I]],
+        ctx: [I, I],
+    };
+    t
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +608,20 @@ mod tests {
         let mut dst = 0;
         mc_lowest_px(&mut dst, 4, 4, 0, 0, &smp);
         assert_eq!(dst, 32); // (4+4)*4 + 0 + 0
+    }
+
+    #[test]
+    fn test_partition_subb() {
+        let p = &PARTITION_SUBB[BlockSize::Bs64x64 as usize];
+        assert_eq!(p.part[0][0], BlockSize::Bs64x32 as i8);
+        assert_eq!(p.part[0][3], BlockSize::Bs32x32 as i8);
+        assert_eq!(p.part[1][0], BlockSize::Bs32x64 as i8);
+        assert_eq!(p.ctx[0], 3);
+        assert_eq!(p.ctx[1], 6);
+
+        let p = &PARTITION_SUBB[BlockSize::Bs4x4 as usize];
+        assert_eq!(p.ctx[0], -1);
+        assert_eq!(p.ctx[1], -1);
     }
 
     #[test]
