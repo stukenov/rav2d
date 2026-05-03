@@ -1,4 +1,103 @@
-use crate::levels::{Mv, RefPair};
+use crate::intops::{apply_sign, iclip, imax, ulog2};
+use crate::levels::{Mv, MvXY, RefPair};
+
+pub const INVALID_TRAJ: u16 = 0x8080;
+
+static DIV_MULT: [u16; 32] = [
+       0, 16384, 8192, 5461, 4096, 3276, 2730, 2340,
+    2048,  1820, 1638, 1489, 1365, 1260, 1170, 1092,
+    1024,   963,  910,  862,  819,  780,  744,  712,
+     682,   655,  630,  606,  585,  564,  546,  528,
+];
+
+pub fn mv_projection(mv: Mv, num: i32, den: i32, min: i32, max: i32) -> Mv {
+    debug_assert!(den > 0 && den < 32);
+    debug_assert!(num > -32 && num < 32);
+    let (y, x) = unsafe { (mv.c.y, mv.c.x) };
+    let frac = num as i64 * DIV_MULT[den as usize] as i64;
+    let py = y as i64 * frac;
+    let px = x as i64 * frac;
+    Mv {
+        c: MvXY {
+            y: iclip(((py + 8192 + (py >> 63)) >> 14) as i32, min, max),
+            x: iclip(((px + 8192 + (px >> 63)) >> 14) as i32, min, max),
+        },
+    }
+}
+
+pub fn scale_mv(mv: Mv, sf: i32) -> Mv {
+    let (y_in, x_in) = unsafe { (mv.c.y, mv.c.x) };
+    let y = y_in as i64 * sf as i64;
+    let x = x_in as i64 * sf as i64;
+    Mv {
+        c: MvXY {
+            y: iclip(
+                ((y + 0x2000 - (y < 0) as i64) >> 14) as i32,
+                -0xffff,
+                0xffff,
+            ),
+            x: iclip(
+                ((x + 0x2000 - (x < 0) as i64) >> 14) as i32,
+                -0xffff,
+                0xffff,
+            ),
+        },
+    }
+}
+
+pub fn quantize_mv_comp(absv: u32) -> u32 {
+    debug_assert!(absv < 2048);
+    if absv == 0 {
+        return 0;
+    }
+    let nbits = iclip(ulog2(absv) - 4, 0, 6) as u32;
+    let has_bits = (nbits != 0) as u32;
+    let res = (absv - (16 * has_bits << nbits)) >> nbits;
+    res + (nbits + has_bits) * 16
+}
+
+pub fn quantize_mv(mv: Mv) -> QMv {
+    let (y, x) = unsafe { (mv.c.y, mv.c.x) };
+    let absy = y.unsigned_abs();
+    let absx = x.unsigned_abs();
+    if imax(absx as i32, absy as i32) >= 2048 {
+        return QMv { n: INVALID_TRAJ };
+    }
+    QMv {
+        c: [
+            apply_sign(quantize_mv_comp(absy) as i32, y) as i8,
+            apply_sign(quantize_mv_comp(absx) as i32, x) as i8,
+        ],
+    }
+}
+
+pub fn dequantize_mv_comp(v: i32) -> i32 {
+    let absv = v.unsigned_abs();
+    debug_assert!(absv < 0x80);
+    let nbits = (absv >> 4).wrapping_sub(if absv >= 16 { 1 } else { 0 });
+    let has_bits = (nbits != 0) as u32;
+    let mut res = (absv - (nbits + has_bits) * 16) << nbits;
+    res += 16 * has_bits << nbits;
+    if v < 0 { -(res as i32) } else { res as i32 }
+}
+
+pub fn dequantize_mv(mv: QMv) -> Mv {
+    if unsafe { mv.n } == INVALID_TRAJ {
+        return Mv {
+            c: MvXY {
+                y: crate::levels::INVALID_MV,
+                x: 0,
+            },
+        };
+    }
+    let c = unsafe { mv.c };
+    Mv {
+        c: MvXY {
+            y: dequantize_mv_comp(c[0] as i32),
+            x: dequantize_mv_comp(c[1] as i32),
+        },
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 #[repr(C, align(2))]
@@ -184,5 +283,89 @@ mod tests {
     #[test]
     fn test_traj_map_size() {
         assert_eq!(std::mem::size_of::<TrajMap>(), 2);
+    }
+
+    #[test]
+    fn test_mv_projection_identity() {
+        let mv = Mv { c: MvXY { y: 100, x: 200 } };
+        let p = mv_projection(mv, 1, 1, -0xffff, 0xffff);
+        let (y, x) = unsafe { (p.c.y, p.c.x) };
+        assert_eq!(y, 100);
+        assert_eq!(x, 200);
+    }
+
+    #[test]
+    fn test_mv_projection_scale() {
+        let mv = Mv { c: MvXY { y: 64, x: -32 } };
+        let p = mv_projection(mv, 2, 1, -0xffff, 0xffff);
+        let (y, x) = unsafe { (p.c.y, p.c.x) };
+        assert_eq!(y, 128);
+        assert_eq!(x, -64);
+    }
+
+    #[test]
+    fn test_mv_projection_clamp() {
+        let mv = Mv { c: MvXY { y: 10000, x: 10000 } };
+        let p = mv_projection(mv, 16, 1, -1000, 1000);
+        let (y, x) = unsafe { (p.c.y, p.c.x) };
+        assert_eq!(y, 1000);
+        assert_eq!(x, 1000);
+    }
+
+    #[test]
+    fn test_scale_mv_identity() {
+        let mv = Mv { c: MvXY { y: 100, x: -50 } };
+        let s = scale_mv(mv, 1 << 14);
+        let (y, x) = unsafe { (s.c.y, s.c.x) };
+        assert_eq!(y, 100);
+        assert_eq!(x, -50);
+    }
+
+    #[test]
+    fn test_quantize_mv_comp_zero() {
+        assert_eq!(quantize_mv_comp(0), 0);
+    }
+
+    #[test]
+    fn test_quantize_mv_comp_small() {
+        assert_eq!(quantize_mv_comp(1), 1);
+        assert_eq!(quantize_mv_comp(15), 15);
+        assert_eq!(quantize_mv_comp(16), 16);
+        assert_eq!(quantize_mv_comp(31), 31);
+        assert_eq!(quantize_mv_comp(32), 32);
+    }
+
+    #[test]
+    fn test_quantize_dequantize_roundtrip() {
+        for v in [0, 1, 5, 15, 16, 32, 64, 128, 256, 512, 1024] {
+            let q = quantize_mv_comp(v);
+            let d = dequantize_mv_comp(q as i32) as u32;
+            assert!(
+                d <= v && v - d < (1 << ((v as f64).log2() as u32).saturating_sub(3)),
+                "v={v} q={q} d={d}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quantize_mv_large_returns_invalid() {
+        let mv = Mv { c: MvXY { y: 3000, x: 0 } };
+        let q = quantize_mv(mv);
+        assert_eq!(unsafe { q.n }, INVALID_TRAJ);
+    }
+
+    #[test]
+    fn test_dequantize_mv_invalid() {
+        let q = QMv { n: INVALID_TRAJ };
+        let mv = dequantize_mv(q);
+        assert_eq!(unsafe { mv.c.y }, crate::levels::INVALID_MV);
+    }
+
+    #[test]
+    fn test_dequantize_mv_comp_basic() {
+        assert_eq!(dequantize_mv_comp(0), 0);
+        assert_eq!(dequantize_mv_comp(1), 1);
+        assert_eq!(dequantize_mv_comp(-1), -1);
+        assert_eq!(dequantize_mv_comp(15), 15);
     }
 }
