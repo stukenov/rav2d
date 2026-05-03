@@ -241,6 +241,24 @@ impl<'a> MsacContext<'a> {
         let v = self.decode_bools_bypass((l - 1) as u32);
         if v < m { v } else { (v << 1) - m + self.decode_bool_bypass() }
     }
+
+    pub fn check_trailing_bits(&self) -> bool {
+        let n_bits = -(self.cnt + 14);
+        debug_assert!(n_bits <= 0);
+        let n_bytes = (n_bits + 7) >> 3;
+        let p = (self.buf_pos as i32 + n_bytes) as usize;
+        let pattern: i32 = 128 >> ((n_bits - 1) & 7);
+        let mask = (2 * pattern - 1) as u8;
+        if (self.buf[p - 1] & mask) != pattern as u8 {
+            return true;
+        }
+        for i in p..self.buf.len() {
+            if self.buf[i] != 0 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +283,14 @@ mod tests {
     fn test_msac_min_prob_table_size() {
         assert_eq!(MSAC_MIN_PROB.len(), 7);
         assert_eq!(MSAC_MIN_PROB[0].len(), 8);
+    }
+
+    #[test]
+    fn test_check_trailing_bits_valid() {
+        let mut data = vec![0x00; 16];
+        data[10] = 0x80;
+        let s = MsacContext::new(&data, true);
+        let _result = s.check_trailing_bits();
     }
 
     #[test]
