@@ -4,7 +4,7 @@ use crate::env::BlockContext;
 use crate::headers::{FrameHeader, MAX_SEGMENTS};
 use crate::internal::ScalableMotionParams;
 use crate::intops::{apply_sign64, imax, imin, inv_recenter};
-use crate::levels::{BlockSize, Mv, MvXY, N_BS_SIZES};
+use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES};
 use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
 
@@ -662,6 +662,73 @@ pub fn read_mv_residual(
     }
 }
 
+pub fn read_tx_part(
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    b: &mut crate::levels::Av2Block,
+    bs: BlockSize,
+    lossless: bool,
+    txfm_switchable: bool,
+) {
+    use crate::tables::BLOCK_DIMENSIONS;
+
+    let bs_idx = bs as usize;
+    let b_dim = &BLOCK_DIMENSIONS[bs_idx];
+    let bw4 = b_dim[0] as i32;
+    let bh4 = b_dim[1] as i32;
+
+    b.tx_part = TxPartition::None as u8;
+    if lossless {
+        b.tx_size_ll = 0;
+        if bs != BlockSize::Bs4x4
+            && (if b.is_intra != 0 && b.intrabc == 0 {
+                b.fsc != 0
+            } else {
+                b.skip_txfm == 0
+            })
+        {
+            let szctx = SIZE_GROUP[bs_idx] as usize;
+            let inter = (b.is_intra == 0 || b.intrabc != 0) as usize;
+            b.tx_size_ll =
+                msac.decode_bool_adapt(cdf_m.txsz_lossless(szctx, inter)) as u8;
+        }
+    } else if b.skip_txfm == 0 {
+        if txfm_switchable && bs != BlockSize::Bs4x4 && imax(bw4, bh4) <= 16 {
+            let inter = (b.is_intra == 0 || b.intrabc != 0) as usize;
+            let szctx = TX_PART_GROUP[bs_idx] as usize;
+            let is_split = msac.decode_bool_adapt(
+                cdf_m.tx_split(b.fsc as usize, inter, szctx),
+            );
+            if is_split != 0 {
+                if imin(bw4, bh4) >= 2 {
+                    let ctx = TX_TYPE_GROUP_VH[bs_idx] as usize;
+                    b.tx_part = 1
+                        + msac.decode_symbol_adapt(
+                            cdf_m.tx_part_2d(b.fsc as usize, inter, ctx),
+                            6,
+                        ) as u8;
+                } else if imax(bw4, bh4) >= 4 {
+                    let ctx = (bw4 >= 4) as usize;
+                    let tx_part_4way = msac.decode_bool_adapt(
+                        cdf_m.tx_part_1d(b.fsc as usize, inter, ctx),
+                    );
+                    b.tx_part =
+                        TxPartition::H as u8 + ctx as u8 + tx_part_4way as u8 * 2;
+                } else {
+                    debug_assert!(
+                        bs == BlockSize::Bs4x8 || bs == BlockSize::Bs8x4
+                    );
+                    b.tx_part = if bs == BlockSize::Bs4x8 {
+                        TxPartition::H as u8
+                    } else {
+                        TxPartition::V as u8
+                    };
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,5 +1076,79 @@ mod tests {
         let mut dst = 1000;
         affine_lowest_px(&mut dst, &b_dim, 0, 0, &mat, 0, 0);
         assert!(dst >= 1000);
+    }
+
+    fn make_default_cdf_mode() -> CdfModeContext {
+        CdfModeContext { data: [16384u16; 3496] }
+    }
+
+    fn make_default_block() -> crate::levels::Av2Block {
+        crate::levels::Av2Block::default()
+    }
+
+    #[test]
+    fn test_read_tx_part_4x4_noop() {
+        let data = vec![0x80; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = make_default_cdf_mode();
+        let mut b = make_default_block();
+        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs4x4, false, true);
+        assert_eq!(b.tx_part, TxPartition::None as u8);
+    }
+
+    #[test]
+    fn test_read_tx_part_lossless_4x4() {
+        let data = vec![0x80; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = make_default_cdf_mode();
+        let mut b = make_default_block();
+        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs4x4, true, false);
+        assert_eq!(b.tx_size_ll, 0);
+        assert_eq!(b.tx_part, TxPartition::None as u8);
+    }
+
+    #[test]
+    fn test_read_tx_part_lossless_intra_fsc() {
+        let data = vec![0x80; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = make_default_cdf_mode();
+        let mut b = make_default_block();
+        b.is_intra = 1;
+        b.fsc = 1;
+        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs8x8, true, false);
+        assert!(b.tx_size_ll <= 1);
+    }
+
+    #[test]
+    fn test_read_tx_part_switchable_skip() {
+        let data = vec![0x80; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = make_default_cdf_mode();
+        let mut b = make_default_block();
+        b.skip_txfm = 1;
+        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs16x16, false, true);
+        assert_eq!(b.tx_part, TxPartition::None as u8);
+    }
+
+    #[test]
+    fn test_read_tx_part_switchable_8x8() {
+        let data = vec![0x80; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = make_default_cdf_mode();
+        let mut b = make_default_block();
+        b.skip_txfm = 0;
+        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs8x8, false, true);
+        assert!(b.tx_part <= TxPartition::V5 as u8);
+    }
+
+    #[test]
+    fn test_read_tx_part_switchable_8x4() {
+        let data = vec![0xFF; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = make_default_cdf_mode();
+        let mut b = make_default_block();
+        b.skip_txfm = 0;
+        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs8x4, false, true);
+        assert!(b.tx_part <= TxPartition::V5 as u8);
     }
 }
