@@ -2501,4 +2501,29 @@ mod tests {
     fn test_div_recip_count() {
         assert_eq!(DIV_RECIP.len(), 129);
     }
+
+    #[test]
+    fn test_tx_part_tbl_count() {
+        assert_eq!(TX_PART_TBL.len(), N_BS_SIZES);
+    }
+
+    #[test]
+    fn test_tx_part_tbl_4x4() {
+        assert_eq!(TX_PART_TBL[30][0], 0); // Bs4x4 -> TX_4X4
+        assert_eq!(TX_PART_TBL[30][1], -1);
+    }
+
+    #[test]
+    fn test_tx_part_tbl_64x64() {
+        assert_eq!(TX_PART_TBL[6][0], 4); // Bs64x64 -> TX_64X64
+        assert_eq!(TX_PART_TBL[6][1], 3); // TX_32X32
+    }
+
+    #[test]
+    fn test_tx_part_tbl_large_blocks() {
+        for i in 0..=5 {
+            assert_eq!(TX_PART_TBL[i][0], 4); // TX_64X64
+            assert_eq!(TX_PART_TBL[i][1], -1);
+        }
+    }
 }
