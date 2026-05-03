@@ -1,0 +1,13 @@
+[package]
+name = "rav2d-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI tool for rav2d AV2 decoder"
+
+[[bin]]
+name = "rav2d"
+path = "src/main.rs"
+
+[dependencies]
+rav2d = { workspace = true }

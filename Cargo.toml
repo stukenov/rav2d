@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rav2d",
+    "crates/rav2d-sys",
+    "crates/rav2d-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+repository = "https://github.com/nicenemo/rav2d"
+description = "AV2 video decoder in Rust, based on dav2d"
+rust-version = "1.85"
+
+[workspace.dependencies]
+rav2d = { path = "crates/rav2d" }
+rav2d-sys = { path = "crates/rav2d-sys" }

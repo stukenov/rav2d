@@ -1,0 +1,8 @@
+/target
+Cargo.lock
+*.swp
+*.swo
+*~
+.DS_Store
+/dav2d-install
+/dav2d/build
