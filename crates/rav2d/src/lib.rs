@@ -1,5 +1,6 @@
 pub mod cdf;
 pub mod ctx;
+pub mod decode;
 pub mod dip_tables;
 pub mod dsp;
 pub mod env;
