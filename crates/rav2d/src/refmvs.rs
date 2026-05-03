@@ -1,4 +1,4 @@
-use crate::intops::{apply_sign, iclip, imax, ulog2};
+use crate::intops::{apply_sign, iclip, iclip64to32, imax, imin, ulog2};
 use crate::levels::{Mv, MvXY, RefPair};
 
 pub const INVALID_TRAJ: u16 = 0x8080;
@@ -317,6 +317,16 @@ pub struct WarpBank {
     pub idx: [u8; 7],
 }
 
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Candidate {
+    pub mv: [Mv; 2],
+    pub weight: u16,
+    pub cwp_idx: i8,
+    pub y_off: i8,
+    pub x_off: i8,
+}
+
 pub struct Tile {
     pub rp_proj: Vec<SnglMvBlock>,
     pub ra: Vec<Block>,
@@ -326,6 +336,166 @@ pub struct Tile {
     pub tile_row: TileRange,
     pub bank: MvBank,
     pub warp: WarpBank,
+}
+
+pub fn model_from_corners(
+    mat: &mut [i32; 7],
+    topleft_mv: Mv,
+    topright_mv: Mv,
+    bottomleft_mv: Mv,
+    xpos: i32,
+    ypos: i32,
+    b_dim: &[u8],
+) -> bool {
+    let (tl_x, tl_y) = unsafe { (topleft_mv.c.x as i32, topleft_mv.c.y as i32) };
+    let (tr_x, tr_y) = unsafe { (topright_mv.c.x as i32, topright_mv.c.y as i32) };
+    let (bl_x, bl_y) = unsafe { (bottomleft_mv.c.x as i32, bottomleft_mv.c.y as i32) };
+
+    if unsafe { topright_mv.n == topleft_mv.n && bottomleft_mv.n == topleft_mv.n } {
+        return false;
+    }
+    if imin(imin(tl_x, bl_x), tr_x + b_dim[0] as i32 * 32) < -xpos * 8 {
+        return false;
+    }
+    if imin(imin(tl_y, tr_y), bl_y + b_dim[1] as i32 * 32) < -ypos * 8 {
+        return false;
+    }
+
+    mat[2] = iclip64to32(
+        ((tr_x - tl_x) as i64 * (1i64 << 11)) >> b_dim[2],
+        i32::MIN, i32::MAX,
+    );
+    mat[4] = iclip64to32(
+        ((tr_y - tl_y) as i64 * (1i64 << 11)) >> b_dim[2],
+        i32::MIN, i32::MAX,
+    );
+    mat[3] = iclip64to32(
+        ((bl_x - tl_x) as i64 * (1i64 << 11)) >> b_dim[3],
+        i32::MIN, i32::MAX,
+    );
+    mat[5] = iclip64to32(
+        ((bl_y - tl_y) as i64 * (1i64 << 11)) >> b_dim[3],
+        i32::MIN, i32::MAX,
+    );
+    mat[0] = iclip64to32(
+        tl_x as i64 * (1i64 << 13) - xpos as i64 * mat[2] as i64 - ypos as i64 * mat[3] as i64,
+        -0x8000000, 0x7ffffc0,
+    );
+    mat[1] = iclip64to32(
+        tl_y as i64 * (1i64 << 13) - xpos as i64 * mat[4] as i64 - ypos as i64 * mat[5] as i64,
+        -0x8000000, 0x7ffffc0,
+    );
+
+    for i in [2, 3, 4, 5] {
+        mat[i] = iclip(mat[i], -0x7fc0, 0x7fc0);
+        mat[i] += 0x20 - (mat[i] < 0) as i32;
+        mat[i] &= !0x3f;
+    }
+    mat[2] += 0x10000;
+    mat[5] += 0x10000;
+    mat[6] = 3; // DAV2D_WM_TYPE_AFFINE
+
+    true
+}
+
+pub fn add_candidate_sngl(
+    mvstack: &mut [Candidate],
+    cnt: &mut i32,
+    max_cnt: i32,
+    weight: u16,
+    cand_mv: Mv,
+    y_off: i8,
+    x_off: i8,
+    iter_cntr: &mut i32,
+    max_iter: i32,
+) -> bool {
+    let last = *cnt as usize;
+    if *iter_cntr < max_iter {
+        for m in 0..last {
+            if unsafe { mvstack[m].mv[0].n == cand_mv.n } {
+                *iter_cntr += m as i32 + 1;
+                mvstack[m].weight += weight;
+                return false;
+            }
+        }
+        *iter_cntr += last as i32;
+    }
+
+    if *cnt >= max_cnt {
+        return false;
+    }
+
+    mvstack[last].mv[0] = cand_mv;
+    mvstack[last].weight = weight;
+    mvstack[last].y_off = y_off;
+    mvstack[last].x_off = x_off;
+    *cnt = last as i32 + 1;
+    true
+}
+
+pub fn add_candidate_c2s(
+    mvstack: &mut [SnglMvBlock],
+    cnt: &mut i32,
+    max_cnt: i32,
+    r#ref: u8,
+    cand_mv: Mv,
+    iter_cntr: &mut i32,
+    max_iter: i32,
+) {
+    let last = *cnt as usize;
+    if *iter_cntr < max_iter {
+        for m in 0..last {
+            if unsafe { mvstack[m].mv.n == cand_mv.n } && mvstack[m].r#ref == r#ref {
+                *iter_cntr += m as i32 + 1;
+                return;
+            }
+        }
+        *iter_cntr += last as i32;
+    }
+
+    if *cnt >= max_cnt {
+        return;
+    }
+
+    mvstack[last].mv = cand_mv;
+    mvstack[last].r#ref = r#ref;
+    *cnt = last as i32 + 1;
+}
+
+pub fn add_candidate_comp(
+    mvstack: &mut [Candidate],
+    cnt: &mut i32,
+    max_cnt: i32,
+    weight: u16,
+    cwp_idx: i8,
+    cand_mv: &[Mv; 2],
+    iter_cntr: &mut i32,
+    max_iter: i32,
+) -> bool {
+    let last = *cnt as usize;
+    if *iter_cntr < max_iter {
+        for n in 0..last {
+            if unsafe {
+                mvstack[n].mv[0].n == cand_mv[0].n && mvstack[n].mv[1].n == cand_mv[1].n
+            } {
+                *iter_cntr += n as i32 + 1;
+                mvstack[n].weight += weight;
+                return false;
+            }
+        }
+        *iter_cntr += last as i32;
+    }
+
+    if *cnt >= max_cnt {
+        return false;
+    }
+
+    mvstack[last].mv[0] = cand_mv[0];
+    mvstack[last].mv[1] = cand_mv[1];
+    mvstack[last].weight = weight;
+    mvstack[last].cwp_idx = cwp_idx;
+    *cnt = last as i32 + 1;
+    true
 }
 
 #[cfg(test)]
@@ -483,6 +653,129 @@ mod tests {
         assert_eq!(cnt, 1);
         assert_eq!(order[0], 3);
         assert_eq!(rev_order[3], 0);
+    }
+
+    #[test]
+    fn test_model_from_corners_all_same() {
+        let mv = Mv { c: MvXY { y: 10, x: 20 } };
+        let mut mat = [0i32; 7];
+        let b_dim = [8u8, 8, 6, 6];
+        assert!(!model_from_corners(&mut mat, mv, mv, mv, 0, 0, &b_dim));
+    }
+
+    #[test]
+    fn test_model_from_corners_different() {
+        let tl = Mv { c: MvXY { y: 0, x: 0 } };
+        let tr = Mv { c: MvXY { y: 0, x: 100 } };
+        let bl = Mv { c: MvXY { y: 100, x: 0 } };
+        let mut mat = [0i32; 7];
+        let b_dim = [8u8, 8, 6, 6];
+        assert!(model_from_corners(&mut mat, tl, tr, bl, 100, 100, &b_dim));
+        assert_eq!(mat[6], 3); // WM_TYPE_AFFINE
+        assert!(mat[2] != 0 || mat[5] != 0);
+    }
+
+    #[test]
+    fn test_add_candidate_sngl_basic() {
+        let mut stack = [Candidate::default(); 8];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mv = Mv { c: MvXY { y: 10, x: 20 } };
+        let added = add_candidate_sngl(&mut stack, &mut cnt, 6, 2, mv, 0, 0, &mut iter, 16);
+        assert!(added);
+        assert_eq!(cnt, 1);
+        assert_eq!(stack[0].weight, 2);
+    }
+
+    #[test]
+    fn test_add_candidate_sngl_duplicate() {
+        let mut stack = [Candidate::default(); 8];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mv = Mv { c: MvXY { y: 10, x: 20 } };
+        add_candidate_sngl(&mut stack, &mut cnt, 6, 2, mv, 0, 0, &mut iter, 16);
+        let added = add_candidate_sngl(&mut stack, &mut cnt, 6, 3, mv, 0, 0, &mut iter, 16);
+        assert!(!added);
+        assert_eq!(cnt, 1);
+        assert_eq!(stack[0].weight, 5);
+    }
+
+    #[test]
+    fn test_add_candidate_sngl_full() {
+        let mut stack = [Candidate::default(); 2];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mv1 = Mv { c: MvXY { y: 10, x: 20 } };
+        let mv2 = Mv { c: MvXY { y: 30, x: 40 } };
+        let mv3 = Mv { c: MvXY { y: 50, x: 60 } };
+        add_candidate_sngl(&mut stack, &mut cnt, 2, 1, mv1, 0, 0, &mut iter, 16);
+        add_candidate_sngl(&mut stack, &mut cnt, 2, 1, mv2, 0, 0, &mut iter, 16);
+        let added = add_candidate_sngl(&mut stack, &mut cnt, 2, 1, mv3, 0, 0, &mut iter, 16);
+        assert!(!added);
+        assert_eq!(cnt, 2);
+    }
+
+    #[test]
+    fn test_add_candidate_c2s_basic() {
+        let mut stack = [SnglMvBlock::default(); 4];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mv = Mv { c: MvXY { y: 5, x: 10 } };
+        add_candidate_c2s(&mut stack, &mut cnt, 4, 1, mv, &mut iter, 16);
+        assert_eq!(cnt, 1);
+        assert_eq!(stack[0].r#ref, 1);
+    }
+
+    #[test]
+    fn test_add_candidate_c2s_dup_same_ref() {
+        let mut stack = [SnglMvBlock::default(); 4];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mv = Mv { c: MvXY { y: 5, x: 10 } };
+        add_candidate_c2s(&mut stack, &mut cnt, 4, 1, mv, &mut iter, 16);
+        add_candidate_c2s(&mut stack, &mut cnt, 4, 1, mv, &mut iter, 16);
+        assert_eq!(cnt, 1);
+    }
+
+    #[test]
+    fn test_add_candidate_c2s_same_mv_diff_ref() {
+        let mut stack = [SnglMvBlock::default(); 4];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mv = Mv { c: MvXY { y: 5, x: 10 } };
+        add_candidate_c2s(&mut stack, &mut cnt, 4, 1, mv, &mut iter, 16);
+        add_candidate_c2s(&mut stack, &mut cnt, 4, 2, mv, &mut iter, 16);
+        assert_eq!(cnt, 2);
+    }
+
+    #[test]
+    fn test_add_candidate_comp_basic() {
+        let mut stack = [Candidate::default(); 8];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mvs = [
+            Mv { c: MvXY { y: 10, x: 20 } },
+            Mv { c: MvXY { y: 30, x: 40 } },
+        ];
+        let added = add_candidate_comp(&mut stack, &mut cnt, 6, 1, 0, &mvs, &mut iter, 16);
+        assert!(added);
+        assert_eq!(cnt, 1);
+    }
+
+    #[test]
+    fn test_add_candidate_comp_duplicate() {
+        let mut stack = [Candidate::default(); 8];
+        let mut cnt = 0i32;
+        let mut iter = 0i32;
+        let mvs = [
+            Mv { c: MvXY { y: 10, x: 20 } },
+            Mv { c: MvXY { y: 30, x: 40 } },
+        ];
+        add_candidate_comp(&mut stack, &mut cnt, 6, 2, 0, &mvs, &mut iter, 16);
+        let added = add_candidate_comp(&mut stack, &mut cnt, 6, 3, 0, &mvs, &mut iter, 16);
+        assert!(!added);
+        assert_eq!(cnt, 1);
+        assert_eq!(stack[0].weight, 5);
     }
 
     #[test]
