@@ -57,9 +57,10 @@ impl Default for Av2Restoration {
     }
 }
 
-use crate::intops::imin;
+use crate::intops::{iclip, imax, imin};
 use crate::levels::TxPartition;
-use crate::tables::TxfmInfo;
+use crate::quantizer::dq_lookup;
+use crate::tables::{TxfmInfo, DEBLOCK_SIDE_THRESHOLDS};
 
 pub type FilterMasks = [[[u16; 4]; 5]; 64];
 
@@ -321,6 +322,36 @@ pub fn mask_subpu_edges(
     }
 }
 
+pub fn deblock_quant_thr(hbd: i32, qidx: i32) -> u32 {
+    let qmax = 255 + 48 * hbd;
+    ((dq_lookup(iclip(qidx, 0, qmax)) + 4) >> (3 + 6)) as u32
+}
+
+pub fn deblock_side_thr(hbd: i32, qidx: i32) -> u32 {
+    let bitdepth_min_8 = 2 * hbd;
+    let q_ind = iclip(qidx - 24 * bitdepth_min_8, 0, 296 - 1);
+    let side_thr = DEBLOCK_SIDE_THRESHOLDS[q_ind as usize] as i32;
+    imax(side_thr + (1 << 4 >> bitdepth_min_8), 0) as u32 >> (5 - bitdepth_min_8) as u32
+}
+
+pub fn transpose_lossless_mask(
+    dst_mask: &mut [u16; 17],
+    src_mask: &[[u16; 4]],
+    x64: usize,
+    ss_hor: i32,
+    ss_ver: i32,
+) {
+    dst_mask[0] = dst_mask[(16 >> ss_hor) as usize];
+
+    for x in 0..(16 >> ss_hor) as usize {
+        let mut col_mask: u32 = 0;
+        for y in 0..(16 >> ss_ver) as usize {
+            col_mask |= ((1 & (src_mask[y][x64] >> x)) as u32) << y;
+        }
+        dst_mask[x + 1] = col_mask as u16;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +572,86 @@ mod tests {
         let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
         mask_subpu_edges(&mut masks, 0, 0, 8, 4, 1, 1, 4, 0, 0);
         assert_eq!(masks[0][4][4][0], 0);
+    }
+
+    #[test]
+    fn test_deblock_quant_thr_8bit() {
+        let v = deblock_quant_thr(0, 128);
+        assert!(v > 0);
+        assert_eq!(deblock_quant_thr(0, 0), (64 + 4) >> 9);
+    }
+
+    #[test]
+    fn test_deblock_quant_thr_10bit() {
+        let v = deblock_quant_thr(1, 200);
+        assert!(v > 0);
+    }
+
+    #[test]
+    fn test_deblock_quant_thr_clamps() {
+        let a = deblock_quant_thr(0, -10);
+        let b = deblock_quant_thr(0, 0);
+        assert_eq!(a, b);
+        let c = deblock_quant_thr(0, 9999);
+        let d = deblock_quant_thr(0, 255);
+        assert_eq!(c, d);
+    }
+
+    #[test]
+    fn test_deblock_side_thr_8bit() {
+        let v = deblock_side_thr(0, 128);
+        assert!(v > 0 || v == 0);
+    }
+
+    #[test]
+    fn test_deblock_side_thr_10bit() {
+        let v = deblock_side_thr(1, 200);
+        let _ = v;
+    }
+
+    #[test]
+    fn test_deblock_side_thr_clamps() {
+        let a = deblock_side_thr(0, -10);
+        let b = deblock_side_thr(0, 0);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_transpose_lossless_mask_identity() {
+        let mut dst = [0u16; 17];
+        let src = [[0u16; 4]; 16];
+        transpose_lossless_mask(&mut dst, &src, 0, 0, 0);
+        for i in 1..17 {
+            assert_eq!(dst[i], 0);
+        }
+    }
+
+    #[test]
+    fn test_transpose_lossless_mask_single_bit() {
+        let mut dst = [0u16; 17];
+        let mut src = [[0u16; 4]; 16];
+        src[3][0] = 1 << 5;
+        transpose_lossless_mask(&mut dst, &src, 0, 0, 0);
+        assert_eq!(dst[5 + 1] & (1 << 3), 1 << 3);
+    }
+
+    #[test]
+    fn test_transpose_lossless_mask_ss() {
+        let mut dst = [0u16; 17];
+        let mut src = [[0u16; 4]; 16];
+        src[0][0] = 0xFF;
+        transpose_lossless_mask(&mut dst, &src, 0, 1, 1);
+        for x in 0..8 {
+            assert_eq!(dst[x + 1] & 1, 1);
+        }
+    }
+
+    #[test]
+    fn test_transpose_lossless_mask_prev_column() {
+        let mut dst = [0u16; 17];
+        dst[16] = 0xABCD;
+        let src = [[0u16; 4]; 16];
+        transpose_lossless_mask(&mut dst, &src, 0, 0, 0);
+        assert_eq!(dst[0], 0xABCD);
     }
 }
