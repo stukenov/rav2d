@@ -16,6 +16,7 @@ pub mod levels;
 pub mod lf_mask;
 pub mod msac;
 pub mod obu;
+pub mod pal;
 pub mod pixel;
 pub mod quantizer;
 pub mod refmvs;
