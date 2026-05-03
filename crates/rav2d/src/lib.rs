@@ -2,6 +2,7 @@ pub mod cdf;
 pub mod ctx;
 pub mod decode;
 pub mod dip_tables;
+pub mod filmgrain;
 pub mod dsp;
 pub mod env;
 pub mod gdf_tables;

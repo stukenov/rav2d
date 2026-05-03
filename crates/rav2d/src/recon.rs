@@ -70,6 +70,29 @@ pub fn wide_angle_remap(
     mode
 }
 
+pub fn gen_mask(
+    mask: &mut [u8],
+    stride: usize,
+    bw: i32,
+    bh: i32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    fw: u32,
+    fh: u32,
+) {
+    let mut off = 0;
+    for y in 0..bh {
+        for x in 0..bw {
+            let p0 = ((x0 + x) as u32) < fw && ((y0 + y) as u32) < fh;
+            let p1 = ((x1 + x) as u32) < fw && ((y1 + y) as u32) < fh;
+            mask[off + x as usize] = (32 * (p0 as i32 - p1 as i32 + 1)) as u8;
+        }
+        off += stride;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +185,33 @@ mod tests {
         let mut angle = -30;
         let r = wide_angle_remap(&t_dim, IntraPredMode::HorPred, &mut angle, 0);
         let _ = r;
+    }
+
+    #[test]
+    fn test_gen_mask_both_inside() {
+        let mut mask = vec![0u8; 16];
+        gen_mask(&mut mask, 4, 4, 4, 0, 0, 0, 0, 100, 100);
+        assert!(mask.iter().all(|&v| v == 32));
+    }
+
+    #[test]
+    fn test_gen_mask_p0_only() {
+        let mut mask = vec![0u8; 4];
+        gen_mask(&mut mask, 4, 4, 1, 0, 0, -100, -100, 100, 100);
+        assert!(mask[..4].iter().all(|&v| v == 64));
+    }
+
+    #[test]
+    fn test_gen_mask_p1_only() {
+        let mut mask = vec![0u8; 4];
+        gen_mask(&mut mask, 4, 4, 1, -100, -100, 0, 0, 100, 100);
+        assert!(mask[..4].iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_gen_mask_neither() {
+        let mut mask = vec![0u8; 4];
+        gen_mask(&mut mask, 4, 4, 1, -100, -100, -100, -100, 100, 100);
+        assert!(mask[..4].iter().all(|&v| v == 32));
     }
 }
