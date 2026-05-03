@@ -1,7 +1,7 @@
-use crate::intops::{iclip, imin, ulog2};
+use crate::intops::{apply_sign, iclip, imin, ulog2};
 use crate::levels::IntraPredMode;
 use crate::msac::MsacContext;
-use crate::tables::{TxfmInfo, MODE_TO_ANGLE_MAP};
+use crate::tables::{DIV_RECIP, TxfmInfo, MODE_TO_ANGLE_MAP};
 
 pub fn adjust_strength(strength: i32, var: u32) -> i32 {
     if var == 0 {
@@ -91,6 +91,40 @@ pub fn gen_mask(
         }
         off += stride;
     }
+}
+
+pub fn derive_alpha(num: i32, den: i32, mut alpha: i32) -> i32 {
+    let max = (2 << 8) - 1;
+    if num != 0 && den != 0 {
+        let num_abs = num.abs();
+        let shift_n = ulog2(num_abs as u32);
+        debug_assert!(den >= 0);
+        let shift_d = ulog2(den as u32);
+        let e_d = den - (1 << shift_d);
+        let f_d = if shift_d > 7 {
+            (e_d + (1 << (shift_d - 8))) >> (shift_d - 7)
+        } else {
+            e_d << (7 - shift_d)
+        };
+        let f_n = if shift_n > 7 {
+            (num_abs + (1 << (shift_n - 8))) >> (shift_n - 7)
+        } else {
+            num_abs << (7 - shift_n)
+        };
+        let shift_add = shift_d - shift_n - 8;
+        if shift_add <= 1 {
+            let shift0 = 9 + 7 + shift_add;
+            let tmp_alpha = if shift0 < 0 {
+                max
+            } else {
+                imin((DIV_RECIP[f_d as usize] as i32 * f_n) >> shift0, max)
+            };
+            if tmp_alpha != 0 {
+                alpha = apply_sign(tmp_alpha, num);
+            }
+        }
+    }
+    alpha
 }
 
 #[cfg(test)]
@@ -213,5 +247,33 @@ mod tests {
         let mut mask = vec![0u8; 4];
         gen_mask(&mut mask, 4, 4, 1, -100, -100, -100, -100, 100, 100);
         assert!(mask[..4].iter().all(|&v| v == 32));
+    }
+
+    #[test]
+    fn test_derive_alpha_zero_num() {
+        assert_eq!(derive_alpha(0, 100, 5), 5);
+    }
+
+    #[test]
+    fn test_derive_alpha_zero_den() {
+        assert_eq!(derive_alpha(100, 0, 5), 5);
+    }
+
+    #[test]
+    fn test_derive_alpha_equal() {
+        let a = derive_alpha(256, 256, 0);
+        assert!(a > 0);
+    }
+
+    #[test]
+    fn test_derive_alpha_negative_num() {
+        let a = derive_alpha(-256, 256, 0);
+        assert!(a < 0);
+    }
+
+    #[test]
+    fn test_derive_alpha_bounded() {
+        let a = derive_alpha(1000, 1, 0);
+        assert!(a.abs() <= 511);
     }
 }

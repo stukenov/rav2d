@@ -310,6 +310,18 @@ pub fn cctx(u: &mut [i32], v: &mut [i32], angle: &[i16; 3], sz: usize, bitdepth:
     }
 }
 
+pub fn inv_wht_wht_4x4(coeff: &[i32; 16], tmp: &mut [i32; 16]) {
+    for y in 0..4 {
+        for x in 0..4 {
+            tmp[y * 4 + x] = coeff[y + x * 4] >> 3;
+        }
+        inv_wht4_1d(&mut tmp[y * 4..], 1);
+    }
+    for x in 0..4 {
+        inv_wht4_1d(&mut tmp[x..], 4);
+    }
+}
+
 // Tx1dType indices: Dct=0, Identity=1, Adst=2, FlipAdst=3, Ddt=4, FlipDdt=5
 // Table excludes Wht (index 6), hence N_TX_1D_TYPES - 1 = 6 columns
 pub static TX1D_FNS: [[Option<Itx1dFn>; N_TX_1D_TYPES - 1]; N_TX_SIZES] = {
@@ -416,6 +428,23 @@ mod tests {
         inv_adst4_1d(&mut c1, 1);
         let sum: i32 = c1.iter().sum();
         assert_ne!(sum, 0);
+    }
+
+    #[test]
+    fn test_inv_wht_wht_4x4_zero() {
+        let coeff = [0i32; 16];
+        let mut tmp = [0i32; 16];
+        inv_wht_wht_4x4(&coeff, &mut tmp);
+        assert!(tmp.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_inv_wht_wht_4x4_dc() {
+        let mut coeff = [0i32; 16];
+        coeff[0] = 1024;
+        let mut tmp = [0i32; 16];
+        inv_wht_wht_4x4(&coeff, &mut tmp);
+        assert!(tmp.iter().all(|&v| v == tmp[0]));
     }
 
     #[test]
