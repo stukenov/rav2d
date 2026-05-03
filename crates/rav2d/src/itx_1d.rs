@@ -1,3 +1,4 @@
+use crate::intops::iclip;
 use crate::levels::{N_TX_1D_TYPES, N_TX_SIZES};
 
 pub type Itx1dFn = fn(c: &mut [i32], stride: usize);
@@ -294,6 +295,21 @@ pub fn inv_wht4_1d(c: &mut [i32], stride: usize) {
     c[3 * stride] = t2 + t1;
 }
 
+pub fn cctx(u: &mut [i32], v: &mut [i32], angle: &[i16; 3], sz: usize, bitdepth: i32) {
+    debug_assert!(sz.is_power_of_two() && sz >= 16 && sz <= 1024);
+    let min = -(1 << (bitdepth + 7));
+    let max = (1 << (bitdepth + 7)) - 1;
+    let sina = angle[0] as i32;
+    let cosa = angle[1] as i32;
+    debug_assert!(angle[2] == -angle[0]);
+    for i in 0..sz {
+        let a = u[i] * cosa - v[i] * sina;
+        let b = u[i] * sina + v[i] * cosa;
+        u[i] = iclip((a + 128 - (a < 0) as i32) >> 8, min, max);
+        v[i] = iclip((b + 128 - (b < 0) as i32) >> 8, min, max);
+    }
+}
+
 // Tx1dType indices: Dct=0, Identity=1, Adst=2, FlipAdst=3, Ddt=4, FlipDdt=5
 // Table excludes Wht (index 6), hence N_TX_1D_TYPES - 1 = 6 columns
 pub static TX1D_FNS: [[Option<Itx1dFn>; N_TX_1D_TYPES - 1]; N_TX_SIZES] = {
@@ -400,5 +416,38 @@ mod tests {
         inv_adst4_1d(&mut c1, 1);
         let sum: i32 = c1.iter().sum();
         assert_ne!(sum, 0);
+    }
+
+    #[test]
+    fn test_cctx_identity() {
+        let mut u = [100i32; 16];
+        let mut v = [200i32; 16];
+        let angle: [i16; 3] = [0, 256, 0]; // cosa=256 (~1.0), sina=0
+        cctx(&mut u, &mut v, &angle, 16, 8);
+        assert_eq!(u[0], 100);
+        assert_eq!(v[0], 200);
+    }
+
+    #[test]
+    fn test_cctx_swap() {
+        let mut u = [256i32; 16];
+        let mut v = [0i32; 16];
+        let angle: [i16; 3] = [256, 0, -256]; // cosa=0, sina=256 (~1.0)
+        cctx(&mut u, &mut v, &angle, 16, 8);
+        assert!(v[0] > 0);
+    }
+
+    #[test]
+    fn test_cctx_clamp_8bpc() {
+        let mut u = [30000i32; 16];
+        let mut v = [30000i32; 16];
+        let angle: [i16; 3] = [200, 200, -200];
+        cctx(&mut u, &mut v, &angle, 16, 8);
+        let max = (1 << 15) - 1;
+        let min = -(1 << 15);
+        for i in 0..16 {
+            assert!(u[i] >= min && u[i] <= max);
+            assert!(v[i] >= min && v[i] <= max);
+        }
     }
 }
