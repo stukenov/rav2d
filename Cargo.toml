@@ -10,10 +10,10 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "BSD-2-Clause"
-repository = "https://github.com/nicenemo/rav2d"
+repository = "https://github.com/stukenov/rav2d"
 description = "AV2 video decoder in Rust, based on dav2d"
 rust-version = "1.85"
 
 [workspace.dependencies]
-rav2d = { path = "crates/rav2d" }
-rav2d-sys = { path = "crates/rav2d-sys" }
+rav2d = { path = "crates/rav2d", version = "0.1.0" }
+rav2d-sys = { path = "crates/rav2d-sys", version = "0.1.0" }

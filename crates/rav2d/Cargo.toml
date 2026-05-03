@@ -3,6 +3,7 @@ name = "rav2d"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "AV2 video decoder in Rust"
 
 [dependencies]

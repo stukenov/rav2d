@@ -3,6 +3,7 @@ name = "rav2d-sys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Raw FFI bindings to dav2d (AV2 decoder)"
 links = "dav2d"
 build = "build.rs"

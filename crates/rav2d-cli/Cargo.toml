@@ -3,6 +3,7 @@ name = "rav2d-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "CLI tool for rav2d AV2 decoder"
 
 [[bin]]
