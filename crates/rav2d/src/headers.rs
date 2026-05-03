@@ -433,3 +433,234 @@ pub struct FilmGrainData {
     pub mc_identity: bool,
     pub block_size: i32,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct FhTip {
+    pub frame_mode: u8,
+    pub hole_fill: u8,
+    pub global_wtd_idx: u8,
+    pub apply_filter: u8,
+    pub gmv_y: i8,
+    pub gmv_x: i8,
+    pub subpel_filter: u8,
+    pub r#ref: [i8; 2],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FhTiling {
+    pub t: TileInfo,
+    pub n_bytes: u8,
+    pub update: u16,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhQuantQm {
+    pub enabled: u8,
+    pub num: u8,
+    pub y: [u8; 4],
+    pub u: [u8; 4],
+    pub v: [u8; 4],
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhQuant {
+    pub yac: u16,
+    pub ydc_delta: i8,
+    pub udc_delta: i8,
+    pub uac_delta: i8,
+    pub vdc_delta: i8,
+    pub vac_delta: i8,
+    pub qm: FhQuantQm,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhSegmentation {
+    pub enabled: u8,
+    pub update_map: u8,
+    pub temporal: u8,
+    pub d: SegmentationDataSet,
+    pub preskip: u8,
+    pub last_active_segid: i8,
+    pub lossless: [u8; MAX_SEGMENTS],
+    pub qidx: [u8; MAX_SEGMENTS],
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhDeltaQ {
+    pub present: u8,
+    pub res_log2: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhDelta {
+    pub q: FhDeltaQ,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhDeblock {
+    pub sub_pu: u8,
+    pub level_y: [u8; 2],
+    pub level_u: u8,
+    pub level_v: u8,
+    pub delta_q_y: [i8; 2],
+    pub delta_q_u: i8,
+    pub delta_q_v: i8,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhGdf {
+    pub enabled: AdaptiveBoolean,
+    pub qp_idx: u8,
+    pub scale: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhCdef {
+    pub enabled: u8,
+    pub damping: u8,
+    pub n_strengths: u8,
+    pub on_skiptx: u8,
+    pub y_strength: [u8; MAX_CDEF_STRENGTHS],
+    pub uv_strength: [u8; MAX_CDEF_STRENGTHS],
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NSWienerPlane {
+    pub frame_filters_on: u8,
+    pub num_classes_idx: u8,
+    pub num_classes: u8,
+    pub temporal: u8,
+    pub refidx: u8,
+    pub filter: [[i8; 18]; 16],
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhRestorationPlane {
+    pub restoration_type: u8,
+    pub ns: NSWienerPlane,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhRestoration {
+    pub p: [FhRestorationPlane; 3],
+    pub unit_size: [u8; 2],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FhCcsoPlane {
+    pub enabled: u8,
+    pub reuse: u8,
+    pub sb_reuse: u8,
+    pub refidx: u8,
+    pub bo_only: u8,
+    pub scale_idx: u8,
+    pub quant_idx: u8,
+    pub ext_filter_support: u8,
+    pub edge_clf: u8,
+    pub max_band_log2: u8,
+    pub filter_off: [u8; 64],
+}
+
+impl Default for FhCcsoPlane {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            reuse: 0,
+            sb_reuse: 0,
+            refidx: 0,
+            bo_only: 0,
+            scale_idx: 0,
+            quant_idx: 0,
+            ext_filter_support: 0,
+            edge_clf: 0,
+            max_band_log2: 0,
+            filter_off: [0; 64],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhCcso {
+    pub enabled: u8,
+    pub p: [FhCcsoPlane; 3],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FhGmv {
+    pub r#ref: u8,
+    pub refref: u8,
+    pub m: [WarpedMotionParams; REFS_PER_FRAME],
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FhFilmGrain {
+    pub present: u8,
+    pub id: u8,
+    pub seed: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FrameHeader {
+    pub id: u8,
+    pub frame_type: FrameType,
+    pub width: i32,
+    pub height: i32,
+    pub frame_offset: u8,
+    pub tlayer_id: u8,
+    pub mlayer_id: u8,
+    pub xlayer_id: u8,
+    pub show_existing_frame: u8,
+    pub existing_frame_idx: i8,
+    pub ltr_id: i8,
+    pub frame_presentation_delay: u32,
+    pub show_immediate: u8,
+    pub show_implicit: u8,
+    pub cross_frame_context: u8,
+    pub disable_cdf_update: u8,
+    pub allow_screen_content_tools: u8,
+    pub force_integer_mv: u8,
+    pub frame_size_override: u8,
+    pub primary_ref_signaled: u8,
+    pub primary_ref_frame: u8,
+    pub secondary_ref_frame: u8,
+    pub n_ref_frames: u8,
+    pub refresh_frame_flags: u8,
+    pub allow_intrabc: u8,
+    pub allow_global_intrabc: u8,
+    pub allow_local_intrabc: u8,
+    pub max_bvp_drl_bits: u8,
+    pub max_drl_bits: u8,
+    pub refidx: [i8; REFS_PER_FRAME],
+    pub has_future_refs: u8,
+    pub has_past_refs: u8,
+    pub has_bothside_refs: u8,
+    pub mv_precision: u8,
+    pub subpel_filter_mode: FilterMode,
+    pub motion_modes: u8,
+    pub use_ref_frame_mvs: u8,
+    pub tmvp_sample_step: u8,
+    pub opfl_refine_type: u8,
+    pub tip: FhTip,
+    pub sb128: u8,
+    pub tiling: FhTiling,
+    pub quant: FhQuant,
+    pub segmentation: FhSegmentation,
+    pub delta: FhDelta,
+    pub all_lossless: u8,
+    pub any_lossless: u8,
+    pub tcq: u8,
+    pub parity_hiding: u8,
+    pub deblock: FhDeblock,
+    pub gdf: FhGdf,
+    pub cdef: FhCdef,
+    pub restoration: FhRestoration,
+    pub ccso: FhCcso,
+    pub txfm_mode: TxfmMode,
+    pub switchable_comp_refs: u8,
+    pub skip_mode_enabled: u8,
+    pub bawp: u8,
+    pub warp_motion: u8,
+    pub reduced_txtp_set: u8,
+    pub gmv: FhGmv,
+    pub film_grain: FhFilmGrain,
+}

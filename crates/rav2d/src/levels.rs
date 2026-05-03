@@ -290,3 +290,101 @@ impl std::fmt::Debug for RefPair {
         write!(f, "RefPair({}, {})", r[0], r[1])
     }
 }
+
+#[derive(Clone, Copy, Default, Debug)]
+#[repr(C)]
+pub struct IsSm {
+    pub a: i32,
+    pub l: i32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub union CflAlphaOrMhDir {
+    pub cfl_alpha: [i8; 2],
+    pub cfl_mh_dir: u8,
+}
+
+impl Default for CflAlphaOrMhDir {
+    fn default() -> Self {
+        Self { cfl_alpha: [0; 2] }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Av2BlockIntra {
+    pub intrabc_mv: Mv,
+    pub dpcm: [u8; 2],
+    pub y_mode: u8,
+    pub mrl_index: u8,
+    pub multi_mrl: u8,
+    pub dip: u8,
+    pub morph_pred: u8,
+    pub is_refmv: u8,
+    pub is_qpel: u8,
+    pub uv_mode: u8,
+    pub pal_sz: u8,
+    pub y_angle: i8,
+    pub uv_angle: i8,
+    pub cfl_type: i8,
+    pub cfl: CflAlphaOrMhDir,
+    pub is_sm: [IsSm; 2],
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Av2BlockInter {
+    pub mv: [Mv; 2],
+    pub wedge_idx: i8,
+    pub wedge_sign: i8,
+    pub mask_sign: u8,
+    pub interintra_mode: u8,
+    pub matrix: [i8; 4],
+    pub drl_idx: [u8; 2],
+    pub warp_ref_idx: u8,
+    pub warpmv_with_mvd: u8,
+    pub comp_type: u8,
+    pub inter_mode: u8,
+    pub motion_mode: u8,
+    pub warp_ii: u8,
+    pub cwp_idx: i8,
+    pub mv_prec: i8,
+    pub amvd: i8,
+    pub bawp: [u8; 2],
+    pub filter: u8,
+    pub refine_mv: u8,
+    pub mtxbak: [i32; 6],
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub union Av2BlockData {
+    pub intra: Av2BlockIntra,
+    pub inter: Av2BlockInter,
+}
+
+impl Default for Av2BlockData {
+    fn default() -> Self {
+        Self {
+            inter: Av2BlockInter::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Av2Block {
+    pub bs: i8,
+    pub cbs: i8,
+    pub is_intra: u8,
+    pub intrabc: u8,
+    pub seg_id: u8,
+    pub skip_mode: u8,
+    pub skip_txfm: u8,
+    pub tx_part: u8,
+    pub fsc: u8,
+    pub tx_size_ll: u8,
+    pub ref_pair: RefPair,
+    pub data: Av2BlockData,
+}
