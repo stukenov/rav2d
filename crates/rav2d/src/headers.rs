@@ -664,3 +664,13 @@ pub struct FrameHeader {
     pub gmv: FhGmv,
     pub film_grain: FhFilmGrain,
 }
+
+impl FrameHeader {
+    pub fn is_inter_or_switch(&self) -> bool {
+        (self.frame_type as u8) & 1 != 0
+    }
+
+    pub fn is_key_or_intra(&self) -> bool {
+        !self.is_inter_or_switch()
+    }
+}
