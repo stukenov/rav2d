@@ -267,6 +267,42 @@ pub fn mc_lowest_px(
     }
 }
 
+pub static REORDERED_NONDIR_Y_MODE: [u8; 5] = [0, 9, 10, 11, 12];
+
+pub static REORDERED_DIR_Y_MODE: [u8; 8] = [3, 8, 1, 5, 4, 6, 2, 7];
+
+pub static DEFAULT_MODE_LIST_Y: [u8; 56] = [
+    17, 45, 3, 10, 24, 31, 38, 52,
+    15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
+    16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53,
+    14, 20, 42, 48, 0, 6, 7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
+];
+
+pub static DEFAULT_MODE_LIST_UV: [u8; 8] = [1, 2, 3, 4, 8, 5, 6, 7];
+
+pub static INTRA_DIR_MODE_Y_TO_UV_IDX: [u8; 8] = [2, 4, 0, 5, 3, 6, 1, 7];
+
+pub static MV_PREC_TBL: [[u8; 3]; 2] = [
+    [3, 1, 0],
+    [4, 3, 1],
+];
+
+use crate::levels::N_PARTITIONS;
+
+// child partition split limits: [w_limit, h_limit]
+pub static PARTITION_LIM: [[u8; 2]; N_PARTITIONS] = [
+    [1, 1], // NONE
+    [1, 2], // H
+    [2, 1], // V
+    [2, 4], // H3
+    [4, 2], // V3
+    [1, 8], // H4A
+    [1, 8], // H4B
+    [8, 1], // V4A
+    [8, 1], // V4B
+    [2, 2], // SPLIT
+];
+
 pub static WEDGE_ANGLE_DIST2IDX: [[i8; 4]; 20] = [
     [-1,  0,  1,  2],  // WEDGE_0
     [ 3,  4,  5,  6],  // WEDGE_14
@@ -608,6 +644,22 @@ mod tests {
         let mut dst = 0;
         mc_lowest_px(&mut dst, 4, 4, 0, 0, &smp);
         assert_eq!(dst, 32); // (4+4)*4 + 0 + 0
+    }
+
+    #[test]
+    fn test_intra_mode_tables() {
+        assert_eq!(REORDERED_NONDIR_Y_MODE[0], 0); // DC_PRED
+        assert_eq!(REORDERED_NONDIR_Y_MODE[1], 9); // SMOOTH_PRED
+        assert_eq!(REORDERED_DIR_Y_MODE[2], 1);    // VERT_PRED
+        assert_eq!(DEFAULT_MODE_LIST_Y.len(), 56);
+        assert_eq!(DEFAULT_MODE_LIST_UV[0], 1);     // VERT_PRED
+        assert_eq!(INTRA_DIR_MODE_Y_TO_UV_IDX.len(), 8);
+    }
+
+    #[test]
+    fn test_mv_prec_tbl() {
+        assert_eq!(MV_PREC_TBL[0], [3, 1, 0]);
+        assert_eq!(MV_PREC_TBL[1], [4, 3, 1]);
     }
 
     #[test]
