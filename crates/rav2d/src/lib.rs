@@ -7,6 +7,7 @@ pub mod getbits;
 pub mod headers;
 pub mod ibp;
 pub mod intops;
+pub mod intra_edge;
 pub mod itx_1d;
 pub mod levels;
 pub mod lf_mask;
