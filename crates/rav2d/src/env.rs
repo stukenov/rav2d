@@ -353,6 +353,59 @@ pub fn get_comp_ctx(
     }
 }
 
+#[inline(always)]
+pub fn get_warp_ctx(
+    a: &BlockContext,
+    a_sb_cache: &SBEdgeCtx,
+    l: &BlockContext,
+    yb4: usize,
+    xb4: usize,
+    have_top: bool,
+    have_left: bool,
+    have_top_right: bool,
+    have_bottom_left: bool,
+    top_is_at_tile_boundary: bool,
+    b_dim: &[u8],
+    r#ref: i8,
+) -> i32 {
+    let mut ctx = 0i32;
+
+    macro_rules! add_bc {
+        ($dir:expr, $idx:expr) => {
+            ctx += (($dir.r#ref[0][$idx] == r#ref || $dir.r#ref[1][$idx] == r#ref)
+                && $dir.motion_mode[$idx] >= 2) as i32;
+        };
+    }
+    macro_rules! add_sb {
+        ($dir:expr, $idx:expr) => {
+            ctx += (($dir.r#ref[0][$idx] == r#ref || $dir.r#ref[1][$idx] == r#ref)
+                && $dir.motion_mode[$idx] >= 2) as i32;
+        };
+    }
+
+    if have_top {
+        if top_is_at_tile_boundary {
+            add_sb!(a_sb_cache, xb4 & !1);
+            if have_top_right && b_dim[0] >= 4 {
+                add_sb!(a_sb_cache, (xb4 + b_dim[0] as usize - 2) & !1);
+            }
+        } else {
+            add_bc!(a, xb4);
+            if have_top_right {
+                add_bc!(a, xb4 + b_dim[0] as usize - 1);
+            }
+        }
+    }
+    if have_left {
+        add_bc!(l, yb4);
+        if have_bottom_left {
+            add_bc!(l, yb4 + b_dim[1] as usize - 1);
+        }
+    }
+
+    ctx
+}
+
 const NEWMV0_MODE_MASK: u32 =
     (1 << 15) | (1 << 20) | (1 << 22) | (1 << 23) |
     (1 << 26) | (1 << 27) | (1 << 28);
