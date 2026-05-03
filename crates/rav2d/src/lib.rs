@@ -19,6 +19,7 @@ pub mod obu;
 pub mod pal;
 pub mod pixel;
 pub mod quantizer;
+pub mod recon;
 pub mod refmvs;
 pub mod scan;
 pub mod stx_tables;
