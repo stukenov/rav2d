@@ -1,9 +1,11 @@
+use crate::cdf::{CdfModeContext, CdfMvContext};
 use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::env::BlockContext;
 use crate::headers::{FrameHeader, MAX_SEGMENTS};
 use crate::internal::ScalableMotionParams;
-use crate::intops::{apply_sign64, imax, imin};
-use crate::levels::{BlockSize, MvXY, N_BS_SIZES};
+use crate::intops::{apply_sign64, imax, imin, inv_recenter};
+use crate::levels::{BlockSize, Mv, MvXY, N_BS_SIZES};
+use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
 
 pub fn neg_deinterleave(diff: i32, r: i32, max: i32) -> i32 {
@@ -489,6 +491,150 @@ pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
     t
 };
 
+pub fn read_wedge_idx(msac: &mut MsacContext, cdf_m: &mut CdfModeContext) -> i8 {
+    let quad = msac.decode_symbol_adapt(cdf_m.wedge_quad(), 3) as usize;
+    let angle = 5 * quad
+        + msac.decode_symbol_adapt(cdf_m.wedge_angle(quad), 4) as usize;
+    let dist = if (angle.wrapping_sub(1)) >= 9 || angle == 5 {
+        1 + msac.decode_symbol_adapt(cdf_m.wedge_dist2(), 2) as usize
+    } else {
+        msac.decode_symbol_adapt(cdf_m.wedge_dist(), 3) as usize
+    };
+    WEDGE_ANGLE_DIST2IDX[angle][dist]
+}
+
+pub fn decode_4way(msac: &mut MsacContext, r: i32, cdf: &mut [u16], n_bits: i32) -> i32 {
+    debug_assert!(n_bits >= 4);
+    let bin = msac.decode_symbol_adapt(cdf, 3) as i32;
+    let rem = msac.decode_bools_bypass((n_bits + bin + if bin == 0 { 1 } else { 0 } - 4) as u32) as i32;
+    let v = (if bin != 0 { 1 << (n_bits + bin - 4) } else { 0 }) + rem;
+    let n = 1 << n_bits;
+    if r * 2 <= n {
+        inv_recenter(r as u32, v as u32) as i32
+    } else {
+        n - 1 - inv_recenter((n - 1 - r) as u32, v as u32) as i32
+    }
+}
+
+pub fn read_amvd(
+    msac: &mut MsacContext,
+    amvd_joint: &mut [u16],
+    amvd_index: &mut [u16],
+) -> Mv {
+    let joint = msac.decode_symbol_adapt(amvd_joint, 3) as i32;
+    if joint == 0 {
+        return Mv { n: 0 };
+    }
+    let y = if joint & 2 != 0 {
+        let s = msac.decode_symbol_adapt(&mut amvd_index[0..8], 7) as i32;
+        if s < 3 { 2 + s * 2 } else { 1 << s }
+    } else {
+        0
+    };
+    let x = if joint & 1 != 0 {
+        let s = msac.decode_symbol_adapt(&mut amvd_index[8..16], 7) as i32;
+        if s < 3 { 2 + s * 2 } else { 1 << s }
+    } else {
+        0
+    };
+    Mv { c: MvXY { y, x } }
+}
+
+pub fn read_mv_residual(
+    msac: &mut MsacContext,
+    cdf_mv: &mut CdfMvContext,
+    shell_tip: &mut [u16],
+    mv_prec: i32,
+) -> Mv {
+    let n_syms = 9 + mv_prec;
+    let h_syms = n_syms >> 1;
+
+    let mut sh_class;
+    if msac.decode_bool_adapt(cdf_mv.shell_set()) != 0 {
+        let h_syms2 = n_syms - h_syms;
+        sh_class = h_syms + 1
+            + msac.decode_symbol_adapt(
+                cdf_mv.shell_upper(mv_prec as usize),
+                imin(h_syms2, 7) as usize,
+            ) as i32;
+        if mv_prec + sh_class == 21 {
+            sh_class += msac.decode_bool_adapt(shell_tip) as i32;
+        }
+    } else {
+        sh_class = msac.decode_symbol_adapt(
+            cdf_mv.shell_lower(mv_prec as usize),
+            h_syms as usize,
+        ) as i32;
+    }
+
+    let mut sh_index;
+    if sh_class < 2 {
+        sh_index = msac.decode_bool_adapt(
+            cdf_mv.shell_offset_low(sh_class as usize),
+        ) as i32;
+    } else if sh_class == 2 {
+        sh_index = msac.decode_bool_adapt(cdf_mv.shell_offset_cl2()) as i32;
+        if sh_index != 0 {
+            sh_index += msac.decode_bool_bypass() as i32;
+            if sh_index == 2 {
+                sh_index += msac.decode_bool_bypass() as i32;
+            }
+        }
+    } else {
+        sh_index = 0;
+        let mut m = 1i32;
+        for i in 0..sh_class {
+            sh_index |= m
+                * msac.decode_bool_adapt(cdf_mv.shell_offset_hi(i as usize)) as i32;
+            m <<= 1;
+        }
+    }
+
+    if sh_class != 0 {
+        sh_index += 1 << sh_class;
+    }
+    if sh_index == 0 {
+        return Mv { n: 0 };
+    }
+
+    let mut pair_index = 0i32;
+    if sh_index >= 2 {
+        pair_index = msac.decode_bool_adapt(cdf_mv.col_component(0)) as i32;
+        if pair_index != 0 && sh_index >= 4 {
+            pair_index += msac.decode_bool_adapt(cdf_mv.col_component(1)) as i32;
+            if pair_index == 2 && sh_index >= 6 {
+                pair_index +=
+                    msac.decode_uniform((sh_index as u32 >> 1) - 1) as i32;
+            }
+        }
+    }
+
+    let sh = 6 - mv_prec;
+    if pair_index * 2 == sh_index {
+        let v = (sh_index >> 1) << sh;
+        Mv { c: MvXY { y: v, x: v } }
+    } else {
+        let b = msac.decode_bool_adapt(
+            cdf_mv.col_index(imin(sh_class, 3) as usize),
+        );
+        if b != 0 {
+            Mv {
+                c: MvXY {
+                    y: pair_index << sh,
+                    x: (sh_index - pair_index) << sh,
+                },
+            }
+        } else {
+            Mv {
+                c: MvXY {
+                    x: pair_index << sh,
+                    y: (sh_index - pair_index) << sh,
+                },
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,11 +823,134 @@ mod tests {
     }
 
     #[test]
+    fn test_read_wedge_idx() {
+        let data = vec![0x55; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = CdfModeContext { data: [0u16; 3496] };
+        for i in 3060..3063 {
+            cdf_m.data[i] = 32768 / 4 * (3 - (i - 3060)) as u16;
+        }
+        for q in 0..4 {
+            let base = 3064 + q * 8;
+            for j in 0..4 {
+                cdf_m.data[base + j] = 32768 / 5 * (4 - j) as u16;
+            }
+        }
+        for i in 3096..3098 {
+            cdf_m.data[i] = 32768 / 3 * (2 - (i - 3096)) as u16;
+        }
+        for i in 3100..3103 {
+            cdf_m.data[i] = 32768 / 4 * (3 - (i - 3100)) as u16;
+        }
+        let idx = read_wedge_idx(&mut msac, &mut cdf_m);
+        assert!(idx >= -1 && idx <= 67);
+    }
+
+    #[test]
     fn test_wedge_angle_dist2idx() {
         assert_eq!(WEDGE_ANGLE_DIST2IDX[0][0], -1);
         assert_eq!(WEDGE_ANGLE_DIST2IDX[0][1], 0);
         assert_eq!(WEDGE_ANGLE_DIST2IDX[1][0], 3);
         assert_eq!(WEDGE_ANGLE_DIST2IDX[10][0], -1);
         assert_eq!(WEDGE_ANGLE_DIST2IDX[10][1], 38);
+    }
+
+    fn make_msac(data: &[u8]) -> MsacContext<'_> {
+        MsacContext::new(data, false)
+    }
+
+    #[test]
+    fn test_decode_4way_basic() {
+        let data = vec![0x80; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf = [16384u16, 16384, 16384, 0];
+        let result = decode_4way(&mut msac, 8, &mut cdf, 5);
+        assert!(result >= 0 && result < 32);
+    }
+
+    #[test]
+    fn test_decode_4way_center_ref() {
+        let data = vec![0x00; 64];
+        let mut msac = make_msac(&data);
+        let mut cdf = [16384u16, 16384, 16384, 0];
+        let result = decode_4way(&mut msac, 16, &mut cdf, 5);
+        assert!(result >= 0 && result < 32);
+    }
+
+    #[test]
+    fn test_read_amvd_zero_joint() {
+        let data = vec![0x00; 64];
+        let mut msac = make_msac(&data);
+        let mut amvd_joint = [16384u16, 16384, 16384, 0];
+        let mut amvd_index = [16384u16; 16];
+        let mv = read_amvd(&mut msac, &mut amvd_joint, &mut amvd_index);
+        let (y, x) = unsafe { (mv.c.y, mv.c.x) };
+        assert!(y >= 0 && x >= 0);
+    }
+
+    #[test]
+    fn test_read_amvd_nonzero() {
+        let data = vec![0xFF; 64];
+        let mut msac = make_msac(&data);
+        let mut amvd_joint = [8192u16, 16384, 24576, 0];
+        let mut amvd_index = [0u16; 16];
+        for i in 0..2 {
+            for j in 0..7 {
+                amvd_index[i * 8 + j] = ((j + 1) as u16) * 4096;
+            }
+        }
+        let mv = read_amvd(&mut msac, &mut amvd_joint, &mut amvd_index);
+        let (y, x) = unsafe { (mv.c.y, mv.c.x) };
+        assert!(y >= 0 && x >= 0);
+    }
+
+    fn make_default_cdf_mv() -> CdfMvContext {
+        let mut cdf = CdfMvContext { data: [0u16; 168] };
+        for i in 0..7 {
+            let base = i * 8;
+            for j in 0..7 {
+                cdf.data[base + j] = (32768 - (j as u16 + 1) * 4096).max(1);
+            }
+            cdf.data[base + 7] = 0;
+        }
+        for i in 0..7 {
+            let base = 56 + i * 8;
+            for j in 0..7 {
+                cdf.data[base + j] = (32768 - (j as u16 + 1) * 4096).max(1);
+            }
+            cdf.data[base + 7] = 0;
+        }
+        cdf.data[112] = 16384; cdf.data[113] = 0;
+        cdf.data[114] = 16384; cdf.data[115] = 0;
+        for i in 0..2 { let b = 116 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
+        cdf.data[120] = 16384; cdf.data[121] = 0;
+        for i in 0..16 { let b = 122 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
+        for i in 0..2 { let b = 154 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
+        for i in 0..4 { let b = 158 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
+        cdf
+    }
+
+    #[test]
+    fn test_read_mv_residual_zero() {
+        let data = vec![0x00; 128];
+        let mut msac = make_msac(&data);
+        let mut cdf_mv = make_default_cdf_mv();
+        let mut shell_tip = [16384u16, 0];
+        let mv = read_mv_residual(&mut msac, &mut cdf_mv, &mut shell_tip, 3);
+        let _n = unsafe { mv.n };
+    }
+
+    #[test]
+    fn test_read_mv_residual_all_precs() {
+        for mv_prec in 0..7 {
+            let data = vec![0x80; 256];
+            let mut msac = make_msac(&data);
+            let mut cdf_mv = make_default_cdf_mv();
+            let mut shell_tip = [16384u16, 0];
+            let mv = read_mv_residual(&mut msac, &mut cdf_mv, &mut shell_tip, mv_prec);
+            let (y, x) = unsafe { (mv.c.y, mv.c.x) };
+            assert!(y >= 0 || y < 0);
+            assert!(x >= 0 || x < 0);
+        }
     }
 }

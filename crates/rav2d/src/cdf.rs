@@ -10,6 +10,30 @@ pub struct CdfCoefContext { pub data: [u16; 4656] }
 #[repr(C)]
 pub struct CdfMvContext { pub data: [u16; 168] }
 
+impl CdfMvContext {
+    pub fn shell_lower(&mut self, i: usize) -> &mut [u16] { &mut self.data[i * 8..(i + 1) * 8] }
+    pub fn shell_upper(&mut self, i: usize) -> &mut [u16] { &mut self.data[56 + i * 8..56 + (i + 1) * 8] }
+    pub fn shell_set(&mut self) -> &mut [u16] { &mut self.data[112..114] }
+    pub fn shell_tip(&mut self) -> &mut [u16] { &mut self.data[114..116] }
+    pub fn shell_offset_low(&mut self, i: usize) -> &mut [u16] { &mut self.data[116 + i * 2..118 + i * 2] }
+    pub fn shell_offset_cl2(&mut self) -> &mut [u16] { &mut self.data[120..122] }
+    pub fn shell_offset_hi(&mut self, i: usize) -> &mut [u16] { &mut self.data[122 + i * 2..124 + i * 2] }
+    pub fn col_component(&mut self, i: usize) -> &mut [u16] { &mut self.data[154 + i * 2..156 + i * 2] }
+    pub fn col_index(&mut self, i: usize) -> &mut [u16] { &mut self.data[158 + i * 2..160 + i * 2] }
+}
+
+impl CdfModeContext {
+    pub fn amvd_joint(&mut self) -> &mut [u16] { &mut self.data[3196..3200] }
+    pub fn amvd_index(&mut self, i: usize) -> &mut [u16] { &mut self.data[3200 + i * 8..3208 + i * 8] }
+    pub fn wedge_quad(&mut self) -> &mut [u16] { &mut self.data[3060..3064] }
+    pub fn wedge_angle(&mut self, i: usize) -> &mut [u16] { &mut self.data[3064 + i * 8..3072 + i * 8] }
+    pub fn wedge_dist2(&mut self) -> &mut [u16] { &mut self.data[3096..3100] }
+    pub fn wedge_dist(&mut self) -> &mut [u16] { &mut self.data[3100..3104] }
+    pub fn rst_switchable(&mut self, i: usize) -> &mut [u16] { &mut self.data[i * 2..i * 2 + 2] }
+    pub fn rst_ns_wiener(&mut self) -> &mut [u16] { &mut self.data[8..10] }
+    pub fn rst_pc_wiener(&mut self) -> &mut [u16] { &mut self.data[4..6] }
+}
+
 #[derive(Clone)]
 #[repr(C)]
 pub struct CdfContext {

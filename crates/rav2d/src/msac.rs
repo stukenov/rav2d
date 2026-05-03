@@ -167,7 +167,7 @@ impl<'a> MsacContext<'a> {
         let vw = (v as u64) << 48;
         let ret = if dif >= vw { 1 } else { 0 };
         let new_dif = dif - ret as u64 * vw;
-        v += ret * (r - 2 * v);
+        if ret != 0 { v = r - v; }
         self.ctx_norm(new_dif, v);
         (ret == 0) as u32
     }
