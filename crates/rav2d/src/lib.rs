@@ -1,6 +1,7 @@
 pub mod cdf;
 pub mod ctx;
 pub mod dip_tables;
+pub mod env;
 pub mod gdf_tables;
 pub mod getbits;
 pub mod headers;
@@ -17,5 +18,6 @@ pub mod scan;
 pub mod stx_tables;
 pub mod tables;
 pub mod warpmv;
+pub mod wedge;
 
 pub use rav2d_sys as sys;
