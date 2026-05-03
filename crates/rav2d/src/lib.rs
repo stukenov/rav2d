@@ -1,14 +1,19 @@
 pub mod cdf;
+pub mod ctx;
 pub mod dip_tables;
 pub mod gdf_tables;
 pub mod getbits;
 pub mod headers;
+pub mod ibp;
 pub mod intops;
+pub mod itx_1d;
 pub mod levels;
 pub mod msac;
 pub mod obu;
 pub mod pixel;
+pub mod scan;
 pub mod stx_tables;
 pub mod tables;
+pub mod warpmv;
 
 pub use rav2d_sys as sys;
