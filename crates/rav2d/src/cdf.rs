@@ -10,28 +10,165 @@ pub struct CdfCoefContext { pub data: [u16; 4656] }
 #[repr(C)]
 pub struct CdfMvContext { pub data: [u16; 168] }
 
+macro_rules! cdf_acc {
+    ($name:ident, $off:expr, $len:expr) => {
+        pub fn $name(&mut self) -> &mut [u16] {
+            &mut self.data[$off..$off + $len]
+        }
+    };
+    ($name:ident, $off:expr, $stride:expr, $len:expr) => {
+        pub fn $name(&mut self, i: usize) -> &mut [u16] {
+            let o = $off + i * $stride;
+            &mut self.data[o..o + $len]
+        }
+    };
+    ($name:ident, $off:expr, $s1:expr, $s2:expr, $len:expr) => {
+        pub fn $name(&mut self, i: usize, j: usize) -> &mut [u16] {
+            let o = $off + i * $s1 + j * $s2;
+            &mut self.data[o..o + $len]
+        }
+    };
+    ($name:ident, $off:expr, $s1:expr, $s2:expr, $s3:expr, $len:expr) => {
+        pub fn $name(&mut self, i: usize, j: usize, k: usize) -> &mut [u16] {
+            let o = $off + i * $s1 + j * $s2 + k * $s3;
+            &mut self.data[o..o + $len]
+        }
+    };
+}
+
 impl CdfMvContext {
-    pub fn shell_lower(&mut self, i: usize) -> &mut [u16] { &mut self.data[i * 8..(i + 1) * 8] }
-    pub fn shell_upper(&mut self, i: usize) -> &mut [u16] { &mut self.data[56 + i * 8..56 + (i + 1) * 8] }
-    pub fn shell_set(&mut self) -> &mut [u16] { &mut self.data[112..114] }
-    pub fn shell_tip(&mut self) -> &mut [u16] { &mut self.data[114..116] }
-    pub fn shell_offset_low(&mut self, i: usize) -> &mut [u16] { &mut self.data[116 + i * 2..118 + i * 2] }
-    pub fn shell_offset_cl2(&mut self) -> &mut [u16] { &mut self.data[120..122] }
-    pub fn shell_offset_hi(&mut self, i: usize) -> &mut [u16] { &mut self.data[122 + i * 2..124 + i * 2] }
-    pub fn col_component(&mut self, i: usize) -> &mut [u16] { &mut self.data[154 + i * 2..156 + i * 2] }
-    pub fn col_index(&mut self, i: usize) -> &mut [u16] { &mut self.data[158 + i * 2..160 + i * 2] }
+    cdf_acc!(shell_lower,      0, 8, 8);      // [7][8]
+    cdf_acc!(shell_upper,     56, 8, 8);      // [7][8]
+    cdf_acc!(shell_set,      112, 2);          // [2]
+    cdf_acc!(shell_tip,      114, 2);          // [2]
+    cdf_acc!(shell_offset_low, 116, 2, 2);    // [2][2]
+    cdf_acc!(shell_offset_cl2, 120, 2);        // [2]
+    cdf_acc!(shell_offset_hi,  122, 2, 2);    // [16][2]
+    cdf_acc!(col_component,    154, 2, 2);    // [2][2]
+    cdf_acc!(col_index,        158, 2, 2);    // [4][2]
 }
 
 impl CdfModeContext {
-    pub fn amvd_joint(&mut self) -> &mut [u16] { &mut self.data[3196..3200] }
-    pub fn amvd_index(&mut self, i: usize) -> &mut [u16] { &mut self.data[3200 + i * 8..3208 + i * 8] }
-    pub fn wedge_quad(&mut self) -> &mut [u16] { &mut self.data[3060..3064] }
-    pub fn wedge_angle(&mut self, i: usize) -> &mut [u16] { &mut self.data[3064 + i * 8..3072 + i * 8] }
-    pub fn wedge_dist2(&mut self) -> &mut [u16] { &mut self.data[3096..3100] }
-    pub fn wedge_dist(&mut self) -> &mut [u16] { &mut self.data[3100..3104] }
-    pub fn rst_switchable(&mut self, i: usize) -> &mut [u16] { &mut self.data[i * 2..i * 2 + 2] }
-    pub fn rst_ns_wiener(&mut self) -> &mut [u16] { &mut self.data[8..10] }
-    pub fn rst_pc_wiener(&mut self) -> &mut [u16] { &mut self.data[4..6] }
+    // restoration
+    cdf_acc!(rst_switchable,  0, 2, 2);       // [2][2]
+    cdf_acc!(rst_pc_wiener,   4, 2);           // [2]
+    cdf_acc!(rst_ns_wiener,   6, 2);           // [2]
+    cdf_acc!(wiener_ns_len,   8, 2, 2);       // [2][2]
+    cdf_acc!(wiener_ns_sym,  12, 2);           // [2]
+    cdf_acc!(wiener_ns_cf,   16, 4);           // [4]
+    // partitioning
+    cdf_acc!(part_split,     20, 128, 2, 2);  // [2][64][2]
+    cdf_acc!(part_square,   276, 2, 2);       // [8][2]
+    cdf_acc!(part_dir,      292, 128, 2, 2);  // [2][64][2]
+    cdf_acc!(part_ext,      548, 128, 2, 2);  // [2][64][2]
+    cdf_acc!(part_4way,     804, 128, 2, 2);  // [2][64][2]
+    cdf_acc!(region_type,  1060, 2, 2);       // [4][2]
+    // intra
+    cdf_acc!(intrabc,      1068, 2, 2);       // [3][2]
+    cdf_acc!(gdf,          1074, 2);           // [2]
+    cdf_acc!(cdef_idx0,    1076, 2, 2);       // [4][2]
+    cdf_acc!(cdef_idx,     1088, 8, 8);       // [6][8]
+    cdf_acc!(ccso,         1136, 8, 2, 2);    // [3][4][2]
+    cdf_acc!(skip_txfm,    1160, 2, 2);       // [6][2]
+    cdf_acc!(dpcm,         1172, 2, 2);       // [2][2]
+    cdf_acc!(dpcm_dir,     1176, 2, 2);       // [2][2]
+    cdf_acc!(intra_y_set,  1180, 4);           // [4]
+    cdf_acc!(intra_y_idx0, 1184, 8, 8);       // [3][8]
+    cdf_acc!(intra_y_idx1, 1208, 8, 8);       // [3][8]
+    cdf_acc!(fsc,          1232, 12, 2, 2);   // [4][6][2]
+    cdf_acc!(mrl_index,    1280, 4, 4);       // [3][4]
+    cdf_acc!(multi_mrl,    1292, 2, 2);       // [3][2]
+    cdf_acc!(pal_y,        1298, 2);           // [2]
+    cdf_acc!(pal_sz,       1304, 8);           // [8]
+    cdf_acc!(dip,          1312, 2, 2);       // [3][2]
+    cdf_acc!(dip_mode,     1320, 8);           // [8]
+    cdf_acc!(cfl,          1328, 2, 2);       // [3][2]
+    cdf_acc!(intra_uv_mode, 1336, 8, 8);     // [2][8]
+    cdf_acc!(mhccp,        1352, 2);           // [2]
+    cdf_acc!(mhccp_filter_dir, 1356, 4, 4);  // [4][4]
+    cdf_acc!(cfl_type,     1372, 2);           // [2]
+    cdf_acc!(cfl_sign,     1376, 8);           // [8]
+    cdf_acc!(cfl_alpha,    1384, 8, 8);       // [6][8]
+    cdf_acc!(pal_idx_identity, 1432, 4, 4);   // [4][4]
+    cdf_acc!(pal_idx,      1448, 40, 8, 8);   // [7][5][8]
+    cdf_acc!(intrabc_mode, 1728, 2);           // [2]
+    cdf_acc!(intrabc_precision, 1730, 2);      // [2]
+    cdf_acc!(morph_pred,   1732, 2, 2);       // [3][2]
+    // tx
+    cdf_acc!(txsz_lossless, 1738, 4, 2, 2);  // [4][2][2]
+    cdf_acc!(tx_split,     1754, 36, 18, 2, 2); // [2][2][9][2]
+    cdf_acc!(tx_part_2d,   1832, 224, 112, 8, 8); // [2][2][14][8]
+    cdf_acc!(tx_part_1d,   2280, 8, 4, 2, 2); // [2][2][2][2]
+    cdf_acc!(txtp_lossless, 2296, 2);          // [2]
+    cdf_acc!(txtp_long32_dct, 2298, 2, 2);    // [2][2]
+    cdf_acc!(txtp_intra_short_1d, 2304, 4, 4); // [4][4]
+    cdf_acc!(txtp_inter_short_1d, 2320, 16, 4, 4); // [3][4][4]
+    cdf_acc!(txtp_ext,     2368, 8, 8);       // [4][8]
+    cdf_acc!(txtp_ext_reduced, 2400, 2, 2);   // [4][2]
+    cdf_acc!(txtp_inter_tx_set, 2408, 24, 8, 2, 2); // [2][3][4][2]
+    cdf_acc!(txtp_inter_set0, 2456, 24, 8, 8); // [2][3][8]
+    cdf_acc!(txtp_inter_set1, 2504, 8, 8);    // [3][8]
+    cdf_acc!(txtp_inter_set2, 2528, 4, 4);    // [3][4]
+    cdf_acc!(txtp_inter_dct_idtx, 2540, 8, 2, 2); // [3][4][2]
+    cdf_acc!(txtp_inter_dct_idtx_iddct, 2564, 16, 4, 4); // [3][4][4]
+    cdf_acc!(stx,          2612, 20, 4, 4);   // [2][5][4]
+    cdf_acc!(stx_set_adst, 2652, 4);           // [4]
+    cdf_acc!(stx_set,      2656, 8);           // [8]
+    cdf_acc!(cctx,         2664, 8);           // [8]
+    // segmentation
+    cdf_acc!(seg_id_ext,   2672, 2, 2);       // [3][2]
+    cdf_acc!(seg_id,       2680, 24, 8, 8);   // [2][3][8]
+    cdf_acc!(delta_q,      2728, 8);           // [8]
+    // inter
+    cdf_acc!(skip_mode,    2736, 2, 2);       // [3][2]
+    cdf_acc!(skip_mode_drl_idx, 2742, 2, 2);  // [3][2]
+    cdf_acc!(intra,        2748, 2, 2);       // [4][2]
+    cdf_acc!(tip,          2756, 2, 2);       // [3][2]
+    cdf_acc!(comp,         2762, 2, 2);       // [5][2]
+    cdf_acc!(single_ref,   2772, 12, 2, 2);  // [3][6][2]
+    cdf_acc!(comp0_ref,    2808, 12, 2, 2);  // [3][6][2]
+    cdf_acc!(comp1_ref,    2844, 24, 12, 2, 2); // [3][2][6][2]
+    cdf_acc!(tip_mode,     2916, 2);           // [2]
+    cdf_acc!(warp,         2918, 2, 2);       // [5][2]
+    cdf_acc!(warp_newmv,   2928, 2);           // [2]
+    cdf_acc!(inter_mode,   2932, 4, 4);       // [5][4]
+    cdf_acc!(amvd,         2952, 6, 2, 2);    // [9][3][2]
+    cdf_acc!(bawp,         3006, 2, 2);       // [2][2]
+    cdf_acc!(bawp_explicit, 3010, 2, 2);      // [3][2]
+    cdf_acc!(bawp_explicit_scale, 3016, 2);    // [2]
+    cdf_acc!(warp_extend,  3018, 2, 2);       // [3][2]
+    cdf_acc!(warp_causal,  3024, 2, 2);       // [4][2]
+    cdf_acc!(interintra,   3032, 2, 2);       // [4][2]
+    cdf_acc!(interintra_mode, 3040, 4, 4);    // [4][4]
+    cdf_acc!(interintra_wedge, 3056, 2);       // [2]
+    cdf_acc!(wedge_quad,   3060, 4);           // [4]
+    cdf_acc!(wedge_angle,  3064, 8, 8);       // [4][8]
+    cdf_acc!(wedge_dist2,  3096, 4);           // [4]
+    cdf_acc!(wedge_dist,   3100, 4);           // [4]
+    cdf_acc!(tip_drl_idx,  3104, 2, 2);       // [3][2]
+    cdf_acc!(jmvd_amvd_scale_mode, 3112, 4);  // [4]
+    cdf_acc!(jmvd_scale_mode, 3120, 8);        // [8]
+    cdf_acc!(drl_idx,      3128, 10, 2, 2);   // [3][5][2]
+    cdf_acc!(mvprec_def,   3158, 2, 2);       // [3][2]
+    cdf_acc!(mvprec_rem,   3164, 12, 4, 4);   // [2][3][4]
+    cdf_acc!(warp_ref_idx, 3188, 2, 2);       // [3][2]
+    cdf_acc!(amvd_joint,   3196, 4);           // [4]
+    cdf_acc!(amvd_index,   3200, 8, 8);       // [2][8]
+    cdf_acc!(warpmv_with_mvd, 3216, 2);        // [2]
+    cdf_acc!(warp_delta_prec, 3218, 2, 2);    // [22][2]
+    cdf_acc!(warp_delta_param, 3264, 16, 8, 8); // [2][2][8]
+    cdf_acc!(warp_delta_sign, 3296, 2);        // [2]
+    cdf_acc!(warp_interintra, 3298, 2, 2);    // [4][2]
+    cdf_acc!(comp_mode_sameref, 3308, 4, 4);  // [5][4]
+    cdf_acc!(comp_mode_joint, 3328, 2, 2);    // [2][2]
+    cdf_acc!(comp_mode,    3336, 8, 8);       // [5][8]
+    cdf_acc!(opfl,         3376, 2, 2);       // [2][2]
+    cdf_acc!(refine_mv,    3380, 2, 2);       // [11][2]
+    cdf_acc!(comp_type_masked, 3402, 2, 2);   // [12][2]
+    cdf_acc!(comp_type_weighted, 3426, 2);     // [2]
+    cdf_acc!(cwp_idx,      3428, 2, 2);       // [4][2]
+    cdf_acc!(filter,       3436, 4, 4);       // [8][4]
+    cdf_acc!(seg_pred,     3468, 2, 2);       // [3][2]
 }
 
 #[derive(Clone)]
