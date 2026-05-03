@@ -1,7 +1,7 @@
 use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::headers::{FrameHeader, WarpedMotionParams, WarpedMotionType};
 use crate::intops::{apply_sign64, iclip, imax};
-use crate::levels::{MvXY, RefPair};
+use crate::levels::{MvXY, RefPair, TIP_FRAME};
 
 #[derive(Clone)]
 pub struct BlockContext {
@@ -350,6 +350,148 @@ pub fn get_comp_ctx(
         }
         0 => 1,
         _ => unreachable!(),
+    }
+}
+
+const NEWMV0_MODE_MASK: u32 =
+    (1 << 15) | (1 << 20) | (1 << 22) | (1 << 23) |
+    (1 << 26) | (1 << 27) | (1 << 28);
+
+const NEWMV1_MODE_MASK: u32 =
+    (1 << 19) | (1 << 22) | (1 << 25) | (1 << 27);
+
+const NEWMV_COMP_MODE_MASK: u32 =
+    (1 << 15) | (1 << 19) | (1 << 20) | (1 << 22) | (1 << 23) |
+    (1 << 25) | (1 << 26) | (1 << 27) | (1 << 28);
+
+#[inline(always)]
+pub fn get_snglref_ctx(
+    a: &BlockContext,
+    l: &BlockContext,
+    yb4: usize,
+    xb4: usize,
+    have_top: bool,
+    have_left: bool,
+    have_top_right: bool,
+    have_bottom_left: bool,
+    b_dim: &[u8],
+    r#ref: i8,
+) -> i32 {
+    let mut row = 0i32;
+    let mut col = 0i32;
+    let mut newmv = 0i32;
+
+    macro_rules! add_matching {
+        ($dir:expr, $cnt:expr, $idx:expr) => {
+            if $dir.r#ref[0][$idx] == r#ref {
+                $cnt += 1;
+                newmv += (((1u32 << $dir.mode[$idx]) & NEWMV0_MODE_MASK) != 0) as i32;
+            } else if $dir.r#ref[1][$idx] == r#ref {
+                $cnt += 1;
+                newmv += (((1u32 << $dir.mode[$idx]) & NEWMV1_MODE_MASK) != 0) as i32;
+            }
+        };
+    }
+
+    if have_top {
+        add_matching!(a, col, xb4);
+        if have_top_right {
+            add_matching!(a, col, xb4 + b_dim[0] as usize - 1);
+        }
+    }
+    if have_left {
+        add_matching!(l, row, yb4);
+        if have_bottom_left {
+            add_matching!(l, row, yb4 + b_dim[1] as usize - 1);
+        }
+    }
+
+    (row != 0) as i32 + (col != 0) as i32 + 2 * (newmv != 0) as i32
+}
+
+#[inline(always)]
+pub fn get_compref_ctx(
+    a: &BlockContext,
+    l: &BlockContext,
+    yb4: usize,
+    xb4: usize,
+    have_top: bool,
+    have_left: bool,
+    have_top_right: bool,
+    have_bottom_left: bool,
+    b_dim: &[u8],
+    r#ref: RefPair,
+    tip: RefPair,
+) -> i32 {
+    let mut row = 0i32;
+    let mut col = 0i32;
+    let mut newmv = 0i32;
+    let (ref0, ref1) = unsafe { (r#ref.r[0], r#ref.r[1]) };
+    let (tip0, tip1) = unsafe { (tip.r[0], tip.r[1]) };
+
+    macro_rules! add_matching {
+        ($dir:expr, $cnt:expr, $idx:expr) => {
+            if $dir.r#ref[0][$idx] == TIP_FRAME as i8
+                && tip0 == ref0 && tip1 == ref1
+            {
+                $cnt += 1;
+                newmv += ($dir.mode[$idx] == 15) as i32; // NEWMV
+            } else if $dir.r#ref[0][$idx] == ref0 && $dir.r#ref[1][$idx] == ref1 {
+                $cnt += 1;
+                newmv += (((1u32 << $dir.mode[$idx]) & NEWMV_COMP_MODE_MASK) != 0) as i32;
+            }
+        };
+    }
+
+    if have_top {
+        add_matching!(a, col, xb4);
+        if have_top_right {
+            add_matching!(a, col, xb4 + b_dim[0] as usize - 1);
+        }
+    }
+    if have_left {
+        add_matching!(l, row, yb4);
+        if have_bottom_left {
+            add_matching!(l, row, yb4 + b_dim[1] as usize - 1);
+        }
+    }
+
+    (row != 0) as i32 + (col != 0) as i32 + 2 * (newmv != 0) as i32
+}
+
+#[inline(always)]
+pub fn get_cur_frame_segid(
+    by: i32,
+    bx: i32,
+    have_top: bool,
+    have_left: bool,
+    seg_ctx: &mut i32,
+    cur_seg_map: &[u8],
+    stride: isize,
+) -> u32 {
+    let off = (bx as isize + by as isize * stride) as usize;
+    if have_left && have_top {
+        let l = cur_seg_map[off - 1] as u32;
+        let a = cur_seg_map[(off as isize - stride) as usize] as u32;
+        let al = cur_seg_map[(off as isize - stride - 1) as usize] as u32;
+
+        if l == a && al == l {
+            *seg_ctx = 2;
+        } else if l == a || al == l || a == al {
+            *seg_ctx = 1;
+        } else {
+            *seg_ctx = 0;
+        }
+        if a == al { a } else { l }
+    } else {
+        *seg_ctx = 0;
+        if have_left {
+            cur_seg_map[off - 1] as u32
+        } else if have_top {
+            cur_seg_map[(off as isize - stride) as usize] as u32
+        } else {
+            0
+        }
     }
 }
 
