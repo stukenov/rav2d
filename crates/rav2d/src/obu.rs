@@ -1,6 +1,7 @@
 use crate::getbits::GetBits;
 use crate::headers::*;
-use crate::intops::{imax, imin, ulog2};
+use crate::intops::{iclip, imax, imin, ulog2};
+use crate::warpmv::resolve_divisor_32;
 
 #[derive(Debug)]
 pub enum Dav2dError {
@@ -159,6 +160,32 @@ fn parse_tile_info(
     }
     thdr.col_start_sb[thdr.cols as usize] = sbw as u16;
     thdr.row_start_sb[thdr.rows as usize] = sbh as u16;
+}
+
+pub fn rescale_matrix(dm: &mut [i32; 6], sm: &[i32; 6], in_dist: i32, out_dist: i32) {
+    let mut shift = 0i32;
+    let mut inv = resolve_divisor_32(in_dist.unsigned_abs(), &mut shift);
+    if inv >= 512 {
+        inv >>= 1;
+        shift -= 1;
+    }
+    if in_dist < 0 {
+        inv = -inv;
+    }
+    let rnd = (1 << shift) >> 1;
+    for n in 0..2 {
+        let r = iclip(sm[n], -0x400000, 0x400000) * inv;
+        let t = ((r + rnd - (r < 0) as i32) >> shift) * out_dist;
+        let d = (t + 0x1000 - (t < 0) as i32) & !0x1fff;
+        dm[n] = iclip(d, -0x7ffe000, 0x7ffe000);
+    }
+    for n in 2..6 {
+        let b = 0x10000 * (((n as u32).wrapping_sub(3)) > 1) as i32;
+        let r = (sm[n] - b) * inv;
+        let t = ((r + rnd - (r < 0) as i32) >> shift) * out_dist;
+        let d = (t + 32 - (t < 0) as i32) & !63;
+        dm[n] = b + iclip(d, -0x7fc0, 0x7fc0);
+    }
 }
 
 pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
@@ -574,6 +601,32 @@ mod tests {
         let mut seg = SegmentationDataSet::default();
         parse_seg_info(&mut seg, &mut gb, 2);
         assert_eq!(seg.delta_q_mask, 0);
+    }
+
+    #[test]
+    fn test_rescale_matrix_identity() {
+        let sm = [0, 0, 0x10000, 0, 0, 0x10000];
+        let mut dm = [0i32; 6];
+        rescale_matrix(&mut dm, &sm, 1, 1);
+        assert_eq!(dm[0], 0);
+        assert_eq!(dm[1], 0);
+    }
+
+    #[test]
+    fn test_rescale_matrix_scale2x() {
+        let sm = [0x2000, 0x1000, 0x10000, 0, 0, 0x10000];
+        let mut dm = [0i32; 6];
+        rescale_matrix(&mut dm, &sm, 1, 2);
+        assert!(dm[0].abs() > sm[0].abs());
+    }
+
+    #[test]
+    fn test_rescale_matrix_clamp() {
+        let sm = [0x400000, 0x400000, 0x10000, 0, 0, 0x10000];
+        let mut dm = [0i32; 6];
+        rescale_matrix(&mut dm, &sm, 1, 100);
+        assert!(dm[0] <= 0x7ffe000);
+        assert!(dm[1] <= 0x7ffe000);
     }
 
     #[test]
