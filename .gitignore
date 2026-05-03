@@ -6,3 +6,13 @@ Cargo.lock
 .DS_Store
 /dav2d-install
 /dav2d/build
+
+# AI development files
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+COPILOT.md
+.claude/
+.cursor/
+.aider*
+.continue/
