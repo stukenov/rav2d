@@ -58,6 +58,8 @@ impl Default for Av2Restoration {
 }
 
 use crate::intops::imin;
+use crate::levels::TxPartition;
+use crate::tables::TxfmInfo;
 
 pub type FilterMasks = [[[u16; 4]; 5]; 64];
 
@@ -152,6 +154,170 @@ pub fn mask_inner_edges_h(
         if inner3 != 0 { masks[1][idx][t][2] |= inner3; }
         if inner4 != 0 { masks[1][idx][t][3] |= inner4; }
         y += vstep;
+    }
+}
+
+pub fn mask_edges_part(
+    masks: &mut [FilterMasks; 2],
+    by4: i32,
+    bx4: i32,
+    w4: i32,
+    h4: i32,
+    tx_part: TxPartition,
+    t_dim: &TxfmInfo,
+    hlim: i32,
+    vlim: i32,
+    a: &mut [u8],
+    l: &mut [u8],
+) {
+    let tw4 = t_dim.w as i32;
+    let th4 = t_dim.h as i32;
+    let twl4c = imin(hlim, t_dim.lw as i32);
+    let thl4c = imin(vlim, t_dim.lh as i32);
+
+    if (tx_part as u8) < (TxPartition::H5 as u8) {
+        mask_outer_edge_l(&mut masks[0][bx4 as usize], by4, h4, twl4c as u8, l);
+        mask_outer_edge_t(&mut masks[1][by4 as usize], bx4, w4, thl4c as u8, a);
+        if w4 > tw4 {
+            let inner = (!0u64 >> (64 - h4)) << by4;
+            mask_inner_edges_v(masks, inner, bx4, w4, twl4c, tw4, tw4);
+        }
+        if h4 > th4 {
+            let inner = (!0u64 >> (64 - w4)) << bx4;
+            mask_inner_edges_h(masks, inner, by4, h4, thl4c, th4, th4);
+        }
+    } else if tx_part as u8 == TxPartition::H5 as u8 {
+        debug_assert!(th4 * 4 >= h4 && tw4 * 2 >= w4);
+        mask_outer_edge_t(&mut masks[1][by4 as usize], bx4, w4, thl4c as u8, a);
+        mask_outer_edge_l(&mut masks[0][bx4 as usize], by4, imin(th4, h4), twl4c as u8, l);
+        if h4 > th4 {
+            mask_outer_edge_l(
+                &mut masks[0][bx4 as usize],
+                by4 + th4,
+                imin(2 * th4, h4 - th4),
+                imin(twl4c + 1, hlim) as u8,
+                &mut l[th4 as usize..],
+            );
+            if h4 > th4 * 3 {
+                mask_outer_edge_l(
+                    &mut masks[0][bx4 as usize],
+                    by4 + th4 * 3,
+                    imin(th4, h4 - 3 * th4),
+                    twl4c as u8,
+                    &mut l[th4 as usize * 3..],
+                );
+            }
+        }
+        let inner = (!0u64 >> (64 - w4)) << bx4;
+        mask_inner_edges_h(masks, inner, by4, h4, thl4c, th4, th4 * 2);
+        let inner_a = (!0u64 >> (64 - h4)) << by4;
+        let inner_b = (!0u64 >> (64 - th4 * 2)) << (by4 + th4);
+        let inner_c = inner_a & !inner_b;
+        mask_inner_edges_v(masks, inner_c, bx4, w4, twl4c, tw4, tw4);
+    } else {
+        debug_assert!(tx_part as u8 == TxPartition::V5 as u8 && tw4 * 4 >= w4 && th4 * 2 >= h4);
+        mask_outer_edge_l(&mut masks[0][bx4 as usize], by4, h4, twl4c as u8, l);
+        mask_outer_edge_t(&mut masks[1][by4 as usize], bx4, imin(tw4, w4), thl4c as u8, a);
+        if w4 > tw4 {
+            mask_outer_edge_t(
+                &mut masks[1][by4 as usize],
+                bx4 + tw4,
+                imin(2 * tw4, w4 - tw4),
+                imin(thl4c + 1, vlim) as u8,
+                &mut a[tw4 as usize..],
+            );
+            if w4 > tw4 * 3 {
+                mask_outer_edge_t(
+                    &mut masks[1][by4 as usize],
+                    bx4 + tw4 * 3,
+                    imin(tw4, w4 - 3 * tw4),
+                    thl4c as u8,
+                    &mut a[tw4 as usize * 3..],
+                );
+            }
+        }
+        let inner = (!0u64 >> (64 - h4)) << by4;
+        mask_inner_edges_v(masks, inner, bx4, w4, twl4c, tw4, tw4 * 2);
+        let inner_a = (!0u64 >> (64 - w4)) << bx4;
+        let inner_b = (!0u64 >> (64 - tw4 * 2)) << (bx4 + tw4);
+        let inner_c = inner_a & !inner_b;
+        mask_inner_edges_h(masks, inner_c, by4, h4, thl4c, th4, th4);
+    }
+}
+
+pub fn mask_subpu_edges(
+    masks: &mut [FilterMasks; 2],
+    by4: i32,
+    bx4: i32,
+    w4: i32,
+    h4: i32,
+    twl4c: i32,
+    thl4c: i32,
+    hsz: i32,
+    vsz: i32,
+    ds_sub_pu_mask: i32,
+) {
+    debug_assert!(hsz & (hsz - 1) == 0 && hsz >= 0 && hsz <= 8);
+    debug_assert!(vsz & (vsz - 1) == 0 && vsz >= 0 && vsz <= 8);
+    debug_assert!((thl4c as u32) <= 2 && (twl4c as u32) <= 2);
+    debug_assert!(ds_sub_pu_mask == 15 || ds_sub_pu_mask == 0);
+
+    if hsz != 0 {
+        let inner = (!0u64 >> (64 - h4)) << by4;
+        let inner0 = (inner & 0xffff) as u16;
+        let inner1 = ((inner >> 16) & 0xffff) as u16;
+        let inner2 = ((inner >> 32) & 0xffff) as u16;
+        let inner3 = (inner >> 48) as u16;
+        let mut x = hsz;
+        while x < w4 {
+            let idx = (bx4 + x) as usize;
+            let t = twl4c as usize;
+            macro_rules! mask_subpu_v {
+                ($e:expr, $iv:expr) => {
+                    if $iv != 0 {
+                        let m = masks[0][idx][t][$e];
+                        masks[0][idx][t][$e] |= $iv;
+                        if (x & ds_sub_pu_mask) != 0 {
+                            masks[0][idx][4][$e] |= $iv & !m;
+                        }
+                    }
+                };
+            }
+            mask_subpu_v!(0, inner0);
+            mask_subpu_v!(1, inner1);
+            mask_subpu_v!(2, inner2);
+            mask_subpu_v!(3, inner3);
+            x += hsz;
+        }
+    }
+
+    if vsz != 0 {
+        let inner = (!0u64 >> (64 - w4)) << bx4;
+        let inner0 = (inner & 0xffff) as u16;
+        let inner1 = ((inner >> 16) & 0xffff) as u16;
+        let inner2 = ((inner >> 32) & 0xffff) as u16;
+        let inner3 = (inner >> 48) as u16;
+        let mut y = vsz;
+        while y < h4 {
+            let idx = (by4 + y) as usize;
+            let t = thl4c as usize;
+            macro_rules! mask_subpu_h {
+                ($e:expr, $iv:expr) => {
+                    if $iv != 0 {
+                        let m = masks[1][idx][t][$e];
+                        masks[1][idx][t][$e] |= $iv;
+                        if (y & ds_sub_pu_mask) != 0 {
+                            masks[1][idx][4][$e] |= $iv & !m;
+                        }
+                    }
+                };
+            }
+            mask_subpu_h!(0, inner0);
+            mask_subpu_h!(1, inner1);
+            mask_subpu_h!(2, inner2);
+            mask_subpu_h!(3, inner3);
+            y += vsz;
+        }
     }
 }
 
@@ -268,5 +434,112 @@ mod tests {
         assert_ne!(masks[1][6][1][0], 0);
         assert_ne!(masks[1][10][1][0], 0);
         assert_ne!(masks[1][14][1][0], 0);
+    }
+
+    fn dim_8x8() -> TxfmInfo {
+        TxfmInfo { w: 2, h: 2, lw: 1, lh: 1, min: 1, max: 1, sub: 0, ctx: 1 }
+    }
+
+    fn dim_4x4() -> TxfmInfo {
+        TxfmInfo { w: 1, h: 1, lw: 0, lh: 0, min: 0, max: 0, sub: 0, ctx: 0 }
+    }
+
+    #[test]
+    fn test_mask_edges_part_none_no_inner() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        let mut a = [0u8; 2];
+        let mut l = [0u8; 2];
+        let dim = dim_8x8();
+        mask_edges_part(&mut masks, 0, 0, 2, 2, TxPartition::None, &dim, 3, 3, &mut a, &mut l);
+        assert_ne!(masks[0][0][0][0], 0);
+        assert_ne!(masks[1][0][0][0], 0);
+    }
+
+    #[test]
+    fn test_mask_edges_part_none_with_inner() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        let mut a = [0u8; 4];
+        let mut l = [0u8; 4];
+        let dim = dim_4x4();
+        mask_edges_part(&mut masks, 0, 0, 4, 4, TxPartition::None, &dim, 3, 3, &mut a, &mut l);
+        assert_ne!(masks[0][1][0][0], 0);
+        assert_ne!(masks[1][1][0][0], 0);
+    }
+
+    #[test]
+    fn test_mask_edges_part_h5() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        let mut a = [0u8; 4];
+        let mut l = [0u8; 8];
+        let dim = dim_8x8();
+        mask_edges_part(&mut masks, 0, 0, 4, 8, TxPartition::H5, &dim, 3, 3, &mut a, &mut l);
+        assert_ne!(masks[1][0][0][0], 0);
+        assert_ne!(masks[0][0][0][0], 0);
+    }
+
+    #[test]
+    fn test_mask_edges_part_v5() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        let mut a = [0u8; 8];
+        let mut l = [0u8; 4];
+        let dim = dim_8x8();
+        mask_edges_part(&mut masks, 0, 0, 8, 4, TxPartition::V5, &dim, 3, 3, &mut a, &mut l);
+        assert_ne!(masks[0][0][0][0], 0);
+        assert_ne!(masks[1][0][0][0], 0);
+    }
+
+    #[test]
+    fn test_mask_edges_part_updates_context() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        let mut a = [0u8; 2];
+        let mut l = [0u8; 2];
+        let dim = dim_8x8();
+        mask_edges_part(&mut masks, 0, 0, 2, 2, TxPartition::None, &dim, 3, 3, &mut a, &mut l);
+        assert_eq!(a[0], 1);
+        assert_eq!(a[1], 1);
+        assert_eq!(l[0], 1);
+        assert_eq!(l[1], 1);
+    }
+
+    #[test]
+    fn test_mask_subpu_edges_hsz_only() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        mask_subpu_edges(&mut masks, 0, 0, 8, 4, 1, 1, 4, 0, 15);
+        assert_ne!(masks[0][4][1][0], 0);
+        for row in &masks[1] {
+            for lvl in row { for s in lvl { assert_eq!(*s, 0); } }
+        }
+    }
+
+    #[test]
+    fn test_mask_subpu_edges_vsz_only() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        mask_subpu_edges(&mut masks, 0, 0, 4, 8, 1, 1, 0, 4, 15);
+        assert_ne!(masks[1][4][1][0], 0);
+        for row in &masks[0] {
+            for lvl in row { for s in lvl { assert_eq!(*s, 0); } }
+        }
+    }
+
+    #[test]
+    fn test_mask_subpu_edges_both() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        mask_subpu_edges(&mut masks, 0, 0, 8, 8, 1, 1, 4, 4, 0);
+        assert_ne!(masks[0][4][1][0], 0);
+        assert_ne!(masks[1][4][1][0], 0);
+    }
+
+    #[test]
+    fn test_mask_subpu_edges_ds_mask_sets_noskip() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        mask_subpu_edges(&mut masks, 0, 0, 8, 4, 1, 1, 4, 0, 15);
+        assert_ne!(masks[0][4][4][0], 0);
+    }
+
+    #[test]
+    fn test_mask_subpu_edges_no_ds_mask() {
+        let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
+        mask_subpu_edges(&mut masks, 0, 0, 8, 4, 1, 1, 4, 0, 0);
+        assert_eq!(masks[0][4][4][0], 0);
     }
 }
