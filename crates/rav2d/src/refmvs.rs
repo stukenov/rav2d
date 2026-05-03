@@ -99,6 +99,71 @@ pub fn dequantize_mv(mv: QMv) -> Mv {
     }
 }
 
+pub fn get_warpmv_proj(
+    warp_type: i8,
+    m: &[i32; 6],
+    x: i32,
+    y: i32,
+    minx: i32,
+    maxx: i32,
+    miny: i32,
+    maxy: i32,
+) -> Mv {
+    if warp_type <= 0 {
+        return Mv { n: 0 };
+    }
+    let xc = (m[2] - (1 << 16)) * x + m[3] * y + m[0];
+    let yc = (m[5] - (1 << 16)) * y + m[4] * x + m[1];
+    let ry = iclip((yc + 0x1000 - (yc < 0) as i32) >> 13, -0xffff, 0xffff);
+    let rx = iclip((xc + 0x1000 - (xc < 0) as i32) >> 13, -0xffff, 0xffff);
+    Mv {
+        c: MvXY {
+            y: iclip(ry, miny, maxy),
+            x: iclip(rx, minx, maxx),
+        },
+    }
+}
+
+pub fn abs_closest_ref(ref2ref: &[i8; 7], cur2ref: &[i8; 7], dir: bool) -> u32 {
+    let mut b = 0xffu32;
+    for n in 0..7 {
+        let a = (ref2ref[n] as i32).unsigned_abs();
+        if ((cur2ref[n] > 0 && ref2ref[n] > 0 && dir)
+            || (cur2ref[n] < 0 && ref2ref[n] < 0 && !dir))
+            && a < b
+        {
+            b = a;
+        }
+    }
+    b
+}
+
+pub fn topo_insert(
+    mut cnt: i32,
+    idx: usize,
+    order: &mut [i8],
+    rev_order: &mut [i8],
+    cnv: &[[i8; 7]],
+    refcnt: &[u8],
+) -> i32 {
+    if rev_order[idx] != -1 {
+        return cnt;
+    }
+    rev_order[idx] = 0;
+    if refcnt[idx] != 0 {
+        for n in 0..7 {
+            let r_idx = cnv[idx][n];
+            if r_idx == -1 {
+                continue;
+            }
+            cnt = topo_insert(cnt, r_idx as usize, order, rev_order, cnv, refcnt);
+        }
+    }
+    order[cnt as usize] = idx as i8;
+    rev_order[idx] = cnt as i8;
+    cnt + 1
+}
+
 #[derive(Clone, Copy, Default)]
 #[repr(C, align(2))]
 pub struct TrajMap {
@@ -367,5 +432,71 @@ mod tests {
         assert_eq!(dequantize_mv_comp(1), 1);
         assert_eq!(dequantize_mv_comp(-1), -1);
         assert_eq!(dequantize_mv_comp(15), 15);
+    }
+
+    #[test]
+    fn test_get_warpmv_proj_disabled() {
+        let m = [0i32; 6];
+        let mv = get_warpmv_proj(0, &m, 10, 20, -100, 100, -100, 100);
+        assert_eq!(unsafe { mv.n }, 0);
+    }
+
+    #[test]
+    fn test_get_warpmv_proj_identity() {
+        let m = [0, 0, 1 << 16, 0, 0, 1 << 16];
+        let mv = get_warpmv_proj(1, &m, 100, 200, -0xffff, 0xffff, -0xffff, 0xffff);
+        let (y, x) = unsafe { (mv.c.y, mv.c.x) };
+        assert_eq!(y, 0);
+        assert_eq!(x, 0);
+    }
+
+    #[test]
+    fn test_get_warpmv_proj_clamp() {
+        let m = [1_000_000, 1_000_000, 1 << 16, 0, 0, 1 << 16];
+        let mv = get_warpmv_proj(1, &m, 0, 0, -100, 100, -100, 100);
+        let (y, x) = unsafe { (mv.c.y, mv.c.x) };
+        assert_eq!(y, 100);
+        assert_eq!(x, 100);
+    }
+
+    #[test]
+    fn test_abs_closest_ref_basic() {
+        let ref2ref = [1, -2, 3, 0, 0, 0, 0i8];
+        let cur2ref = [1, -1, 1, 0, 0, 0, 0i8];
+        assert_eq!(abs_closest_ref(&ref2ref, &cur2ref, true), 1);
+    }
+
+    #[test]
+    fn test_abs_closest_ref_no_match() {
+        let ref2ref = [1, 2, 3, 4, 5, 6, 7i8];
+        let cur2ref = [-1, -2, -3, -4, -5, -6, -7i8];
+        assert_eq!(abs_closest_ref(&ref2ref, &cur2ref, true), 0xff);
+    }
+
+    #[test]
+    fn test_topo_insert_basic() {
+        let mut order = [-1i8; 7];
+        let mut rev_order = [-1i8; 7];
+        let cnv = [[-1i8; 7]; 7];
+        let refcnt = [0u8; 7];
+        let cnt = topo_insert(0, 3, &mut order, &mut rev_order, &cnv, &refcnt);
+        assert_eq!(cnt, 1);
+        assert_eq!(order[0], 3);
+        assert_eq!(rev_order[3], 0);
+    }
+
+    #[test]
+    fn test_topo_insert_chain() {
+        let mut order = [-1i8; 7];
+        let mut rev_order = [-1i8; 7];
+        let mut cnv = [[-1i8; 7]; 7];
+        cnv[0][0] = 1;
+        cnv[1][0] = 2;
+        let refcnt = [1u8; 7];
+        let cnt = topo_insert(0, 0, &mut order, &mut rev_order, &cnv, &refcnt);
+        assert_eq!(cnt, 3);
+        assert_eq!(order[0], 2);
+        assert_eq!(order[1], 1);
+        assert_eq!(order[2], 0);
     }
 }
