@@ -1,3 +1,4 @@
+use crate::headers::WarpedMotionParams;
 use crate::intops::{apply_sign, iclip, iclip64to32, imax, imin, ulog2};
 use crate::levels::INVALID_MV;
 use crate::levels::{Mv, MvXY, RefPair};
@@ -603,6 +604,141 @@ pub fn fill_holes(
     }
 }
 
+pub fn warp_bank_add(
+    warp: &mut WarpBank,
+    mat: &WarpedMotionParams,
+    r#ref: usize,
+) -> i32 {
+    if warp.hits >= 64 {
+        return -1;
+    }
+    warp.hits += 1;
+    let sz = warp.size[r#ref] as usize;
+    let idx = warp.idx[r#ref] as usize;
+
+    let mut n = 0;
+    while n < sz {
+        let m = &warp.mat[r#ref][(idx + n) & 3][2..6];
+        if m == &mat.matrix[2..6] {
+            break;
+        }
+        n += 1;
+    }
+
+    if n < sz {
+        let to = if sz == 4 { (idx.wrapping_sub(1)) & 3 } else { sz - 1 };
+        let from = (idx + n) & 3;
+        if from != to {
+            let bak = warp.mat[r#ref][from];
+            let bak_type = warp.warp_type[r#ref][from];
+            let mut n1 = from;
+            let mut n2 = (n1 + 1) & 3;
+            while n1 != to {
+                warp.mat[r#ref][n1] = warp.mat[r#ref][n2];
+                warp.warp_type[r#ref][n1] = warp.warp_type[r#ref][n2];
+                n1 = n2;
+                n2 = (n2 + 1) & 3;
+            }
+            warp.mat[r#ref][to] = bak;
+            warp.warp_type[r#ref][to] = bak_type;
+        }
+        return 0;
+    }
+
+    let tgt = if sz == 4 {
+        let t = warp.idx[r#ref] as usize & 3;
+        warp.idx[r#ref] = warp.idx[r#ref].wrapping_add(1);
+        t
+    } else {
+        let t = warp.size[r#ref] as usize;
+        warp.size[r#ref] += 1;
+        t
+    };
+    warp.mat[r#ref][tgt] = mat.matrix;
+    warp.warp_type[r#ref][tgt] = mat.wm_type as i8;
+    0
+}
+
+pub fn mv_bank_add_inner(
+    bank: &mut MvBank,
+    r#ref: RefPair,
+    mv: &[Mv; 2],
+    cwp_idx_val: i8,
+) {
+    bank.hits[0] += 1;
+
+    let (ref0, ref1) = unsafe { (r#ref.r[0], r#ref.r[1]) };
+    let c = if ref1 == -1 {
+        if (ref0 as u32) <= 5 { ref0 as usize } else { 8 }
+    } else {
+        if ref0 == 0 && ref1 <= 1 { 6 + ref1 as usize } else { 8 }
+    };
+    let sz = bank.size[c] as usize;
+    let idx = bank.idx[c] as usize;
+    let comp = ref1 != -1;
+    let comp_idx = if comp { 1 } else { 0 };
+
+    let mut n = 0;
+    while n < sz {
+        let i = (idx + n) & 3;
+        let match0 = unsafe { mv[0].n == bank.mv[c][i][0].n };
+        let match1 = unsafe { mv[comp_idx].n == bank.mv[c][i][comp_idx].n };
+        let ref_match = c < 8 || unsafe { r#ref.pair == bank.r#ref[i].pair };
+        if match0 && match1 && ref_match {
+            break;
+        }
+        n += 1;
+    }
+
+    if n < sz {
+        let to = if sz == 4 { idx.wrapping_sub(1) & 3 } else { sz - 1 };
+        let from = (idx + n) & 3;
+        if from != to {
+            let mv_bak = bank.mv[c][from];
+            let ref_bak = bank.r#ref[from];
+            let cwp_bak = if c >= 6 { bank.cwp_idx[c.saturating_sub(6)][from] } else { 0 };
+            let mut n1 = from;
+            let mut n2 = (n1 + 1) & 3;
+            while n1 != to {
+                bank.mv[c][n1] = bank.mv[c][n2];
+                if c == 8 {
+                    bank.r#ref[n1] = bank.r#ref[n2];
+                }
+                if c >= 6 {
+                    bank.cwp_idx[c - 6][n1] = bank.cwp_idx[c - 6][n2];
+                }
+                n1 = n2;
+                n2 = (n2 + 1) & 3;
+            }
+            bank.mv[c][to] = mv_bak;
+            if c == 8 {
+                bank.r#ref[to] = ref_bak;
+            }
+            if c >= 6 {
+                bank.cwp_idx[c - 6][to] = cwp_bak;
+            }
+        }
+        return;
+    }
+
+    let tgt = if sz == 4 {
+        let t = bank.idx[c] as usize & 3;
+        bank.idx[c] = bank.idx[c].wrapping_add(1);
+        t
+    } else {
+        let t = bank.size[c] as usize;
+        bank.size[c] += 1;
+        t
+    };
+    bank.mv[c][tgt] = *mv;
+    if c == 8 {
+        bank.r#ref[tgt] = r#ref;
+    }
+    if ref1 != -1 {
+        bank.cwp_idx[c.saturating_sub(6)][tgt] = cwp_idx_val;
+    }
+}
+
 static SMOOTHEN_IDIV: [u32; 5] = [65536, 32768, 21845, 16384, 13107];
 
 pub fn smoothen(
@@ -1043,6 +1179,97 @@ mod tests {
         rp[2] = make_sngl_mv_block(70, 80, 1);
         fill_holes(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
         assert_eq!(unsafe { rp[2].mv.c.y }, 70);
+    }
+
+    #[test]
+    fn test_warp_bank_add_new() {
+        let mut warp = WarpBank {
+            mat: [[[0i32; 6]; 4]; 7],
+            warp_type: [[0i8; 4]; 7],
+            hits: 0,
+            size: [0u8; 7],
+            idx: [0u8; 7],
+        };
+        let mat = WarpedMotionParams {
+            matrix: [100, 200, 0x10000, 0, 0, 0x10000],
+            ..WarpedMotionParams::default()
+        };
+        assert_eq!(warp_bank_add(&mut warp, &mat, 0), 0);
+        assert_eq!(warp.size[0], 1);
+        assert_eq!(warp.hits, 1);
+    }
+
+    #[test]
+    fn test_warp_bank_add_dup() {
+        let mut warp = WarpBank {
+            mat: [[[0i32; 6]; 4]; 7],
+            warp_type: [[0i8; 4]; 7],
+            hits: 0,
+            size: [0u8; 7],
+            idx: [0u8; 7],
+        };
+        let mat = WarpedMotionParams {
+            matrix: [100, 200, 0x10000, 0, 0, 0x10000],
+            ..WarpedMotionParams::default()
+        };
+        warp_bank_add(&mut warp, &mat, 0);
+        assert_eq!(warp_bank_add(&mut warp, &mat, 0), 0);
+        assert_eq!(warp.size[0], 1);
+    }
+
+    #[test]
+    fn test_warp_bank_add_full() {
+        let mut warp = WarpBank {
+            mat: [[[0i32; 6]; 4]; 7],
+            warp_type: [[0i8; 4]; 7],
+            hits: 64,
+            size: [0u8; 7],
+            idx: [0u8; 7],
+        };
+        let mat = WarpedMotionParams::default();
+        assert_eq!(warp_bank_add(&mut warp, &mat, 0), -1);
+    }
+
+    #[test]
+    fn test_mv_bank_add_inner_single_ref() {
+        let mut bank = MvBank {
+            mv: [[[Mv { n: 0 }; 2]; 4]; 9],
+            cwp_idx: [[0i8; 4]; 3],
+            r#ref: [RefPair::default(); 4],
+            size: [0u8; 9],
+            idx: [0u8; 9],
+            hits: [0u8; 2],
+            avail: 4,
+        };
+        let r = RefPair { r: [2, -1] };
+        let mv = [
+            Mv { c: MvXY { y: 10, x: 20 } },
+            Mv { n: 0 },
+        ];
+        mv_bank_add_inner(&mut bank, r, &mv, 0);
+        assert_eq!(bank.size[2], 1);
+        assert_eq!(bank.hits[0], 1);
+    }
+
+    #[test]
+    fn test_mv_bank_add_inner_dup() {
+        let mut bank = MvBank {
+            mv: [[[Mv { n: 0 }; 2]; 4]; 9],
+            cwp_idx: [[0i8; 4]; 3],
+            r#ref: [RefPair::default(); 4],
+            size: [0u8; 9],
+            idx: [0u8; 9],
+            hits: [0u8; 2],
+            avail: 4,
+        };
+        let r = RefPair { r: [2, -1] };
+        let mv = [
+            Mv { c: MvXY { y: 10, x: 20 } },
+            Mv { n: 0 },
+        ];
+        mv_bank_add_inner(&mut bank, r, &mv, 0);
+        mv_bank_add_inner(&mut bank, r, &mv, 0);
+        assert_eq!(bank.size[2], 1);
     }
 
     #[test]
