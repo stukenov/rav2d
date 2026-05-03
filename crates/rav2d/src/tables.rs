@@ -1,5 +1,12 @@
-use crate::headers::PixelLayout;
+use crate::headers::{PixelLayout, WarpedMotionParams, WarpedMotionType};
 use crate::levels::{N_BS_SIZES, N_RECT_TX_SIZES, N_UV_INTRA_PRED_MODES};
+
+pub static DEFAULT_WM_PARAMS: WarpedMotionParams = WarpedMotionParams {
+    wm_type: WarpedMotionType::Identity,
+    matrix: [0, 0, 1 << 16, 0, 0, 1 << 16],
+    abcd: [0; 4],
+    affine: 0,
+};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TxfmInfo {
