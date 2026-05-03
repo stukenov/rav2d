@@ -5,6 +5,7 @@ use crate::headers::{FrameHeader, MAX_SEGMENTS};
 use crate::internal::ScalableMotionParams;
 use crate::intops::{apply_sign64, imax, imin, inv_recenter};
 use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES};
+use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
 
@@ -662,6 +663,143 @@ pub fn read_mv_residual(
     }
 }
 
+pub fn read_pal_indices(
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    pal_out: &mut [u8],
+    scratch: &mut [u8],
+    pal_sz: i32,
+    sz: &[i32; 4],
+) -> i32 {
+    let dir = (imax(sz[2], sz[3]) < 64) as u32
+        & msac.decode_bool_bypass();
+    let strides: [isize; 2] = if dir != 0 {
+        [1, sz[2] as isize]
+    } else {
+        [sz[2] as isize, 1]
+    };
+
+    let lim1 = sz[dir as usize ^ 1] as usize;
+    let lim2 = sz[dir as usize] as usize;
+    let pal_cdf_base = (pal_sz - 2) as usize;
+    let nsym = (pal_sz - 1) as usize;
+
+    let mut copy = msac.decode_symbol_adapt(cdf_m.pal_idx_identity(3), 2) as i32;
+    if copy == 2 {
+        return -1;
+    }
+    let mut prev_v = msac.decode_uniform(pal_sz as u32) as i32;
+    scratch[0] = prev_v as u8;
+    if copy == 1 {
+        for m in 1..lim2 {
+            scratch[(m as isize * strides[1]) as usize] = prev_v as u8;
+        }
+    } else {
+        let mut prev_h = prev_v;
+        for m in 1..lim2 {
+            let v = msac.decode_symbol_adapt(
+                cdf_m.pal_idx(pal_cdf_base, 0),
+                nsym,
+            ) as i32;
+            prev_h = if v == 0 {
+                prev_h
+            } else {
+                v - (v <= prev_h) as i32
+            };
+            scratch[(m as isize * strides[1]) as usize] = prev_h as u8;
+        }
+    }
+
+    let mut off: isize = strides[0];
+    for _n in 1..lim1 {
+        copy = msac.decode_symbol_adapt(cdf_m.pal_idx_identity(copy as usize), 2) as i32;
+        if copy == 2 {
+            for m in 0..lim2 {
+                let dst = (off + m as isize * strides[1]) as usize;
+                let src = (off - strides[0] + m as isize * strides[1]) as usize;
+                scratch[dst] = scratch[src];
+            }
+        } else {
+            let v = msac.decode_symbol_adapt(
+                cdf_m.pal_idx(pal_cdf_base, 0),
+                nsym,
+            ) as i32;
+            let next_v = if v == 0 { prev_v } else { v - (v <= prev_v) as i32 };
+            scratch[off as usize] = next_v as u8;
+
+            if copy == 1 {
+                for m in 1..lim2 {
+                    scratch[(off + m as isize * strides[1]) as usize] = next_v as u8;
+                }
+            } else {
+                let mut prev_tl = prev_v;
+                let mut prev_l = next_v;
+                for m in 1..lim2 {
+                    let prev_t = scratch[(off - strides[0] + m as isize * strides[1]) as usize] as i32;
+                    let ctx = if prev_t == prev_l {
+                        3 + (prev_tl == prev_l) as usize
+                    } else {
+                        1 + (prev_t == prev_tl || prev_l == prev_tl) as usize
+                    };
+                    let v = msac.decode_symbol_adapt(
+                        cdf_m.pal_idx(pal_cdf_base, ctx),
+                        nsym,
+                    ) as i32;
+                    let p = match ctx {
+                        1 => match v {
+                            0 | 1 => {
+                                if v == dir as i32 { prev_l } else { prev_t }
+                            }
+                            2 => prev_tl,
+                            _ => {
+                                let s1 = (prev_l < prev_t) as i32;
+                                let s2 = (prev_l < prev_tl) as i32;
+                                let s3 = (prev_t < prev_tl) as i32;
+                                v - (v <= prev_l + s1 + s2) as i32
+                                    - (v <= prev_t + s3 + 1 - s1) as i32
+                                    - (v <= prev_tl + 1 - s2 + 1 - s3) as i32
+                            }
+                        },
+                        2 => {
+                            let prev_l_or_t = prev_l + prev_t - prev_tl;
+                            match v {
+                                0 => prev_tl,
+                                1 => prev_l_or_t,
+                                _ => {
+                                    let s = (prev_l_or_t < prev_tl) as i32;
+                                    v - (v <= prev_l_or_t + s) as i32
+                                        - (v <= prev_tl + 1 - s) as i32
+                                }
+                            }
+                        }
+                        3 => match v {
+                            0 => prev_l,
+                            1 => prev_tl,
+                            _ => {
+                                let s = (prev_l < prev_tl) as i32;
+                                v - (v <= prev_l + s) as i32
+                                    - (v <= prev_tl + 1 - s) as i32
+                            }
+                        },
+                        4 => {
+                            if v == 0 { prev_l } else { v - (v <= prev_l) as i32 }
+                        }
+                        _ => unreachable!(),
+                    };
+                    scratch[(off + m as isize * strides[1]) as usize] = p as u8;
+                    prev_l = p;
+                    prev_tl = prev_t;
+                }
+            }
+            prev_v = next_v;
+        }
+        off += strides[0];
+    }
+
+    pal_idx_finish(pal_out, scratch, sz[2] as usize, sz[3] as usize, sz[0] as usize, sz[1] as usize);
+    0
+}
+
 pub fn read_tx_part(
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
@@ -1150,5 +1288,44 @@ mod tests {
         b.skip_txfm = 0;
         read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs8x4, false, true);
         assert!(b.tx_part <= TxPartition::V5 as u8);
+    }
+
+    #[test]
+    fn test_read_pal_indices_basic() {
+        let data = vec![0x00; 512];
+        let mut msac = make_msac(&data);
+        let mut cdf_m = make_default_cdf_mode();
+        let mut pal_out = vec![0u8; 64];
+        let mut scratch = vec![0u8; 4096];
+        let sz = [4, 4, 4, 4];
+        let ret = read_pal_indices(&mut msac, &mut cdf_m, &mut pal_out, &mut scratch, 3, &sz);
+        assert!(ret == 0 || ret == -1);
+    }
+
+    #[test]
+    fn test_read_pal_indices_pal_sz_range() {
+        for pal_sz in 2..=8 {
+            let data = vec![0x80; 512];
+            let mut msac = make_msac(&data);
+            let mut cdf_m = make_default_cdf_mode();
+            let mut pal_out = vec![0u8; 64];
+            let mut scratch = vec![0u8; 4096];
+            let sz = [4, 4, 4, 4];
+            let ret = read_pal_indices(&mut msac, &mut cdf_m, &mut pal_out, &mut scratch, pal_sz, &sz);
+            assert!(ret == 0 || ret == -1);
+        }
+    }
+
+    #[test]
+    fn test_read_pal_indices_does_not_panic() {
+        for &byte in &[0x00u8, 0x55, 0x80, 0xAA, 0xFF] {
+            let data = vec![byte; 512];
+            let mut msac = make_msac(&data);
+            let mut cdf_m = make_default_cdf_mode();
+            let mut pal_out = vec![0u8; 128];
+            let mut scratch = vec![0u8; 4096];
+            let sz = [8, 4, 8, 4];
+            let _ = read_pal_indices(&mut msac, &mut cdf_m, &mut pal_out, &mut scratch, 4, &sz);
+        }
     }
 }
