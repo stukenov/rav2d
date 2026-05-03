@@ -519,6 +519,48 @@ pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
     t
 };
 
+pub static FSC_BSIZE_GROUPS: [u8; N_BS_SIZES] = {
+    let mut t = [0u8; N_BS_SIZES];
+    t[Bs32x32 as usize] = 5;
+    t[Bs32x16 as usize] = 5;
+    t[Bs32x8 as usize] = 4;
+    t[Bs32x4 as usize] = 4;
+    t[Bs16x32 as usize] = 5;
+    t[Bs16x16 as usize] = 4;
+    t[Bs16x8 as usize] = 3;
+    t[Bs16x4 as usize] = 3;
+    t[Bs8x32 as usize] = 4;
+    t[Bs8x16 as usize] = 3;
+    t[Bs8x8 as usize] = 2;
+    t[Bs8x4 as usize] = 1;
+    t[Bs4x32 as usize] = 4;
+    t[Bs4x16 as usize] = 3;
+    t[Bs4x8 as usize] = 1;
+    t
+};
+
+pub static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] = [
+    [8, 12, 4, 10, 6],
+    [8, 12, 4, 20, -4],
+];
+
+// indexed by inter_mode - CompInterPredMode::NearMvNewMv
+pub static AMVD_MODE_CONTEXT: [u8; 10] = {
+    let mut t = [0u8; 10];
+    use crate::levels::CompInterPredMode::*;
+    let base = NearMvNewMv as usize;
+    t[NearMvNewMv as usize - base] = 0;
+    t[NewMvNearMv as usize - base] = 1;
+    t[OpflNearMvNewMv as usize - base] = 2;
+    t[OpflNewMvNearMv as usize - base] = 3;
+    // GlobalMvGlobalMv(21) and NewMvNewMv(22) map to indices 2,3 — left as 0
+    t[JointNewMv as usize - base] = 5;
+    t[OpflJointNewMv as usize - base] = 6;
+    t[NewMvNewMv as usize - base] = 7;
+    t[OpflNewMvNewMv as usize - base] = 8;
+    t
+};
+
 pub fn read_wedge_idx(msac: &mut MsacContext, cdf_m: &mut CdfModeContext) -> i8 {
     let quad = msac.decode_symbol_adapt(cdf_m.wedge_quad(), 3) as usize;
     let angle = 5 * quad
