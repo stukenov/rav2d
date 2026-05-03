@@ -269,6 +269,33 @@ pub fn mc_lowest_px(
     }
 }
 
+pub fn affine_lowest_px(
+    dst: &mut i32,
+    b_dim: &[u8],
+    by: i32,
+    bx: i32,
+    mat: &[i32; 6],
+    ss_ver: i32,
+    ss_hor: i32,
+) {
+    let h_mul = 4 >> ss_hor;
+    let v_mul = 4 >> ss_ver;
+    let y = b_dim[1] as i32 * v_mul - 8;
+
+    let src_y = by * 4 + ((y + 4) << ss_ver);
+    let mat5_y = mat[5] as i64 * src_y as i64 + mat[1] as i64;
+    let bw = b_dim[0] as i32 * h_mul;
+    let step = imax(8, bw - 8);
+    let mut x = 0;
+    while x < bw {
+        let src_x = bx * 4 + ((x + 4) << ss_hor);
+        let mvy = (mat[4] as i64 * src_x as i64 + mat5_y) >> ss_ver;
+        let dy = (mvy >> 16) as i32 - 4;
+        *dst = imax(*dst, dy + 4 + 8);
+        x += step;
+    }
+}
+
 pub static REORDERED_NONDIR_Y_MODE: [u8; 5] = [0, 9, 10, 11, 12];
 
 pub static REORDERED_DIR_Y_MODE: [u8; 8] = [3, 8, 1, 5, 4, 6, 2, 7];
@@ -952,5 +979,35 @@ mod tests {
             assert!(y >= 0 || y < 0);
             assert!(x >= 0 || x < 0);
         }
+    }
+
+    #[test]
+    fn test_affine_lowest_px_basic() {
+        let b_dim = [8u8, 8, 32, 32];
+        let mat = [0i32, 1 << 16, 0, 0, 0, 1 << 16];
+        let mut dst = i32::MIN;
+        affine_lowest_px(&mut dst, &b_dim, 4, 4, &mat, 0, 0);
+        assert!(dst > i32::MIN);
+    }
+
+    #[test]
+    fn test_affine_lowest_px_subsampled() {
+        let b_dim = [8u8, 8, 32, 32];
+        let mat = [0i32, 1 << 16, 0, 0, 0, 1 << 16];
+        let mut dst0 = i32::MIN;
+        let mut dst1 = i32::MIN;
+        affine_lowest_px(&mut dst0, &b_dim, 4, 4, &mat, 0, 0);
+        affine_lowest_px(&mut dst1, &b_dim, 4, 4, &mat, 1, 1);
+        assert!(dst0 > i32::MIN);
+        assert!(dst1 > i32::MIN);
+    }
+
+    #[test]
+    fn test_affine_lowest_px_accumulates() {
+        let b_dim = [8u8, 8, 32, 32];
+        let mat = [0i32, 1 << 16, 0, 0, 0, 1 << 16];
+        let mut dst = 1000;
+        affine_lowest_px(&mut dst, &b_dim, 0, 0, &mat, 0, 0);
+        assert!(dst >= 1000);
     }
 }
