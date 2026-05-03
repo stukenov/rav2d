@@ -156,6 +156,23 @@ pub fn generate_grain_uv(
     }
 }
 
+pub fn sample_lut(
+    grain_lut: &[[i16; GRAIN_WIDTH]],
+    bs: usize,
+    offsets: &[[[i32; 2]; 2]; 2],
+    subx: usize,
+    suby: usize,
+    bx: usize,
+    by: usize,
+    x: usize,
+    y: usize,
+) -> i16 {
+    let off = &offsets[bx][by];
+    let offx = 3 + (2 >> subx) * (3 + off[1] as usize);
+    let offy = 3 + (2 >> suby) * (3 + off[0] as usize);
+    grain_lut[offy + y + (bs >> suby) * by][offx + x + (bs >> subx) * bx]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +344,14 @@ mod tests {
                 assert!(v >= -128 && v <= 127);
             }
         }
+    }
+
+    #[test]
+    fn test_sample_lut_basic() {
+        let mut lut = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
+        lut[10][15] = 42;
+        let offsets = [[[0i32; 2]; 2]; 2];
+        let v = sample_lut(&lut, 32, &offsets, 0, 0, 0, 0, 9, 4);
+        let _ = v;
     }
 }
