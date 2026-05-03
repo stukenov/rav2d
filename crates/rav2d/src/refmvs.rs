@@ -1,4 +1,5 @@
 use crate::intops::{apply_sign, iclip, iclip64to32, imax, imin, ulog2};
+use crate::levels::INVALID_MV;
 use crate::levels::{Mv, MvXY, RefPair};
 
 pub const INVALID_TRAJ: u16 = 0x8080;
@@ -498,6 +499,205 @@ pub fn add_candidate_comp(
     true
 }
 
+pub fn tip_projection(
+    rp_proj: &mut [SnglMvBlock],
+    stride: isize,
+    col_start8: i32,
+    col_end8: i32,
+    row_start8: i32,
+    row_end8: i32,
+    mfmv_sbsz8: i32,
+    sbsz8: i32,
+    tmvp_sample_step: i32,
+    tip_delta: i8,
+) {
+    let mut sx = col_start8;
+    while sx < col_end8 {
+        let xend = imin(col_end8, sx + mfmv_sbsz8);
+        let mut y = row_start8;
+        while y < row_end8 {
+            let pos_base = ((y & (sbsz8 - 1)) as isize) * stride;
+            let mut x = sx;
+            while x < xend {
+                let pos = (pos_base + x as isize) as usize;
+                let mv_y = unsafe { rp_proj[pos].mv.c.y };
+                if mv_y == INVALID_MV {
+                    x += tmvp_sample_step;
+                    continue;
+                }
+                let mv = rp_proj[pos].mv;
+                let r = rp_proj[pos].r#ref;
+                rp_proj[pos].mv = mv_projection(mv, tip_delta as i32, r as i32, -2047, 2047);
+                rp_proj[pos].r#ref = tip_delta as u8;
+                x += tmvp_sample_step;
+            }
+            y += tmvp_sample_step;
+        }
+        sx += mfmv_sbsz8;
+    }
+}
+
+pub fn fill_holes(
+    rp_proj: &mut [SnglMvBlock],
+    stride: isize,
+    col_start8: i32,
+    col_end8: i32,
+    row_start8: i32,
+    row_end8: i32,
+    mfmv_sbsz8: i32,
+    sbsz8: i32,
+    tmvp_sample_step: i32,
+    tip_delta: i8,
+) {
+    let step = tmvp_sample_step;
+    let mut sx = col_start8;
+    while sx < col_end8 {
+        let xend = imin(col_end8, sx + mfmv_sbsz8);
+        let mut y = row_start8;
+        while y < row_end8 {
+            let ystart = y & !(mfmv_sbsz8 - 1);
+            let yend = imin(ystart + mfmv_sbsz8, row_end8);
+            let pos_base = ((y & (sbsz8 - 1)) as isize) * stride;
+            let mut x = sx;
+            while x < xend {
+                let pos = (pos_base + x as isize) as usize;
+                let mv_y = unsafe { rp_proj[pos].mv.c.y };
+                if mv_y == INVALID_MV {
+                    x += step;
+                    continue;
+                }
+                let mv = rp_proj[pos].mv;
+                if x - step >= sx {
+                    let p = (pos as isize - step as isize) as usize;
+                    if unsafe { rp_proj[p].mv.c.y } == INVALID_MV {
+                        rp_proj[p].mv = mv;
+                        rp_proj[p].r#ref = tip_delta as u8;
+                    }
+                }
+                if x + step < xend {
+                    let p = pos + step as usize;
+                    if unsafe { rp_proj[p].mv.c.y } == INVALID_MV {
+                        rp_proj[p].mv = mv;
+                        rp_proj[p].r#ref = tip_delta as u8;
+                    }
+                }
+                if y - step >= ystart {
+                    let p = (pos as isize - step as isize * stride) as usize;
+                    if unsafe { rp_proj[p].mv.c.y } == INVALID_MV {
+                        rp_proj[p].mv = mv;
+                        rp_proj[p].r#ref = tip_delta as u8;
+                    }
+                }
+                if y + step < yend {
+                    let p = (pos as isize + step as isize * stride) as usize;
+                    if unsafe { rp_proj[p].mv.c.y } == INVALID_MV {
+                        rp_proj[p].mv = mv;
+                        rp_proj[p].r#ref = tip_delta as u8;
+                    }
+                }
+                x += step;
+            }
+            y += step;
+        }
+        sx += mfmv_sbsz8;
+    }
+}
+
+static SMOOTHEN_IDIV: [u32; 5] = [65536, 32768, 21845, 16384, 13107];
+
+pub fn smoothen(
+    rp_proj: &mut [SnglMvBlock],
+    stride: isize,
+    col_start8: i32,
+    col_end8: i32,
+    row_start8: i32,
+    row_end8: i32,
+    mfmv_sbsz8: i32,
+    sbsz8: i32,
+    tmvp_sample_step: i32,
+    tip_delta: i8,
+) {
+    let step = tmvp_sample_step;
+    let mut mv_line = [Mv { n: 0 }; 32];
+    let mut sx = col_start8;
+    while sx < col_end8 {
+        let xend = imin(col_end8, sx + mfmv_sbsz8);
+        let mut first_line = true;
+        let mut y = row_start8;
+        while y < row_end8 {
+            let ystart = y & !(mfmv_sbsz8 - 1);
+            let yend = imin(ystart + mfmv_sbsz8, row_end8);
+            let pos_base = ((y & (sbsz8 - 1)) as isize) * stride;
+            let mut x = sx;
+            while x < xend {
+                let pos = (pos_base + x as isize) as usize;
+                let mut sum_x: i32 = 0;
+                let mut sum_y: i32 = 0;
+                let mut sum_n: usize = 0;
+
+                macro_rules! add_sample {
+                    ($p:expr) => {
+                        let mv_y_val = unsafe { rp_proj[$p].mv.c.y };
+                        if mv_y_val != INVALID_MV {
+                            sum_x += unsafe { rp_proj[$p].mv.c.x } as i32;
+                            sum_y += mv_y_val as i32;
+                            sum_n += 1;
+                        }
+                    };
+                }
+
+                add_sample!(pos);
+                if x - step >= sx {
+                    add_sample!((pos as isize - step as isize) as usize);
+                }
+                if x + step < xend {
+                    add_sample!(pos + step as usize);
+                }
+                if y - step >= ystart {
+                    add_sample!((pos as isize - step as isize * stride) as usize);
+                }
+                if y + step < yend {
+                    add_sample!((pos as isize + step as isize * stride) as usize);
+                }
+
+                if !first_line {
+                    let prev = (pos as isize - step as isize * stride) as usize;
+                    rp_proj[prev].mv = mv_line[(x - sx) as usize];
+                    rp_proj[prev].r#ref = tip_delta as u8;
+                }
+
+                if sum_n > 0 {
+                    let d = SMOOTHEN_IDIV[sum_n - 1] as i64;
+                    mv_line[(x - sx) as usize] = Mv {
+                        c: MvXY {
+                            y: ((sum_y as i64 * d + 0x8000 - (sum_y < 0) as i64) >> 16) as i32,
+                            x: ((sum_x as i64 * d + 0x8000 - (sum_x < 0) as i64) >> 16) as i32,
+                        },
+                    };
+                } else {
+                    mv_line[(x - sx) as usize] = Mv { c: MvXY { y: INVALID_MV, x: 0 } };
+                }
+
+                x += step;
+            }
+            first_line = false;
+            y += step;
+        }
+        if !first_line {
+            let prev_y = y - step;
+            let pos_base = ((prev_y & (sbsz8 - 1)) as isize) * stride;
+            let mut x = sx;
+            while x < xend {
+                let pos = (pos_base + x as isize) as usize;
+                rp_proj[pos].mv = mv_line[(x - sx) as usize];
+                rp_proj[pos].r#ref = tip_delta as u8;
+                x += step;
+            }
+        }
+        sx += mfmv_sbsz8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,5 +991,70 @@ mod tests {
         assert_eq!(order[0], 2);
         assert_eq!(order[1], 1);
         assert_eq!(order[2], 0);
+    }
+
+    fn make_sngl_mv_block(y: i32, x: i32, r: u8) -> SnglMvBlock {
+        SnglMvBlock {
+            mv: Mv { c: MvXY { y, x } },
+            r#ref: r,
+        }
+    }
+
+    fn invalid_sngl() -> SnglMvBlock {
+        SnglMvBlock {
+            mv: Mv { c: MvXY { y: INVALID_MV as i32, x: 0 } },
+            r#ref: 0,
+        }
+    }
+
+    #[test]
+    fn test_tip_projection_basic() {
+        let stride: isize = 8;
+        let mut rp = vec![invalid_sngl(); 64];
+        rp[0] = make_sngl_mv_block(100, 200, 1);
+        tip_projection(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
+        let mv_y = unsafe { rp[0].mv.c.y };
+        assert_ne!(mv_y, INVALID_MV);
+    }
+
+    #[test]
+    fn test_tip_projection_skips_invalid() {
+        let stride: isize = 8;
+        let mut rp = vec![invalid_sngl(); 64];
+        tip_projection(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
+        assert_eq!(unsafe { rp[0].mv.c.y }, INVALID_MV);
+    }
+
+    #[test]
+    fn test_fill_holes_propagates() {
+        let stride: isize = 8;
+        let mut rp = vec![invalid_sngl(); 64];
+        rp[0] = make_sngl_mv_block(50, 60, 1);
+        fill_holes(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
+        assert_ne!(unsafe { rp[2].mv.c.y }, INVALID_MV);
+        assert_ne!(unsafe { rp[(stride as usize) * 2].mv.c.y }, INVALID_MV);
+    }
+
+    #[test]
+    fn test_fill_holes_no_overwrite() {
+        let stride: isize = 8;
+        let mut rp = vec![invalid_sngl(); 64];
+        rp[0] = make_sngl_mv_block(50, 60, 1);
+        rp[2] = make_sngl_mv_block(70, 80, 1);
+        fill_holes(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
+        assert_eq!(unsafe { rp[2].mv.c.y }, 70);
+    }
+
+    #[test]
+    fn test_smoothen_basic() {
+        let stride: isize = 8;
+        let mut rp = vec![invalid_sngl(); 64];
+        for y in (0..8).step_by(2) {
+            for x in (0..8).step_by(2) {
+                rp[y * stride as usize + x] = make_sngl_mv_block(100, 100, 1);
+            }
+        }
+        smoothen(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
+        assert_ne!(unsafe { rp[0].mv.c.y }, INVALID_MV);
     }
 }
