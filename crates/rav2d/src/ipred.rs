@@ -1,4 +1,5 @@
 use crate::intops::{ctz, iclip, imax, imin, ulog2};
+use crate::levels::CflMhDir;
 use crate::levels::{
     ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG, ANGLE_IS_LUMA,
     ANGLE_MRL_IDX_MASK, ANGLE_MRL_IDX_SHIFT, ANGLE_MULTI_MRL_FLAG,
@@ -975,6 +976,182 @@ pub fn pal_pred_8bpc(
     }
 }
 
+pub const CFL_FLT_TYPE_UNIFORM: i32 = 0;
+pub const CFL_FLT_TYPE_VSTRIP: i32 = 1;
+pub const CFL_FLT_TYPE_GAUSS: i32 = 2;
+pub const CFL_HAS_TOP: i32 = 1 << 2;
+pub const CFL_HAS_LEFT: i32 = 1 << 3;
+pub const CFL_DIR_ALL: i32 = CflMhDir::All as i32;
+pub const CFL_DIR_LEFT: i32 = CflMhDir::Left as i32;
+pub const CFL_DIR_TOP: i32 = CflMhDir::Top as i32;
+
+#[inline(always)]
+fn cfl_filter(src: &[u8], c: usize, l: usize, r: usize, b: usize,
+              top: &[u8], tc: usize, filter_type: i32) -> u8 {
+    match filter_type {
+        CFL_FLT_TYPE_UNIFORM => {
+            ((src[c] as u16 + src[r] as u16 +
+              src[b + c] as u16 + src[b + r] as u16) >> 2) as u8
+        }
+        CFL_FLT_TYPE_VSTRIP => {
+            ((src[l] as u16 + 2 * src[c] as u16 + src[r] as u16 +
+              src[b + l] as u16 + 2 * src[b + c] as u16 + src[b + r] as u16) >> 3) as u8
+        }
+        _ => {
+            ((src[l] as u16 + 4 * src[c] as u16 + src[r] as u16 +
+              top[tc] as u16 + src[b + c] as u16) >> 3) as u8
+        }
+    }
+}
+
+/// Generate downsampled luma for CFL prediction at 4:2:0 resolution.
+///
+/// All src/top_sb_edge indexing uses a "pointer offset" model: `sp` tracks the
+/// current source position as an offset into `src`. The caller must ensure `src`
+/// is large enough that `sp - n_left*2` never underflows.
+///
+/// `src_off` is the initial offset into `src` (before subtracting n_left*2).
+/// `top_sb_off` is the initial offset into `top_sb_edge` (before subtracting n_left*2).
+pub fn cfl_gen_y_420_8bpc(
+    dst: &mut [u8],
+    dst_top_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    top_sb_edge: Option<(&[u8], usize)>,
+    src_stride: usize,
+    refw: usize,
+    refh: usize,
+    tw: usize,
+    th: usize,
+    flags: i32,
+    filter_type: i32,
+) {
+    let has_t = flags & CFL_HAS_TOP != 0;
+    let has_l = flags & CFL_HAS_LEFT != 0;
+    let dir = flags & CFL_DIR_ALL;
+    let n_left: usize = if has_l { 1 + (dir == CFL_DIR_LEFT) as usize } else { 0 };
+    let n_top: usize = if has_t { 1 + (dir == CFL_DIR_TOP) as usize } else { 0 };
+    let dst_left_base = n_top * dst_top_stride + 64 * 64;
+    let ss = n_left << 1;
+
+    let mut dst_p = 0usize;
+    let mut dst_lp = dst_left_base;
+
+    // tl+t+tr: top reference rows
+    if has_t {
+        let has_tsb = top_sb_edge.is_some();
+        let (tsb, tsb_off) = top_sb_edge.unwrap_or((src, src_off));
+        let mut top_sp: usize;
+        let mut top_buf: &[u8];
+        let b: isize;
+        let mut t: isize;
+
+        if has_tsb {
+            top_sp = tsb_off - ss;
+            top_buf = tsb;
+            b = 0;
+            t = 0;
+        } else {
+            top_sp = (src_off - ss) - n_top * 2 * src_stride;
+            top_buf = src;
+            b = src_stride as isize;
+            t = if n_top == 1 { -(src_stride as isize) } else { 0 };
+        }
+
+        for _y in 0..n_top {
+            for x in 0..n_left {
+                let c = x * 2;
+                let r = c + 1;
+                let l_idx = if n_left & 1 != 0 { if c > 0 { c - 1 } else { 0 } } else { imax(c as i32 - 1, 0) as usize };
+                dst[dst_lp + x] = cfl_filter(
+                    top_buf, top_sp + c, top_sp + l_idx, top_sp + r, b as usize,
+                    top_buf, (top_sp as isize + t) as usize + c,
+                    filter_type,
+                );
+            }
+            for x in n_left..refw {
+                let c = x * 2;
+                let r = c + 1;
+                let l_idx = if n_left > 0 { c - 1 } else { imax(c as i32 - 1, 0) as usize };
+                dst[dst_p + x - n_left] = cfl_filter(
+                    top_buf, top_sp + c, top_sp + l_idx, top_sp + r, b as usize,
+                    top_buf, (top_sp as isize + t) as usize + c,
+                    filter_type,
+                );
+            }
+            if !has_tsb {
+                top_sp += 2 * src_stride;
+                t = -(src_stride as isize);
+            }
+            dst_lp += n_left;
+            dst_p += dst_top_stride;
+        }
+    }
+
+    // l+blk: main block rows
+    let b = src_stride as isize;
+    let mut sp = src_off - ss;
+    let first_top: (&[u8], usize) = if has_t {
+        if let Some((tsb, tsb_off)) = top_sb_edge {
+            (tsb, tsb_off - ss)
+        } else {
+            (src, src_off - ss - src_stride)
+        }
+    } else {
+        (src, src_off - ss)
+    };
+
+    for y in 0..th {
+        let (tb, tp) = if y == 0 {
+            first_top
+        } else {
+            (src, sp - src_stride)
+        };
+
+        for x in 0..n_left {
+            let c = x * 2;
+            let r = c + 1;
+            let l_idx = if n_left & 1 != 0 { if c > 0 { c - 1 } else { 0 } } else { imax(c as i32 - 1, 0) as usize };
+            dst[dst_lp + x] = cfl_filter(
+                src, sp + c, sp + l_idx, sp + r, b as usize,
+                tb, tp + c,
+                filter_type,
+            );
+        }
+        for x in n_left..n_left + tw {
+            let c = x * 2;
+            let r = c + 1;
+            let l_idx = if n_left > 0 { c - 1 } else { imax(c as i32 - 1, 0) as usize };
+            dst[dst_p + x - n_left] = cfl_filter(
+                src, sp + c, sp + l_idx, sp + r, b as usize,
+                tb, tp + c,
+                filter_type,
+            );
+        }
+        sp += src_stride << 1;
+        dst_lp += n_left;
+        dst_p += tw;
+    }
+
+    // bl: bottom-left extension rows
+    let n_bl = refh - th;
+    for _y in 0..n_bl {
+        let top_sp_bl = sp - src_stride;
+        for x in 0..n_left {
+            let c = x * 2;
+            let r = c + 1;
+            let l_idx = if n_left & 1 != 0 { if c > 0 { c - 1 } else { 0 } } else { imax(c as i32 - 1, 0) as usize };
+            dst[dst_lp + x] = cfl_filter(
+                src, sp + c, sp + l_idx, sp + r, b as usize,
+                src, top_sp_bl + c,
+                filter_type,
+            );
+        }
+        sp += src_stride << 1;
+        dst_lp += n_left;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1446,5 +1623,85 @@ mod tests {
         for &v in &dst {
             assert_eq!(v, 70);
         }
+    }
+
+    #[test]
+    fn test_cfl_gen_y_420_uniform_no_edges() {
+        let src = vec![100u8; 64 * 64];
+        let mut dst = vec![0u8; 64 * 64 + 256];
+        cfl_gen_y_420_8bpc(
+            &mut dst, 8, &src, 0, None, 64,
+            4, 4, 4, 4, 0, CFL_FLT_TYPE_UNIFORM,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 4 + x], 100);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cfl_gen_y_420_vstrip_no_edges() {
+        let src = vec![100u8; 64 * 64];
+        let mut dst = vec![0u8; 64 * 64 + 256];
+        cfl_gen_y_420_8bpc(
+            &mut dst, 8, &src, 0, None, 64,
+            4, 4, 4, 4, 0, CFL_FLT_TYPE_VSTRIP,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 4 + x], 100);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cfl_gen_y_420_gauss_no_edges() {
+        let src = vec![100u8; 64 * 64];
+        let mut dst = vec![0u8; 64 * 64 + 256];
+        cfl_gen_y_420_8bpc(
+            &mut dst, 8, &src, 0, None, 64,
+            4, 4, 4, 4, 0, CFL_FLT_TYPE_GAUSS,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 4 + x], 100);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cfl_constants() {
+        assert_eq!(CFL_FLT_TYPE_UNIFORM, 0);
+        assert_eq!(CFL_FLT_TYPE_VSTRIP, 1);
+        assert_eq!(CFL_FLT_TYPE_GAUSS, 2);
+        assert_eq!(CFL_HAS_TOP, 4);
+        assert_eq!(CFL_HAS_LEFT, 8);
+        assert_eq!(CFL_DIR_LEFT, 2);
+        assert_eq!(CFL_DIR_TOP, 1);
+    }
+
+    #[test]
+    fn test_cfl_filter_uniform() {
+        let src = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let top = [0u8; 8];
+        let v = cfl_filter(&src, 0, 0, 1, 4, &top, 0, CFL_FLT_TYPE_UNIFORM);
+        assert_eq!(v, (10 + 20 + 50 + 60) / 4);
+    }
+
+    #[test]
+    fn test_cfl_filter_vstrip() {
+        let src = vec![100u8; 128];
+        let top = vec![100u8; 128];
+        let v = cfl_filter(&src, 2, 1, 3, 64, &top, 2, CFL_FLT_TYPE_VSTRIP);
+        assert_eq!(v, 100);
+    }
+
+    #[test]
+    fn test_cfl_filter_gauss() {
+        let src = vec![100u8; 128];
+        let top = vec![100u8; 128];
+        let v = cfl_filter(&src, 2, 1, 3, 64, &top, 2, CFL_FLT_TYPE_GAUSS);
+        assert_eq!(v, 100);
     }
 }
