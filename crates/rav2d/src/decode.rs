@@ -264,6 +264,80 @@ pub fn decode_frame_init(
     }
 }
 
+pub fn setup_tile_bounds(
+    ts: &mut crate::internal::TileState,
+    tile_row: i32,
+    tile_col: i32,
+    col_start_sb: &[u16],
+    row_start_sb: &[u16],
+    sb_shift: i32,
+    bw: i32,
+    bh: i32,
+    n_tc: i32,
+) {
+    let col_sb_start = col_start_sb[tile_col as usize] as i32;
+    let col_sb_end = col_start_sb[tile_col as usize + 1] as i32;
+    let row_sb_start = row_start_sb[tile_row as usize] as i32;
+    let row_sb_end = row_start_sb[tile_row as usize + 1] as i32;
+
+    ts.tiling.row = tile_row;
+    ts.tiling.col = tile_col;
+    ts.tiling.col_start = col_sb_start << sb_shift;
+    ts.tiling.col_end = imin(col_sb_end << sb_shift, bw);
+    ts.tiling.row_start = row_sb_start << sb_shift;
+    ts.tiling.row_end = imin(row_sb_end << sb_shift, bh);
+
+    if n_tc > 1 {
+        for p in 0..3 {
+            ts.progress[p].store(row_sb_start, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+pub fn setup_tile_wiener_banks(
+    ts: &mut crate::internal::TileState,
+    frame_hdr: &FrameHeader,
+) {
+    use crate::headers::RestorationType;
+    for pl in 0..3 {
+        let rtype = frame_hdr.restoration.p[pl].restoration_type;
+        if rtype == RestorationType::NsWiener as u8
+            || rtype == RestorationType::Switchable as u8
+        {
+            let n_classes = frame_hdr.restoration.p[pl].ns.num_classes as usize;
+            init_ns_wiener_bank(&mut ts.ns_wiener_bank[pl], pl, n_classes);
+        }
+    }
+}
+
+pub fn decode_tip_frame_init(
+    ts: &mut [crate::internal::TileState],
+    frame_hdr: &FrameHeader,
+    sb_shift: i32,
+    bw: i32,
+    bh: i32,
+    n_tc: i32,
+) {
+    let ti = &frame_hdr.tiling.t;
+    let mut tile = 0usize;
+    for tile_row in 0..ti.rows as i32 {
+        for tile_col in 0..ti.cols as i32 {
+            setup_tile_bounds(
+                &mut ts[tile],
+                tile_row,
+                tile_col,
+                ti.col_start_sb.as_ref(),
+                ti.row_start_sb.as_ref(),
+                sb_shift,
+                bw,
+                bh,
+                n_tc,
+            );
+            tile += 1;
+        }
+    }
+}
+
 // size_group_lookup[BlockSize] -> size group (0-3)
 pub static SIZE_GROUP: [u8; N_BS_SIZES] = {
     let mut t = [0u8; N_BS_SIZES];
@@ -2050,5 +2124,96 @@ mod tests {
 
         assert_eq!(lf.mask.len(), 6);
         assert_eq!(lf.lr_mask.len(), 6);
+    }
+
+    #[test]
+    fn test_setup_tile_bounds_basic() {
+        let mut ts = crate::internal::TileState::default();
+        let col_start_sb: [u16; 3] = [0, 4, 8];
+        let row_start_sb: [u16; 3] = [0, 2, 4];
+
+        setup_tile_bounds(&mut ts, 0, 1, &col_start_sb, &row_start_sb, 2, 64, 32, 1);
+
+        assert_eq!(ts.tiling.row, 0);
+        assert_eq!(ts.tiling.col, 1);
+        assert_eq!(ts.tiling.col_start, 16);
+        assert_eq!(ts.tiling.col_end, 32);
+        assert_eq!(ts.tiling.row_start, 0);
+        assert_eq!(ts.tiling.row_end, 8);
+    }
+
+    #[test]
+    fn test_setup_tile_bounds_clamps_to_frame() {
+        let mut ts = crate::internal::TileState::default();
+        let col_start_sb: [u16; 2] = [0, 100];
+        let row_start_sb: [u16; 2] = [0, 100];
+
+        setup_tile_bounds(&mut ts, 0, 0, &col_start_sb, &row_start_sb, 2, 30, 20, 1);
+
+        assert_eq!(ts.tiling.col_end, 30);
+        assert_eq!(ts.tiling.row_end, 20);
+    }
+
+    #[test]
+    fn test_setup_tile_bounds_multithread_progress() {
+        use std::sync::atomic::Ordering;
+        let mut ts = crate::internal::TileState::default();
+        let col_start_sb: [u16; 2] = [0, 4];
+        let row_start_sb: [u16; 3] = [0, 3, 6];
+
+        setup_tile_bounds(&mut ts, 1, 0, &col_start_sb, &row_start_sb, 2, 64, 64, 4);
+
+        for p in 0..3 {
+            assert_eq!(ts.progress[p].load(Ordering::Relaxed), 3);
+        }
+    }
+
+    #[test]
+    fn test_decode_tip_frame_init_sets_all_tiles() {
+        let mut hdr = FrameHeader::default();
+        hdr.tiling.t.cols = 2;
+        hdr.tiling.t.rows = 2;
+        hdr.tiling.t.col_start_sb[0] = 0;
+        hdr.tiling.t.col_start_sb[1] = 4;
+        hdr.tiling.t.col_start_sb[2] = 8;
+        hdr.tiling.t.row_start_sb[0] = 0;
+        hdr.tiling.t.row_start_sb[1] = 3;
+        hdr.tiling.t.row_start_sb[2] = 6;
+
+        let mut ts = vec![
+            crate::internal::TileState::default(),
+            crate::internal::TileState::default(),
+            crate::internal::TileState::default(),
+            crate::internal::TileState::default(),
+        ];
+
+        decode_tip_frame_init(&mut ts, &hdr, 2, 64, 48, 1);
+
+        assert_eq!(ts[0].tiling.col_start, 0);
+        assert_eq!(ts[0].tiling.row_start, 0);
+        assert_eq!(ts[1].tiling.col_start, 16);
+        assert_eq!(ts[1].tiling.row_start, 0);
+        assert_eq!(ts[2].tiling.col_start, 0);
+        assert_eq!(ts[2].tiling.row_start, 12);
+        assert_eq!(ts[3].tiling.col_start, 16);
+        assert_eq!(ts[3].tiling.row_start, 12);
+        assert_eq!(ts[3].tiling.row_end, 24);
+    }
+
+    #[test]
+    fn test_setup_tile_wiener_banks() {
+        use crate::headers::RestorationType;
+        let mut ts = crate::internal::TileState::default();
+        let mut hdr = FrameHeader::default();
+        hdr.restoration.p[0].restoration_type = RestorationType::NsWiener as u8;
+        hdr.restoration.p[0].ns.num_classes = 2;
+        hdr.restoration.p[1].restoration_type = RestorationType::None as u8;
+        hdr.restoration.p[2].restoration_type = RestorationType::Switchable as u8;
+        hdr.restoration.p[2].ns.num_classes = 1;
+
+        setup_tile_wiener_banks(&mut ts, &hdr);
+
+        assert_ne!(ts.ns_wiener_bank[0].filter[0][0][0], 0);
+        assert_ne!(ts.ns_wiener_bank[2].filter[0][0][0], 0);
     }
 }
