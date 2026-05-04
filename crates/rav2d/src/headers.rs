@@ -80,7 +80,7 @@ pub enum RestorationType {
     Switchable = 3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i8)]
 pub enum WarpedMotionType {
     Invalid = -1,

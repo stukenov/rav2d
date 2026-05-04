@@ -4,7 +4,7 @@ use crate::env::get_poc_diff;
 use crate::getbits::GetBits;
 use crate::headers::*;
 use crate::internal::RefState;
-use crate::intops::{iclip, imax, imin, ulog2};
+use crate::intops::{iclip, iclip_u8, imax, imin, ulog2};
 use crate::warpmv::resolve_divisor_32;
 
 #[derive(Debug)]
@@ -743,6 +743,1062 @@ pub fn parse_sequence_header(data: &[u8]) -> Result<SequenceHeader> {
     }
     let mut gb = GetBits::new(data);
     parse_seq_hdr(&mut gb, false)
+}
+
+pub fn parse_frame_hdr(
+    seqhdr: &SequenceHeader,
+    refs: &[RefState; 8],
+    obu_type: ObuType,
+    gb: &mut GetBits,
+) -> Result<FrameHeader> {
+    use crate::levels::MotionMode;
+    use crate::tables::{
+        CCSO_QUANT_SZ, DEFAULT_WM_PARAMS, NS_WIENER_COEF_RANGE_UV, NS_WIENER_COEF_RANGE_Y,
+        SUBSET_MASKS_UV, SUBSET_MASKS_Y, WIENER_NS_FILTERS,
+    };
+
+    let mut hdr = FrameHeader::default();
+
+    hdr.id = gb.get_vlc() as u8;
+    if hdr.id != 0 {
+        return Err(Dav2dError::InvalidData);
+    }
+    let seqhdr_idx = gb.get_vlc() as u8;
+    if seqhdr_idx != seqhdr.id {
+        return Err(Dav2dError::InvalidData);
+    }
+
+    hdr.show_existing_frame = (obu_type == ObuType::Sef) as u8;
+    if hdr.show_existing_frame != 0 {
+        hdr.existing_frame_idx = gb.get_bits(seqhdr.ref_frames_log2 as i32) as i8;
+        if hdr.existing_frame_idx as u8 >= seqhdr.ref_frames {
+            return Err(Dav2dError::InvalidData);
+        }
+        if gb.get_bit() != 0 {
+            // FIXME poc
+        }
+        // FIXME filmgrain
+        return Ok(hdr);
+    }
+
+    if seqhdr.reduced_still_picture_header {
+        hdr.frame_type = FrameType::Key;
+        hdr.show_immediate = 1;
+    } else {
+        match obu_type {
+            ObuType::ClosedLoopKf | ObuType::OpenLoopKf => {
+                hdr.frame_type = FrameType::Key;
+            }
+            ObuType::Ras | ObuType::Switch => {
+                hdr.frame_type = FrameType::Switch;
+            }
+            ObuType::LeadingTip | ObuType::Tip | ObuType::Bridge => {
+                hdr.frame_type = FrameType::Inter;
+            }
+            _ => {
+                if gb.get_bit() == 0 {
+                    hdr.frame_type = FrameType::Intra;
+                } else {
+                    hdr.frame_type = FrameType::Inter;
+                }
+            }
+        }
+        hdr.ltr_id = -1;
+        if hdr.frame_type == FrameType::Key {
+            if seqhdr.number_of_bits_for_lt_frame_id > 0 {
+                hdr.ltr_id =
+                    gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8 - 1;
+            }
+        } else if obu_type == ObuType::Ras || obu_type == ObuType::OpenLoopKf {
+            if seqhdr.number_of_bits_for_lt_frame_id > 0 {
+                hdr.n_ref_frames = gb.get_bits(3) as u8;
+                for n in 0..hdr.n_ref_frames as usize {
+                    hdr.refidx[n] =
+                        gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8;
+                }
+            }
+        }
+        if obu_type != ObuType::Bridge {
+            if obu_type != ObuType::OpenLoopKf {
+                hdr.show_immediate = gb.get_bit() as u8;
+            }
+            if hdr.show_immediate == 0 && !seqhdr.monotonic {
+                hdr.show_implicit = gb.get_bit() as u8;
+            }
+        }
+    }
+
+    hdr.primary_ref_frame = PRIMARY_REF_NONE;
+    if !seqhdr.reduced_still_picture_header {
+        hdr.frame_size_override = if hdr.frame_type == FrameType::Switch {
+            1
+        } else {
+            gb.get_bit() as u8
+        };
+        hdr.frame_offset = gb.get_bits(seqhdr.order_hint_n_bits as i32) as u8;
+        if hdr.frame_type == FrameType::Inter {
+            hdr.primary_ref_signaled = gb.get_bit() as u8;
+            if obu_type != ObuType::LeadingTip && obu_type != ObuType::Tip {
+                hdr.cross_frame_context = gb.get_bit() as u8;
+            }
+            if hdr.primary_ref_signaled != 0 {
+                hdr.primary_ref_frame = gb.get_bits(3) as u8;
+            }
+        }
+    }
+
+    // refresh_frame_flags
+    if obu_type == ObuType::ClosedLoopKf && seqhdr.max_mlayer_id == 0 {
+        hdr.refresh_frame_flags = (1u8 << seqhdr.ref_frames) - 1;
+    } else if obu_type == ObuType::OpenLoopKf || seqhdr.max_mlayer_id > 0 {
+        if seqhdr.short_refresh_frame_flags {
+            hdr.refresh_frame_flags = 1 << gb.get_bits(seqhdr.ref_frames_log2 as i32);
+        } else {
+            hdr.refresh_frame_flags = gb.get_bits(seqhdr.ref_frames as i32) as u8;
+        }
+    } else if hdr.frame_type != FrameType::Switch && seqhdr.short_refresh_frame_flags {
+        let refresh = gb.get_bit() != 0;
+        if refresh {
+            let refresh_idx = gb.get_bits(seqhdr.ref_frames_log2 as i32);
+            if refresh_idx >= seqhdr.ref_frames as u32 {
+                return Err(Dav2dError::InvalidData);
+            }
+            hdr.refresh_frame_flags = 1 << refresh_idx;
+        }
+    } else {
+        hdr.refresh_frame_flags = gb.get_bits(seqhdr.ref_frames as i32) as u8;
+    }
+
+    let mut tip_output_frame = false;
+
+    if hdr.is_inter_or_switch() {
+        if hdr.frame_type == FrameType::Switch || seqhdr.explicit_ref_frame_map {
+            hdr.n_ref_frames = gb.get_bits(3) as u8;
+            if hdr.n_ref_frames as i32 > imin(7, seqhdr.ref_frames as i32) {
+                return Err(Dav2dError::InvalidData);
+            }
+            for n in 0..hdr.n_ref_frames as usize {
+                hdr.refidx[n] = gb.get_bits(seqhdr.ref_frames_log2 as i32) as i8;
+                if hdr.refidx[n] as u8 >= seqhdr.ref_frames {
+                    return Err(Dav2dError::InvalidData);
+                }
+            }
+        } else {
+            hdr.n_ref_frames = get_ref_frames(&mut hdr, seqhdr, refs, false) as u8;
+        }
+        let poc = hdr.frame_offset as i32;
+        for n in 0..hdr.n_ref_frames as usize {
+            let refhdr = refs[hdr.refidx[n] as usize]
+                .p
+                .frame_hdr
+                .as_ref()
+                .ok_or(Dav2dError::InvalidData)?;
+            let pocdiff =
+                get_poc_diff(seqhdr.order_hint_n_bits as i32, poc, refhdr.frame_offset as i32);
+            hdr.has_future_refs |= (pocdiff < 0) as u8;
+            hdr.has_past_refs |= (pocdiff > 0) as u8;
+        }
+        hdr.has_bothside_refs = (hdr.has_future_refs != 0 && hdr.has_past_refs != 0) as u8;
+    }
+
+    read_frame_size(&mut hdr, seqhdr, refs, gb)?;
+
+    if hdr.is_inter_or_switch() {
+        if hdr.frame_type == FrameType::Inter && !seqhdr.explicit_ref_frame_map {
+            hdr.n_ref_frames = get_ref_frames(&mut hdr, seqhdr, refs, true) as u8;
+        }
+
+        // FIXME bru
+
+        if seqhdr.ref_frame_mvs {
+            hdr.use_ref_frame_mvs = gb.get_bit() as u8;
+        }
+        hdr.tmvp_sample_step = 1
+            + (hdr.use_ref_frame_mvs != 0
+                && hdr.n_ref_frames > 1
+                && seqhdr.sb128 != 0
+                && gb.get_bit() != 0) as u8;
+
+        hdr.tip.subpel_filter = FilterMode::Sharp8Tap as u8;
+        if seqhdr.tip && hdr.n_ref_frames > 1 && hdr.use_ref_frame_mvs != 0 {
+            if obu_type == ObuType::Tip || obu_type == ObuType::LeadingTip {
+                hdr.tip.frame_mode = 2; // output
+                hdr.opfl_refine_type =
+                    2 * (seqhdr.opfl_refine && seqhdr.tip_refine_mv) as u8;
+            } else {
+                hdr.tip.frame_mode = gb.get_bit() as u8;
+                hdr.opfl_refine_type = if (seqhdr.opfl_refine as u8) < 3 {
+                    seqhdr.opfl_refine as u8
+                } else if gb.get_bit() != 0 {
+                    1
+                } else {
+                    2 * gb.get_bit() as u8
+                };
+            }
+            if hdr.tip.frame_mode != 0 {
+                if seqhdr.tip_hole_fill {
+                    hdr.tip.hole_fill = gb.get_bit() as u8;
+                }
+                if hdr.has_bothside_refs == 0
+                    || !seqhdr.tip_refine_mv
+                    || (!seqhdr.opfl_refine && !seqhdr.refine_mv)
+                {
+                    hdr.tip.global_wtd_idx = gb.get_bits(3) as u8;
+                }
+                if hdr.tip.frame_mode == 2 {
+                    if gb.get_bit() == 0 {
+                        hdr.tip.gmv_y = gb.get_bits(4) as i8;
+                        hdr.tip.gmv_x = gb.get_bits(4) as i8;
+                        if hdr.tip.gmv_y != 0 && gb.get_bit() != 0 {
+                            hdr.tip.gmv_y = -hdr.tip.gmv_y;
+                        }
+                        if hdr.tip.gmv_x != 0 && gb.get_bit() != 0 {
+                            hdr.tip.gmv_x = -hdr.tip.gmv_x;
+                        }
+                    }
+                    hdr.tip.subpel_filter = if gb.get_bit() != 0 {
+                        FilterMode::Sharp8Tap as u8
+                    } else if gb.get_bit() != 0 {
+                        FilterMode::Regular8Tap as u8
+                    } else {
+                        FilterMode::Smooth8Tap as u8
+                    };
+                }
+            }
+            find_tip_ref_frames(&mut hdr, seqhdr, refs);
+        } else {
+            hdr.opfl_refine_type = if (seqhdr.opfl_refine as u8) < 3 {
+                seqhdr.opfl_refine as u8
+            } else if gb.get_bit() != 0 {
+                1
+            } else {
+                2 * gb.get_bit() as u8
+            };
+        }
+
+        if hdr.tip.frame_mode == 2 {
+            if seqhdr.db_sub_pu {
+                hdr.deblock.sub_pu = gb.get_bit() as u8;
+                if hdr.deblock.sub_pu != 0 {
+                    hdr.tip.apply_filter = gb.get_bit() as u8;
+                    if hdr.tip.apply_filter != 0 {
+                        hdr.deblock.level_y[0] = 1;
+                        hdr.deblock.level_y[1] = 1;
+                        hdr.deblock.level_u = 1;
+                        hdr.deblock.level_v = 1;
+                    }
+                }
+            }
+            if seqhdr.tip_explicit_qp {
+                // FIXME yac and (sometimes) u/v ac delta
+            } else {
+                let ref1hdr = refs[hdr.refidx[hdr.tip.r#ref[0] as usize] as usize]
+                    .p
+                    .frame_hdr
+                    .as_ref()
+                    .ok_or(Dav2dError::InvalidData)?;
+                let ref2hdr = refs[hdr.refidx[hdr.tip.r#ref[1] as usize] as usize]
+                    .p
+                    .frame_hdr
+                    .as_ref()
+                    .ok_or(Dav2dError::InvalidData)?;
+                hdr.quant.yac = (ref1hdr.quant.yac + ref2hdr.quant.yac + 1) >> 1;
+            }
+
+            if hdr.tip.apply_filter != 0 {
+                parse_tile_info_frmhdr(&mut hdr, seqhdr, gb);
+            } else {
+                hdr.sb128 = if hdr.is_inter_or_switch() {
+                    seqhdr.sb128
+                } else {
+                    if seqhdr.sb128 != 0 { 1 } else { 0 }
+                };
+                hdr.tiling.t.rows = 1;
+                hdr.tiling.t.cols = 1;
+                let shift = 6 + hdr.sb128 as i32;
+                hdr.tiling.t.col_start_sb[0] = 0;
+                hdr.tiling.t.col_start_sb[1] =
+                    ((hdr.width + ((1 << shift) - 1)) >> shift) as u16;
+                hdr.tiling.t.row_start_sb[0] = 0;
+                hdr.tiling.t.row_start_sb[1] =
+                    ((hdr.height + ((1 << shift) - 1)) >> shift) as u16;
+            }
+
+            hdr.disable_cdf_update = 1;
+            let pri_sec = derive_pri_sec_ref(&hdr, seqhdr, refs);
+            hdr.primary_ref_frame = pri_sec[0] as u8;
+            hdr.secondary_ref_frame = pri_sec[1] as u8;
+            tip_output_frame = true;
+        }
+    }
+
+    if !tip_output_frame {
+        // screen content tools
+        hdr.allow_screen_content_tools = if seqhdr.screen_content_tools == AdaptiveBoolean::Adaptive
+        {
+            gb.get_bit() as u8
+        } else {
+            seqhdr.screen_content_tools as u8
+        };
+        if hdr.allow_screen_content_tools != 0 {
+            hdr.force_integer_mv = if seqhdr.force_integer_mv == AdaptiveBoolean::Adaptive {
+                gb.get_bit() as u8
+            } else {
+                seqhdr.force_integer_mv as u8
+            };
+        }
+
+        hdr.allow_intrabc = gb.get_bit() as u8;
+        if hdr.allow_intrabc != 0 {
+            if hdr.is_key_or_intra() {
+                hdr.allow_global_intrabc = gb.get_bit() as u8;
+            }
+            hdr.allow_local_intrabc =
+                (hdr.allow_global_intrabc == 0 || gb.get_bit() != 0) as u8;
+        }
+        if hdr.allow_intrabc != 0 {
+            hdr.max_bvp_drl_bits = if seqhdr.allow_max_bvp_drl_bits {
+                gb.get_ref_uniform(3, seqhdr.def_max_bvp_drl_bits as u32) as u8 + 1
+            } else {
+                seqhdr.def_max_bvp_drl_bits
+            };
+        }
+
+        if hdr.is_inter_or_switch() {
+            hdr.max_drl_bits = if seqhdr.allow_frame_max_drl_bits {
+                gb.get_ref_uniform(3, seqhdr.def_max_drl_bits as u32) as u8 + 1
+            } else {
+                seqhdr.def_max_drl_bits
+            };
+            if hdr.force_integer_mv == 0 {
+                hdr.mv_precision = if gb.get_bit() != 0 {
+                    2
+                } else {
+                    1 + 2 * gb.get_bit() as u8
+                };
+            }
+            hdr.subpel_filter_mode = if gb.get_bit() != 0 {
+                FilterMode::Switchable
+            } else {
+                match gb.get_bits(2) {
+                    0 => FilterMode::Regular8Tap,
+                    1 => FilterMode::Smooth8Tap,
+                    2 => FilterMode::Sharp8Tap,
+                    _ => FilterMode::Bilinear,
+                }
+            };
+            if seqhdr.frame_motion_modes_present {
+                hdr.motion_modes = 1;
+                let mut n = 2u8;
+                while n > 0 {
+                    if (seqhdr.motion_modes & n) != 0 && gb.get_bit() != 0 {
+                        hdr.motion_modes |= n;
+                    }
+                    if n == 16 { break; }
+                    n <<= 1;
+                }
+            } else {
+                hdr.motion_modes = seqhdr.motion_modes;
+            }
+        }
+
+        hdr.disable_cdf_update = gb.get_bit() as u8;
+
+        parse_tile_info_frmhdr(&mut hdr, seqhdr, gb);
+        if hdr.tiling.t.log2_cols != 0 || hdr.tiling.t.log2_rows != 0 {
+            if seqhdr.avg_cdf_type == 0 {
+                hdr.tiling.update =
+                    gb.get_bits(hdr.tiling.t.log2_cols as i32 + hdr.tiling.t.log2_rows as i32)
+                        as u16;
+            }
+            if hdr.tiling.update >= hdr.tiling.t.cols as u16 * hdr.tiling.t.rows as u16 {
+                return Err(Dav2dError::InvalidData);
+            }
+            hdr.tiling.n_bytes = gb.get_bits(2) as u8 + 1;
+        }
+
+        // quant
+        hdr.quant.yac = gb.get_bits(8 + (seqhdr.hbd != 0) as i32) as u16;
+        if seqhdr.ydc_dq_enabled && gb.get_bit() != 0 {
+            hdr.quant.ydc_delta = gb.get_sbits(7) as i8;
+        }
+        if seqhdr.layout != PixelLayout::I400
+            && (seqhdr.uvdc_dq_enabled || seqhdr.uvac_dq_enabled)
+        {
+            let diff_uv_delta = if seqhdr.separate_uv_delta_q {
+                gb.get_bit() != 0
+            } else {
+                false
+            };
+            if seqhdr.uvdc_dq_enabled && gb.get_bit() != 0 {
+                hdr.quant.udc_delta = gb.get_sbits(7) as i8;
+            }
+            if seqhdr.uvac_dq_enabled && gb.get_bit() != 0 {
+                hdr.quant.uac_delta = gb.get_sbits(7) as i8;
+            }
+            if diff_uv_delta {
+                if seqhdr.uvdc_dq_enabled && gb.get_bit() != 0 {
+                    hdr.quant.vdc_delta = gb.get_sbits(7) as i8;
+                }
+                if seqhdr.uvac_dq_enabled && gb.get_bit() != 0 {
+                    hdr.quant.vac_delta = gb.get_sbits(7) as i8;
+                }
+            } else {
+                hdr.quant.vdc_delta = hdr.quant.udc_delta;
+                hdr.quant.vac_delta = hdr.quant.uac_delta;
+            }
+        }
+
+        hdr.secondary_ref_frame = PRIMARY_REF_NONE;
+        if hdr.is_inter_or_switch() {
+            let pri_sec = derive_pri_sec_ref(&hdr, seqhdr, refs);
+            if hdr.primary_ref_signaled == 0 {
+                hdr.primary_ref_frame = pri_sec[0] as u8;
+            }
+            if hdr.primary_ref_frame != PRIMARY_REF_NONE {
+                hdr.secondary_ref_frame =
+                    pri_sec[(pri_sec[1] != hdr.primary_ref_frame as i32) as usize] as u8;
+            }
+        }
+
+        // segmentation
+        hdr.segmentation.enabled = gb.get_bit() as u8;
+        if hdr.segmentation.enabled != 0 {
+            if seqhdr.segmentation.info_present
+                && (!seqhdr.segmentation.adaptive || gb.get_bit() != 0)
+            {
+                hdr.segmentation.d = seqhdr.segmentation.d;
+            } else {
+                parse_seg_info(&mut hdr.segmentation.d, gb, 8 << seqhdr.segmentation.ext as u32);
+            }
+            if hdr.primary_ref_frame == PRIMARY_REF_NONE {
+                hdr.segmentation.update_map = 1;
+            } else {
+                hdr.segmentation.update_map = gb.get_bit() as u8;
+                if hdr.segmentation.update_map != 0 && hdr.frame_type != FrameType::Switch {
+                    hdr.segmentation.temporal = gb.get_bit() as u8;
+                }
+            }
+            let mut m = hdr.segmentation.d.skip_mask | hdr.segmentation.d.globalmv_mask;
+            hdr.segmentation.preskip = (m != 0) as u8;
+            m |= hdr.segmentation.d.delta_q_mask;
+            hdr.segmentation.last_active_segid = if m != 0 { ulog2(m as u32) as i8 } else { -1 };
+        }
+
+        // qm
+        hdr.quant.qm.enabled = gb.get_bit() as u8;
+        if hdr.quant.qm.enabled != 0 {
+            hdr.quant.qm.num = if hdr.segmentation.enabled != 0 {
+                gb.get_bits(2) as u8 + 1
+            } else {
+                1
+            };
+            for n in 0..hdr.quant.qm.num as usize {
+                hdr.quant.qm.y[n] = gb.get_bits(4) as u8;
+                if seqhdr.layout != PixelLayout::I400 {
+                    if gb.get_bit() != 0 {
+                        hdr.quant.qm.u[n] = hdr.quant.qm.y[n];
+                        hdr.quant.qm.v[n] = hdr.quant.qm.y[n];
+                    } else {
+                        hdr.quant.qm.u[n] = gb.get_bits(4) as u8;
+                        hdr.quant.qm.v[n] = if seqhdr.separate_uv_delta_q {
+                            gb.get_bits(4) as u8
+                        } else {
+                            hdr.quant.qm.u[n]
+                        };
+                    }
+                }
+            }
+        }
+
+        // delta q
+        if hdr.quant.yac != 0 {
+            hdr.delta.q.present = gb.get_bit() as u8;
+            if hdr.delta.q.present != 0 {
+                hdr.delta.q.res_log2 = gb.get_bits(2) as u8;
+            }
+        }
+
+        // lossless
+        let delta_lossless = hdr.quant.ydc_delta == 0
+            && hdr.quant.udc_delta == 0
+            && hdr.quant.uac_delta == 0
+            && hdr.quant.vdc_delta == 0
+            && hdr.quant.vac_delta == 0;
+        hdr.all_lossless = 1;
+        hdr.any_lossless = 0;
+        for i in 0..MAX_SEGMENTS {
+            hdr.segmentation.qidx[i] = if hdr.segmentation.enabled != 0 {
+                iclip_u8(hdr.quant.yac as i32 + hdr.segmentation.d.delta_q[i] as i32) as u8
+            } else {
+                hdr.quant.yac as u8
+            };
+            hdr.segmentation.lossless[i] =
+                (hdr.segmentation.qidx[i] == 0 && delta_lossless) as u8;
+            hdr.all_lossless &= hdr.segmentation.lossless[i];
+            hdr.any_lossless |= hdr.segmentation.lossless[i];
+        }
+
+        if hdr.all_lossless == 0 {
+            hdr.tcq = if seqhdr.tcq == AdaptiveBoolean::Adaptive {
+                gb.get_bit() as u8
+            } else {
+                seqhdr.tcq as u8
+            };
+        }
+        if hdr.all_lossless == 0 && hdr.tcq == 0 && seqhdr.parity_hiding {
+            hdr.parity_hiding = gb.get_bit() as u8;
+        }
+
+        // deblock
+        if hdr.all_lossless == 0 {
+            if hdr.frame_type == FrameType::Inter && seqhdr.db_sub_pu {
+                hdr.deblock.sub_pu = gb.get_bit() as u8;
+            }
+            hdr.deblock.level_y[0] = gb.get_bit() as u8;
+            hdr.deblock.level_y[1] = gb.get_bit() as u8;
+            if seqhdr.layout != PixelLayout::I400
+                && (hdr.deblock.level_y[0] != 0 || hdr.deblock.level_y[1] != 0)
+            {
+                hdr.deblock.level_u = gb.get_bit() as u8;
+                hdr.deblock.level_v = gb.get_bit() as u8;
+            }
+            let bits = seqhdr.df_par_bits as i32;
+            let off = 1i32 << (bits - 1);
+            if hdr.deblock.level_y[0] != 0 && gb.get_bit() != 0 {
+                hdr.deblock.delta_q_y[0] = (gb.get_bits(bits) as i32 - off) as i8;
+            }
+            if hdr.deblock.level_y[1] != 0 {
+                hdr.deblock.delta_q_y[1] = if gb.get_bit() != 0 {
+                    (gb.get_bits(bits) as i32 - off) as i8
+                } else {
+                    hdr.deblock.delta_q_y[0]
+                };
+            }
+            if hdr.deblock.level_u != 0 && gb.get_bit() != 0 {
+                hdr.deblock.delta_q_u = (gb.get_bits(bits) as i32 - off) as i8;
+            }
+            if hdr.deblock.level_v != 0 && gb.get_bit() != 0 {
+                hdr.deblock.delta_q_v = (gb.get_bits(bits) as i32 - off) as i8;
+            }
+        }
+
+        // gdf
+        if hdr.all_lossless == 0 && seqhdr.gdf {
+            let gdf_bs = 128 << (hdr.sb128 == 2) as i32;
+            let mut gdf_val: u8 =
+                (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+            if gdf_val != 0 {
+                if imax(hdr.width, hdr.height) > gdf_bs {
+                    gdf_val += gb.get_bit() as u8;
+                }
+                let qp_base = if hdr.is_key_or_intra() { 85 } else { 110 };
+                let qp_diff = hdr.quant.yac as i32 - qp_base - 48 * seqhdr.hbd as i32;
+                let qp_idx_offset = gb.get_bits(2) as i32;
+                hdr.gdf.qp_idx = iclip((qp_diff - 37) / 25, 0, 2) as u8 + qp_idx_offset as u8;
+                hdr.gdf.scale = gb.get_bits(2) as u8 + 1;
+            }
+            hdr.gdf.enabled = match gdf_val {
+                0 => AdaptiveBoolean::Off,
+                1 => AdaptiveBoolean::On,
+                _ => AdaptiveBoolean::Adaptive,
+            };
+        }
+
+        // cdef
+        if hdr.all_lossless == 0 && seqhdr.cdef {
+            hdr.cdef.enabled =
+                (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+            if hdr.cdef.enabled != 0 {
+                hdr.cdef.damping = gb.get_bits(2) as u8 + 3;
+                hdr.cdef.n_strengths = gb.get_bits(3) as u8 + 1;
+                hdr.cdef.on_skiptx = if seqhdr.cdef_on_skiptx == AdaptiveBoolean::Adaptive {
+                    gb.get_bit() as u8
+                } else {
+                    seqhdr.cdef_on_skiptx as u8
+                };
+                for i in 0..hdr.cdef.n_strengths as usize {
+                    let b = gb.get_bit() as i32;
+                    hdr.cdef.y_strength[i] = gb.get_bits(6 - 4 * b) as u8;
+                    if seqhdr.layout != PixelLayout::I400 {
+                        let b = gb.get_bit() as i32;
+                        hdr.cdef.uv_strength[i] = gb.get_bits(6 - 4 * b) as u8;
+                    }
+                }
+            }
+        }
+
+        let n_bits_ref = if hdr.n_ref_frames <= 2 {
+            hdr.n_ref_frames as i32 - 1
+        } else {
+            1 + ulog2(hdr.n_ref_frames as u32 - 1)
+        };
+
+        // restoration
+        if hdr.all_lossless == 0 && seqhdr.restoration {
+            for p in 0..3usize {
+                let disable_mask = seqhdr.rst_disable_mask[if p != 0 { 1 } else { 0 }];
+                hdr.restoration.p[p].restoration_type = if disable_mask == 0 {
+                    gb.get_bits(2) as u8
+                } else if disable_mask == 3 {
+                    RestorationType::None as u8
+                } else {
+                    gb.get_bit() as u8 * (3 - disable_mask)
+                };
+
+                if hdr.restoration.p[p].restoration_type >= RestorationType::NsWiener as u8 {
+                    let is_inter = hdr.is_inter_or_switch();
+                    let pd = &mut hdr.restoration.p[p].ns;
+                    pd.frame_filters_on = gb.get_bit() as u8;
+                    if pd.frame_filters_on != 0 {
+                        if is_inter {
+                            pd.temporal = gb.get_bit() as u8;
+                        }
+                        if pd.temporal != 0 {
+                            let mut r#ref = 0u8;
+                            if n_bits_ref > 0 {
+                                r#ref = gb.get_bits(n_bits_ref) as u8;
+                                pd.refidx = r#ref;
+                                if r#ref >= hdr.n_ref_frames {
+                                    return Err(Dav2dError::InvalidData);
+                                }
+                            }
+                            let refhdr = refs[hdr.refidx[r#ref as usize] as usize]
+                                .p
+                                .frame_hdr
+                                .as_ref()
+                                .ok_or(Dav2dError::InvalidData)?;
+                            let mut rpd = &refhdr.restoration.p[p].ns;
+                            if rpd.frame_filters_on == 0 && p != 0 {
+                                rpd = &refhdr.restoration.p[3 - p].ns;
+                            }
+                            if rpd.frame_filters_on == 0 {
+                                return Err(Dav2dError::InvalidData);
+                            }
+                            pd.num_classes_idx = rpd.num_classes_idx;
+                            pd.num_classes = rpd.num_classes;
+                        } else {
+                            let val = gb.get_bits(3) as u8;
+                            pd.num_classes_idx = val;
+                            pd.num_classes = 1 + val
+                                + imax(val as i32 - 3, 0) as u8
+                                + imax(val as i32 - 5, 0) as u8 * 2;
+                        }
+                    } else {
+                        pd.num_classes_idx = 0;
+                        pd.num_classes = 1;
+                    }
+                }
+            }
+
+            hdr.restoration.unit_size[0] = 9;
+            if hdr.restoration.p[0].restoration_type != 0 {
+                if gb.get_bit() != 0 {
+                    hdr.restoration.unit_size[0] -= 1;
+                } else if hdr.sb128 < 2 && gb.get_bit() == 0 {
+                    hdr.restoration.unit_size[0] -=
+                        2 + (hdr.sb128 == 0 && gb.get_bit() == 0) as u8;
+                }
+            }
+
+            let ss = (seqhdr.layout != PixelLayout::I444) as u8;
+            hdr.restoration.unit_size[1] = 9 - ss;
+            if hdr.restoration.p[1].restoration_type != 0
+                || hdr.restoration.p[2].restoration_type != 0
+            {
+                if gb.get_bit() != 0 {
+                    hdr.restoration.unit_size[1] -= 1;
+                } else if hdr.sb128 < 2 && gb.get_bit() == 0 {
+                    hdr.restoration.unit_size[1] -=
+                        2 + (hdr.sb128 == 0 && gb.get_bit() == 0) as u8;
+                }
+                if hdr.restoration.unit_size[1] < 6 - seqhdr.ss_ver {
+                    return Err(Dav2dError::InvalidData);
+                }
+            }
+
+            // NS wiener filter parsing
+            for p in 0..3usize {
+                let mut ref_filters = [[0i8; 18]; 48];
+                if hdr.restoration.p[p].ns.frame_filters_on == 0 {
+                    continue;
+                }
+                let n_feat = 16 + 2 * (p != 0) as usize;
+                let n_ref_filters = if seqhdr.rst_disable_mask[if p != 0 { 1 } else { 0 }] & 1 != 0
+                {
+                    16
+                } else {
+                    48 - hdr.restoration.p[p].ns.num_classes as usize
+                };
+
+                if hdr.restoration.p[p].ns.temporal != 0 {
+                    let ref_hdr = refs[hdr.refidx[hdr.restoration.p[p].ns.refidx as usize] as usize]
+                        .p
+                        .frame_hdr
+                        .as_ref()
+                        .ok_or(Dav2dError::InvalidData)?;
+                    let mut rpd = &ref_hdr.restoration.p[p].ns;
+                    if rpd.frame_filters_on == 0 {
+                        rpd = &ref_hdr.restoration.p[3 - p].ns;
+                    }
+                    let nc = hdr.restoration.p[p].ns.num_classes as usize;
+                    for n in 0..nc {
+                        hdr.restoration.p[p].ns.filter[n][..n_feat]
+                            .copy_from_slice(&rpd.filter[n][..n_feat]);
+                    }
+                    continue;
+                }
+
+                let mut i = 0usize;
+                for r in 0..hdr.n_ref_frames as usize {
+                    let ref_hdr = refs[hdr.refidx[r] as usize]
+                        .p
+                        .frame_hdr
+                        .as_ref()
+                        .ok_or(Dav2dError::InvalidData)?;
+                    let dirs: &[i8] = &[0, 1, -1];
+                    let mut dir = dirs[if p == 0 { 0 } else if p == 1 { 1 } else { 2 }];
+                    let mut p2 = p as i32;
+                    loop {
+                        let rpd = &ref_hdr.restoration.p[p2 as usize].ns;
+                        if rpd.frame_filters_on != 0 {
+                            let n_classes =
+                                imin(n_ref_filters as i32 - i as i32, rpd.num_classes as i32)
+                                    as usize;
+                            for n in 0..n_classes {
+                                ref_filters[i][..n_feat]
+                                    .copy_from_slice(&rpd.filter[n][..n_feat]);
+                                i += 1;
+                            }
+                        }
+                        if dir == 0 { break; }
+                        p2 += dir as i32;
+                        dir = 0;
+                    }
+                }
+
+                let n_filters = if seqhdr.rst_disable_mask[if p != 0 { 1 } else { 0 }] & 1 != 0 {
+                    16usize
+                } else {
+                    64
+                };
+                let n_classes = hdr.restoration.p[p].ns.num_classes as usize;
+                let mut grp_cnt = [0u8; 3];
+                let mut grp_ref_cnt = [0u8; 3];
+                grp_cnt[0] = n_classes as u8;
+                grp_cnt[1] = i as u8;
+                grp_cnt[2] = (n_filters - n_classes - i) as u8;
+                let mut filter_refs = [0u8; 64];
+                let mut pred_grp: usize = 2 - (grp_cnt[1] > 2) as usize;
+                let nnz_grps =
+                    1 + (grp_cnt[1] != 0) as i32 + (grp_cnt[2] != 0) as i32;
+                for n in 0..n_classes {
+                    let group = if nnz_grps == 1 || gb.get_bit() == 0 {
+                        pred_grp
+                    } else if nnz_grps == 2 {
+                        2 - (grp_cnt[2] == 0) as usize - pred_grp
+                    } else if gb.get_bit() != 0 {
+                        2 - (pred_grp == 2) as usize
+                    } else {
+                        (pred_grp == 0) as usize
+                    };
+                    grp_ref_cnt[group] += 1;
+                    if grp_ref_cnt[group] as usize + (group < pred_grp) as usize
+                        > grp_ref_cnt[pred_grp] as usize
+                    {
+                        pred_grp = group;
+                    }
+                    let base = grp_cnt[0] as usize * (group != 0) as usize
+                        + grp_cnt[1] as usize * (group == 2) as usize;
+                    let range = if group != 0 {
+                        grp_cnt[group] as u32
+                    } else {
+                        n as u32 + 1
+                    };
+                    filter_refs[n] = (base as u32
+                        + if range == 1 {
+                            0
+                        } else {
+                            gb.get_bits_subexp_u(range >> 1, range, 4)
+                        }) as u8;
+                }
+                let mut exact_match_mask: u32 = 0;
+                for n in 0..n_classes {
+                    exact_match_mask |= (gb.get_bit() as u32) << n;
+                }
+                let masks: &[u32] = if p != 0 { &SUBSET_MASKS_UV } else { &SUBSET_MASKS_Y };
+                let cf_range: &[[i8; 2]] = if p != 0 {
+                    &NS_WIENER_COEF_RANGE_UV
+                } else {
+                    &NS_WIENER_COEF_RANGE_Y
+                };
+                static SHUFFLED_INDEX: [u8; 64] = [
+                    16, 7, 58, 21, 12, 61, 26, 38, 18, 30, 50, 45, 23, 49, 43, 62, 42, 54, 27,
+                    36, 17, 44, 32, 34, 4, 24, 52, 31, 37, 11, 33, 19, 35, 6, 22, 53, 63, 25,
+                    41, 47, 1, 59, 0, 28, 40, 55, 48, 8, 5, 51, 9, 46, 56, 60, 15, 2, 13, 14,
+                    57, 29, 3, 20, 39, 10,
+                ];
+                static ZERO: [i8; 18] = [0; 18];
+                for n in 0..n_classes {
+                    let r = filter_refs[n] as usize;
+                    let ref_filter: [i8; 18] = if r == 0 {
+                        ZERO
+                    } else if r < n_classes {
+                        hdr.restoration.p[p].ns.filter[r - 1]
+                    } else if r < n_classes + grp_cnt[1] as usize {
+                        ref_filters[r - n_classes]
+                    } else {
+                        let idx =
+                            SHUFFLED_INDEX[r - n_classes - grp_cnt[1] as usize] as usize;
+                        let mut tmp = [0i8; 18];
+                        tmp[..16].copy_from_slice(&WIENER_NS_FILTERS[idx]);
+                        tmp
+                    };
+                    if exact_match_mask & (1 << n) != 0 {
+                        hdr.restoration.p[p].ns.filter[n][..n_feat]
+                            .copy_from_slice(&ref_filter[..n_feat]);
+                        continue;
+                    }
+                    hdr.restoration.p[p].ns.filter[n][..n_feat].fill(0);
+                    let mut s = 0usize;
+                    while s < 3 - (p != 0) as usize {
+                        if gb.get_bit() == 0 {
+                            break;
+                        }
+                        s += 1;
+                    }
+                    let mask = masks[s];
+                    let mut m = mask;
+                    for ii in 0..n_feat {
+                        if m & 1 != 0 {
+                            let nbits = cf_range[ii][0] as i32;
+                            hdr.restoration.p[p].ns.filter[n][ii] = gb.get_bits_subexp_u(
+                                (ref_filter[ii] - cf_range[ii][1]) as u32,
+                                1 << nbits,
+                                nbits - 3,
+                            ) as i8
+                                + cf_range[ii][1];
+                        }
+                        m >>= 1;
+                    }
+                }
+            }
+        }
+
+        // ccso
+        if hdr.all_lossless == 0 && seqhdr.ccso {
+            hdr.ccso.enabled =
+                (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+            if hdr.ccso.enabled != 0 {
+                let n_planes = if seqhdr.layout == PixelLayout::I400 { 1 } else { 3 };
+                for p in 0..n_planes {
+                    hdr.ccso.p[p].enabled = gb.get_bit() as u8;
+                    if hdr.ccso.p[p].enabled == 0 {
+                        continue;
+                    }
+                    if hdr.is_inter_or_switch() {
+                        hdr.ccso.p[p].reuse = gb.get_bit() as u8;
+                        hdr.ccso.p[p].sb_reuse = gb.get_bit() as u8;
+                        if hdr.ccso.p[p].reuse != 0 || hdr.ccso.p[p].sb_reuse != 0 {
+                            let mut r#ref = 0u8;
+                            if n_bits_ref > 0 {
+                                r#ref = gb.get_bits(n_bits_ref) as u8;
+                                hdr.ccso.p[p].refidx = r#ref;
+                                if r#ref >= hdr.n_ref_frames {
+                                    return Err(Dav2dError::InvalidData);
+                                }
+                            }
+                            let refhdr = refs[hdr.refidx[r#ref as usize] as usize]
+                                .p
+                                .frame_hdr
+                                .as_ref()
+                                .ok_or(Dav2dError::InvalidData)?;
+                            if hdr.ccso.p[p].reuse != 0 {
+                                let w4 = (hdr.width + 3) >> 2;
+                                let h4 = (hdr.height + 3) >> 2;
+                                let rw4 = (refhdr.width + 3) >> 2;
+                                let rh4 = (refhdr.height + 3) >> 2;
+                                if w4 != rw4
+                                    || h4 != rh4
+                                    || refhdr.ccso.p[p].enabled == 0
+                                {
+                                    return Err(Dav2dError::InvalidData);
+                                }
+                            }
+                        }
+                    }
+                    if hdr.ccso.p[p].reuse == 0 {
+                        hdr.ccso.p[p].bo_only = gb.get_bit() as u8;
+                        hdr.ccso.p[p].scale_idx = gb.get_bits(2) as u8;
+                        if hdr.ccso.p[p].bo_only != 0 {
+                            hdr.ccso.p[p].max_band_log2 = gb.get_bits(3) as u8;
+                        } else {
+                            hdr.ccso.p[p].quant_idx = gb.get_bits(2) as u8;
+                            hdr.ccso.p[p].ext_filter_support = gb.get_bits(3) as u8;
+                            if hdr.ccso.p[p].ext_filter_support == 7 {
+                                return Err(Dav2dError::InvalidData);
+                            }
+                            let si = hdr.ccso.p[p].scale_idx as usize;
+                            let qi = hdr.ccso.p[p].quant_idx as usize;
+                            if CCSO_QUANT_SZ[si][qi] != 0 {
+                                hdr.ccso.p[p].edge_clf = gb.get_bit() as u8;
+                            }
+                            hdr.ccso.p[p].max_band_log2 = gb.get_bits(2) as u8;
+                        }
+                        let n_edge_off_intervals = if hdr.ccso.p[p].bo_only != 0 {
+                            1
+                        } else {
+                            3 - hdr.ccso.p[p].edge_clf as usize
+                        };
+                        let max_band = 1usize << hdr.ccso.p[p].max_band_log2;
+                        hdr.ccso.p[p].filter_off = [0; 64];
+                        for n in 0..n_edge_off_intervals {
+                            for m_idx in 0..n_edge_off_intervals {
+                                let fo_base = n * 16 + m_idx * 4;
+                                for o in 0..max_band {
+                                    let mut off = 0u8;
+                                    while off < 7 {
+                                        if gb.get_bit() == 0 {
+                                            break;
+                                        }
+                                        off += 1;
+                                    }
+                                    hdr.ccso.p[p].filter_off[fo_base + (o >> 1)] |=
+                                        off << (4 * (o & 1));
+                                }
+                            }
+                        }
+                    } else {
+                        let refhdr =
+                            refs[hdr.refidx[hdr.ccso.p[p].refidx as usize] as usize]
+                                .p
+                                .frame_hdr
+                                .as_ref()
+                                .ok_or(Dav2dError::InvalidData)?;
+                        let rp = &refhdr.ccso.p[p];
+                        hdr.ccso.p[p].bo_only = rp.bo_only;
+                        hdr.ccso.p[p].scale_idx = rp.scale_idx;
+                        hdr.ccso.p[p].quant_idx = rp.quant_idx;
+                        hdr.ccso.p[p].ext_filter_support = rp.ext_filter_support;
+                        hdr.ccso.p[p].edge_clf = rp.edge_clf;
+                        hdr.ccso.p[p].max_band_log2 = rp.max_band_log2;
+                        hdr.ccso.p[p].filter_off = rp.filter_off;
+                    }
+                }
+            }
+        }
+
+        if hdr.all_lossless == 0 {
+            hdr.txfm_mode = if gb.get_bit() != 0 {
+                TxfmMode::Switchable
+            } else {
+                TxfmMode::Largest
+            };
+        }
+
+        if hdr.is_inter_or_switch() {
+            hdr.switchable_comp_refs = gb.get_bit() as u8;
+            hdr.skip_mode_enabled = gb.get_bit() as u8;
+            if seqhdr.bawp {
+                hdr.bawp = gb.get_bit() as u8;
+            }
+            if seqhdr.motion_modes & (1 << MotionMode::WarpDelta as u8) != 0 {
+                hdr.warp_motion = gb.get_bit() as u8;
+            }
+        }
+
+        hdr.reduced_txtp_set = gb.get_bits(2) as u8;
+
+        for i in 0..7 {
+            hdr.gmv.m[i] = DEFAULT_WM_PARAMS;
+        }
+        if hdr.is_inter_or_switch() {
+            if seqhdr.global_motion && gb.get_bit() != 0 {
+                hdr.gmv.r#ref = gb.get_uniform(hdr.n_ref_frames as u32 + 1) as u8;
+                let (ref_base_mat, in_dist);
+                if hdr.gmv.r#ref == hdr.n_ref_frames {
+                    ref_base_mat = DEFAULT_WM_PARAMS.matrix;
+                    in_dist = 1;
+                } else {
+                    let refidx = hdr.refidx[hdr.gmv.r#ref as usize] as usize;
+                    let refhdr = refs[refidx]
+                        .p
+                        .frame_hdr
+                        .as_ref()
+                        .ok_or(Dav2dError::InvalidData)?;
+                    if refhdr.n_ref_frames == 0 {
+                        ref_base_mat = DEFAULT_WM_PARAMS.matrix;
+                        in_dist = 1;
+                    } else {
+                        hdr.gmv.refref = if refhdr.n_ref_frames == 1 {
+                            0
+                        } else {
+                            gb.get_uniform(refhdr.n_ref_frames as u32) as u8
+                        };
+                        ref_base_mat = refhdr.gmv.m[hdr.gmv.refref as usize].matrix;
+                        in_dist = get_poc_diff(
+                            seqhdr.order_hint_n_bits as i32,
+                            refhdr.frame_offset as i32,
+                            refs[refidx].refpoc[hdr.gmv.refref as usize] as i32,
+                        );
+                    }
+                }
+                for i in 0..hdr.n_ref_frames as usize {
+                    hdr.gmv.m[i].wm_type = if gb.get_bit() == 0 {
+                        WarpedMotionType::Identity
+                    } else if gb.get_bit() != 0 {
+                        WarpedMotionType::RotZoom
+                    } else {
+                        WarpedMotionType::Affine
+                    };
+                    if hdr.gmv.m[i].wm_type == WarpedMotionType::Identity {
+                        continue;
+                    }
+                    let mat = &mut hdr.gmv.m[i].matrix;
+                    let mut ref_mat = [0i32; 6];
+                    let out_dist = get_poc_diff(
+                        seqhdr.order_hint_n_bits as i32,
+                        hdr.frame_offset as i32,
+                        refs[hdr.refidx[i] as usize]
+                            .p
+                            .frame_hdr
+                            .as_ref()
+                            .ok_or(Dav2dError::InvalidData)?
+                            .frame_offset as i32,
+                    );
+                    rescale_matrix(&mut ref_mat, &ref_base_mat, in_dist, out_dist);
+
+                    if hdr.gmv.m[i].wm_type >= WarpedMotionType::RotZoom {
+                        mat[2] = (1 << 16)
+                            + 64 * gb.get_bits_subexp((ref_mat[2] - (1 << 16)) >> 6, 512);
+                        mat[3] = 64 * gb.get_bits_subexp(ref_mat[3] >> 6, 512);
+                    }
+                    if hdr.gmv.m[i].wm_type == WarpedMotionType::Affine {
+                        mat[4] = 64 * gb.get_bits_subexp(ref_mat[4] >> 6, 512);
+                        mat[5] = (1 << 16)
+                            + 64 * gb.get_bits_subexp((ref_mat[5] - (1 << 16)) >> 6, 512);
+                    } else {
+                        mat[4] = -mat[3];
+                        mat[5] = mat[2];
+                    }
+                    mat[0] = gb.get_bits_subexp(ref_mat[0] >> 13, 0x4000) * 8192;
+                    mat[1] = gb.get_bits_subexp(ref_mat[1] >> 13, 0x4000) * 8192;
+                }
+            }
+        }
+    } // end !tip_output_frame
+
+    // grain
+    if seqhdr.film_grain_present && (hdr.show_immediate != 0 || hdr.show_implicit != 0) {
+        hdr.film_grain.present =
+            (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+        if hdr.film_grain.present != 0 {
+            hdr.film_grain.id = gb.get_bits(3) as u8;
+            hdr.film_grain.seed = gb.get_bits(16) as u32;
+        }
+    }
+
+    Ok(hdr)
 }
 
 pub fn parse_tile_hdr(hdr: &FrameHeader, tile: &mut crate::internal::TileGroup, gb: &mut GetBits) {
@@ -1795,5 +2851,67 @@ mod tests {
         }
         assert_eq!(seqhdr.tlayer_dependencies[1], 0);
         assert_eq!(seqhdr.tlayer_dependencies[2], 1);
+    }
+
+    fn default_refs() -> [RefState; 8] {
+        std::array::from_fn(|_| RefState::default())
+    }
+
+    #[test]
+    fn test_parse_frame_hdr_invalid_id() {
+        // get_vlc returns 1: bits 0,1,0 → n_bits=1, data=0, result=1
+        let data = [0x40, 0x00];
+        let mut gb = GetBits::new(&data);
+        let seqhdr = SequenceHeader::default();
+        let refs = default_refs();
+        let result = parse_frame_hdr(&seqhdr, &refs, ObuType::ClosedLoopKf, &mut gb);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_frame_hdr_seqhdr_mismatch() {
+        // Both vlcs return 0 (bits: 1,1) but seqhdr.id=1 → mismatch
+        let data = [0xC0, 0x00];
+        let mut gb = GetBits::new(&data);
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.id = 1;
+        let refs = default_refs();
+        let result = parse_frame_hdr(&seqhdr, &refs, ObuType::ClosedLoopKf, &mut gb);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_frame_hdr_show_existing_frame() {
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.id = 0;
+        seqhdr.ref_frames_log2 = 3;
+        seqhdr.ref_frames = 8;
+        // Bits: vlc(0)=1, vlc(0)=1, existing_frame_idx=000(3bits), poc_bit=0
+        // 0b11_000_0_00 = 0xC0
+        let data = [0xC0, 0x00];
+        let mut gb = GetBits::new(&data);
+        let refs = default_refs();
+        let hdr = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb).unwrap();
+        assert_eq!(hdr.show_existing_frame, 1);
+        assert_eq!(hdr.existing_frame_idx, 0);
+    }
+
+    #[test]
+    fn test_parse_frame_hdr_sef_invalid_ref_idx() {
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.id = 0;
+        seqhdr.ref_frames_log2 = 2;
+        seqhdr.ref_frames = 4;
+        // Bits: vlc(0)=1, vlc(0)=1, existing_frame_idx=11(2bits)=3, poc_bit=0
+        // 3 < 4, so valid. But idx=4 would fail. Let's make idx=4 impossible with 2 bits.
+        // Use ref_frames_log2=3, ref_frames=4, idx=111(3bits)=7 >= 4 → error
+        seqhdr.ref_frames_log2 = 3;
+        // Bits: vlc(0)=1, vlc(0)=1, idx=111(3bits)=7, ...
+        // 0b11_111_000 = 0xF8
+        let data = [0xF8, 0x00];
+        let mut gb = GetBits::new(&data);
+        let refs = default_refs();
+        let result = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb);
+        assert!(result.is_err());
     }
 }
