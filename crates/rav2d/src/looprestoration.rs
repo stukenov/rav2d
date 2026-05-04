@@ -183,6 +183,32 @@ pub fn get_class_lut_idx_8bpc(
     lut_idx
 }
 
+pub fn gdf_add_8bpc(
+    p: &mut [u8],
+    stride: usize,
+    err: &[i8],
+    err_stride: usize,
+    w: usize,
+    h: usize,
+    scale: i32,
+    ll_mask: &[[u16; 4]],
+) {
+    let shift = 4;
+    let rnd = 1 << (shift - 1);
+    for by in 0..h >> 2 {
+        for bx in 0..w >> 2 {
+            if ll_mask[by][0] & (1 << bx) != 0 { continue; }
+            for y in by * 4..by * 4 + 4 {
+                for x in bx * 4..bx * 4 + 4 {
+                    let diff = err[y * err_stride + x] as i32 * scale;
+                    let adj = apply_sign((diff.abs() + rnd) >> shift, diff);
+                    p[y * stride + x] = iclip(p[y * stride + x] as i32 + adj, 0, 255) as u8;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +309,33 @@ mod tests {
         let mut dst = [[0u16; 4]; 16];
         compute_gradient_row_8bpc(&mut dst, &rows, 2, 2, 4, 0);
         assert!(dst[0][0] > 0);
+    }
+
+    #[test]
+    fn test_gdf_add_basic() {
+        let mut p = vec![128u8; 64];
+        let err = vec![10i8; 64];
+        let ll_mask = vec![[0u16; 4]; 2];
+        gdf_add_8bpc(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask);
+        assert!(p[0] > 128);
+    }
+
+    #[test]
+    fn test_gdf_add_skip_mask() {
+        let mut p = vec![128u8; 64];
+        let err = vec![10i8; 64];
+        let ll_mask = vec![[0xFFFFu16; 4]; 2];
+        gdf_add_8bpc(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask);
+        assert!(p.iter().all(|&v| v == 128));
+    }
+
+    #[test]
+    fn test_gdf_add_negative_err() {
+        let mut p = vec![128u8; 64];
+        let err = vec![-10i8; 64];
+        let ll_mask = vec![[0u16; 4]; 2];
+        gdf_add_8bpc(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask);
+        assert!(p[0] < 128);
     }
 
     #[test]

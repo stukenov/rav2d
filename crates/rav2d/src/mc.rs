@@ -209,6 +209,21 @@ pub fn sad_nxn_8bpc(
     sad
 }
 
+pub fn sad8x8_8bpc(
+    p0: &[u8],
+    p0_stride: usize,
+    p1: &[u8],
+    p1_stride: usize,
+) -> u32 {
+    let mut sad = 0u32;
+    for y in 0..8 {
+        for x in 0..8 {
+            sad += (p0[y * p0_stride + x] as i32 - p1[y * p1_stride + x] as i32).unsigned_abs();
+        }
+    }
+    sad
+}
+
 pub fn sad_refine_mv_8bpc(
     p0: &[u8],
     p0_stride: usize,
@@ -580,6 +595,19 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_sad8x8_identical() {
+        let p = vec![100u8; 64];
+        assert_eq!(sad8x8_8bpc(&p, 8, &p, 8), 0);
+    }
+
+    #[test]
+    fn test_sad8x8_different() {
+        let p0 = vec![0u8; 64];
+        let p1 = vec![10u8; 64];
+        assert_eq!(sad8x8_8bpc(&p0, 8, &p1, 8), 640);
+    }
+
     fn test_sad_refine_identical() {
         let p = vec![128u8; 20 * 20];
         let (dx, dy) = sad_refine_mv_8bpc(&p, 20, &p, 20, 8, 8, false);
