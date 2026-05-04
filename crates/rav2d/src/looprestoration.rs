@@ -214,6 +214,15 @@ pub fn gdf_add_8bpc(
 pub const REST_UNIT_STRIDE: usize = 76;
 const ROW_ORIGIN: usize = 6;
 
+pub static WIENER_NS_CONFIG_UV: [[i8; 2]; 6] = [
+    [1, 0], [0, 1], [1, 1], [-1, 1], [2, 0], [0, 2],
+];
+
+pub static WIENER_NS_CONFIG_UV_FROM_Y: [[i8; 2]; 12] = [
+    [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1],
+    [-1, 1], [1, -1], [2, 0], [-2, 0], [0, 2], [0, -2],
+];
+
 pub static PC_WIENER_CONFIG: [[i8; 2]; 12] = [
     [1, 0], [0, 1], [2, 0], [0, 2], [1, 1], [-1, 1],
     [2, 1], [2, -1], [1, 2], [1, -2], [3, 0], [0, 3],
@@ -648,6 +657,179 @@ pub fn pc_wiener_8bpc(
     );
 }
 
+const LUMA_BUF_STRIDE: usize = REST_UNIT_STRIDE + 64;
+
+pub fn ns_wiener_single_uv_8bpc(
+    p: &mut [u8],
+    p_off: usize,
+    stride: usize,
+    left: &[[u8; 6]],
+    lpf: &[u8],
+    lpf_off: usize,
+    lpf_bottom: &[u8],
+    lpf_bottom_off: usize,
+    w: usize,
+    h: usize,
+    filter: &[i8; 18],
+    luma: &[u8],
+    luma_off: usize,
+    lstride: usize,
+    luma_top: &[u8],
+    luma_top_off: usize,
+    luma_bottom: &[u8],
+    luma_bottom_off: usize,
+    ss_hor: usize,
+    ss_ver: usize,
+    ds_flt: i32,
+    edges: u8,
+    ll_mask: &[[u16; 4]],
+) {
+    let mut c_buffers = [[0u8; REST_UNIT_STRIDE]; 5];
+    let mut l_buffers = [[0u8; LUMA_BUF_STRIDE]; 5];
+    let mut c_ptrs: [usize; 5] = [0; 5];
+    let mut l_ptrs: [usize; 5] = [0; 5];
+    let o = ROW_ORIGIN;
+    let luma_w = w << ss_hor;
+
+    backup_row_8bpc(&mut c_buffers[2], o, &*p, p_off, &left[0], 6, w, 2, edges);
+    c_ptrs[2] = 2;
+
+    if edges & (LR_HAVE_TOP_INTEGRATED | LR_HAVE_TOP) != 0 {
+        let mut loff = lpf_off;
+        for i in 0..2 {
+            backup_row_lpf_8bpc(&mut c_buffers[i], o, lpf, loff, w, 2, edges);
+            c_ptrs[i] = i;
+            loff += stride;
+        }
+    } else {
+        c_ptrs[0] = 2;
+        c_ptrs[1] = 2;
+    }
+
+    backup_row_8bpc(&mut c_buffers[3], o, &*p, p_off + stride, &left[1], 6, w, 2, edges);
+    c_ptrs[3] = 3;
+    let mut bak_idx: usize = 4;
+
+    backup_row_luma_8bpc(&mut l_buffers[2], o, luma, luma_off, lstride, luma_w, edges, ss_hor, ss_ver, ds_flt);
+    l_ptrs[2] = 2;
+
+    if edges & LR_HAVE_TOP_INTEGRATED != 0 {
+        backup_row_luma_8bpc(
+            &mut l_buffers[0], o, luma, luma_off - 4 * lstride,
+            lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+        );
+        l_ptrs[0] = 0;
+        backup_row_luma_8bpc(
+            &mut l_buffers[1], o, luma, luma_off - 2 * lstride,
+            lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+        );
+        l_ptrs[1] = 1;
+    } else if edges & LR_HAVE_TOP != 0 {
+        backup_row_luma_8bpc(
+            &mut l_buffers[0], o, luma_top, luma_top_off,
+            0, luma_w, edges, ss_hor, ss_ver, ds_flt,
+        );
+        l_ptrs[0] = 0;
+        backup_row_luma_8bpc(
+            &mut l_buffers[1], o, luma_top, luma_top_off,
+            lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+        );
+        l_ptrs[1] = 1;
+    } else {
+        l_ptrs[0] = 2;
+        l_ptrs[1] = 2;
+    }
+
+    backup_row_luma_8bpc(
+        &mut l_buffers[3], o, luma, luma_off + (1 << ss_ver) * lstride,
+        lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+    );
+    l_ptrs[3] = 3;
+    let mut lbak_idx: usize = 4;
+    let mut luma_pos = luma_off;
+
+    for y in 0..h {
+        if y + 2 < h {
+            backup_row_8bpc(
+                &mut c_buffers[bak_idx], o, &*p,
+                p_off + (y + 2) * stride, &left[y + 2], 6, w, 2, edges,
+            );
+            c_ptrs[4] = bak_idx;
+        } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
+            backup_row_lpf_8bpc(
+                &mut c_buffers[bak_idx], o, &*p,
+                p_off + (y + 2) * stride, w, 2, edges,
+            );
+            c_ptrs[4] = bak_idx;
+        } else if edges & LR_HAVE_BOTTOM != 0 {
+            let offset_y = y + 2 - h;
+            backup_row_lpf_8bpc(
+                &mut c_buffers[bak_idx], o, lpf_bottom,
+                lpf_bottom_off + offset_y * stride, w, 2, edges,
+            );
+            c_ptrs[4] = bak_idx;
+        } else {
+            c_ptrs[4] = c_ptrs[3];
+        }
+        bak_idx += 1;
+        if bak_idx == 5 { bak_idx = 0; }
+
+        if c_ptrs[4] == c_ptrs[3] {
+            l_ptrs[4] = l_ptrs[3];
+        } else if y + 2 == h && edges & LR_HAVE_BOTTOM_INTEGRATED == 0 {
+            backup_row_luma_8bpc(
+                &mut l_buffers[lbak_idx], o, luma_bottom, luma_bottom_off,
+                lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+            );
+            l_ptrs[4] = lbak_idx;
+        } else if y + 1 == h && edges & LR_HAVE_BOTTOM_INTEGRATED == 0 {
+            backup_row_luma_8bpc(
+                &mut l_buffers[lbak_idx], o, luma_bottom, luma_bottom_off + lstride,
+                0, luma_w, edges, ss_hor, ss_ver, ds_flt,
+            );
+            l_ptrs[4] = lbak_idx;
+        } else {
+            backup_row_luma_8bpc(
+                &mut l_buffers[lbak_idx], o, luma, luma_pos + (2 << ss_ver) * lstride,
+                lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+            );
+            l_ptrs[4] = lbak_idx;
+        }
+        lbak_idx += 1;
+        if lbak_idx == 5 { lbak_idx = 0; }
+
+        for bx in 0..(w >> 2) {
+            if ll_mask[y >> 2][0] & (1 << bx) != 0 { continue; }
+            for x in bx * 4..bx * 4 + 4 {
+                let m = c_buffers[c_ptrs[2]][o + x] as i32;
+                let mut s = m << 7;
+                for i in 0..6 {
+                    let dy = WIENER_NS_CONFIG_UV[i][0] as i32;
+                    let dx = WIENER_NS_CONFIG_UV[i][1] as i32;
+                    let a = c_buffers[c_ptrs[(2 + dy) as usize]]
+                        [(o as i32 + x as i32 + dx) as usize] as i32;
+                    let b = c_buffers[c_ptrs[(2 - dy) as usize]]
+                        [(o as i32 + x as i32 - dx) as usize] as i32;
+                    s += (a + b - 2 * m) * filter[i] as i32;
+                }
+                let l = l_buffers[l_ptrs[2]][o + (x << ss_hor)] as i32;
+                for i in 0..12 {
+                    let dy = WIENER_NS_CONFIG_UV_FROM_Y[i][0] as i32;
+                    let dx = WIENER_NS_CONFIG_UV_FROM_Y[i][1] as i32;
+                    let lx = (o as i32 + (x as i32 + dx) * (1i32 << ss_hor)) as usize;
+                    let lval = l_buffers[l_ptrs[(2 + dy) as usize]][lx] as i32;
+                    s += (lval - l) * filter[6 + i] as i32;
+                }
+                p[p_off + y * stride + x] = iclip((s + 64) >> 7, 0, 255) as u8;
+            }
+        }
+
+        for r in 0..4 { c_ptrs[r] = c_ptrs[r + 1]; }
+        for r in 0..4 { l_ptrs[r] = l_ptrs[r + 1]; }
+        luma_pos += lstride << ss_ver;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -954,6 +1136,12 @@ mod tests {
     }
 
     #[test]
+    fn test_wiener_ns_config_uv() {
+        assert_eq!(WIENER_NS_CONFIG_UV.len(), 6);
+        assert_eq!(WIENER_NS_CONFIG_UV_FROM_Y.len(), 12);
+    }
+
+    #[test]
     fn test_pc_wiener_config() {
         assert_eq!(PC_WIENER_CONFIG.len(), 12);
         assert_eq!(PC_WIENER_CONFIG[0], [1, 0]);
@@ -1046,6 +1234,105 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 assert_eq!(p[p_off + y * stride + x], 100, "skip mask should prevent changes");
+            }
+        }
+    }
+
+    #[test]
+    fn test_ns_wiener_single_uv_identity() {
+        let w = 8;
+        let h = 8;
+        let stride = 16;
+        let p_off = stride + 4;
+        let mut p = vec![128u8; stride * (h + 6)];
+        let left = vec![[128u8; 6]; h + 4];
+        let lpf = vec![128u8; stride * 4 + 8];
+        let lpf_bottom = vec![128u8; stride * 4 + 8];
+        let lstride = 32usize;
+        let luma_off = 4 * lstride + 8;
+        let luma = vec![128u8; lstride * (h * 2 + 12)];
+        let luma_top = vec![128u8; lstride * 4 + 8];
+        let luma_bottom = vec![128u8; lstride * 4 + 8];
+        let filter = [0i8; 18];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
+
+        ns_wiener_single_uv_8bpc(
+            &mut p, p_off, stride, &left, &lpf, 4, &lpf_bottom, 4,
+            w, h, &filter,
+            &luma, luma_off, lstride, &luma_top, 8, &luma_bottom, 8,
+            1, 1, 2, edges, &ll_mask,
+        );
+
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({}, {})", x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ns_wiener_single_uv_no_subsample() {
+        let w = 8;
+        let h = 8;
+        let stride = 16;
+        let p_off = stride + 4;
+        let mut p = vec![128u8; stride * (h + 6)];
+        let left = vec![[128u8; 6]; h + 4];
+        let lpf = vec![128u8; stride * 4 + 8];
+        let lpf_bottom = vec![128u8; stride * 4 + 8];
+        let lstride = 16usize;
+        let luma_off = 4 * lstride + 4;
+        let luma = vec![128u8; lstride * (h + 12)];
+        let luma_top = vec![128u8; lstride * 4 + 8];
+        let luma_bottom = vec![128u8; lstride * 4 + 8];
+        let filter = [0i8; 18];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
+
+        ns_wiener_single_uv_8bpc(
+            &mut p, p_off, stride, &left, &lpf, 4, &lpf_bottom, 4,
+            w, h, &filter,
+            &luma, luma_off, lstride, &luma_top, 4, &luma_bottom, 4,
+            0, 0, 2, edges, &ll_mask,
+        );
+
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({}, {})", x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ns_wiener_single_uv_skip_mask() {
+        let w = 8;
+        let h = 8;
+        let stride = 16;
+        let p_off = stride + 4;
+        let mut p = vec![100u8; stride * (h + 6)];
+        let left = vec![[100u8; 6]; h + 4];
+        let lpf = vec![100u8; stride * 4 + 8];
+        let lpf_bottom = vec![100u8; stride * 4 + 8];
+        let lstride = 16usize;
+        let luma_off = 4 * lstride + 4;
+        let luma = vec![100u8; lstride * (h + 12)];
+        let luma_top = vec![100u8; lstride * 4 + 8];
+        let luma_bottom = vec![100u8; lstride * 4 + 8];
+        let filter = [127i8; 18];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
+
+        ns_wiener_single_uv_8bpc(
+            &mut p, p_off, stride, &left, &lpf, 4, &lpf_bottom, 4,
+            w, h, &filter,
+            &luma, luma_off, lstride, &luma_top, 4, &luma_bottom, 4,
+            0, 0, 2, edges, &ll_mask,
+        );
+
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(p[p_off + y * stride + x], 100, "skip mask failed");
             }
         }
     }
