@@ -1081,6 +1081,324 @@ pub fn bank_add(
     mv_bank_add_inner(bank, b.ref_pair, mv, cwp_idx);
 }
 
+#[derive(Clone)]
+pub struct MvSearchState {
+    pub dr: [Candidate; 6],
+    pub sngl: [SnglMvBlock; 4],
+    pub drvd_cnt: i32,
+    pub sngl_cnt: i32,
+    pub drvd_iter_cntr: i32,
+    pub sngl_iter_cntr: i32,
+    pub iter_cntr: i32,
+    pub b8x8: isize,
+}
+
+impl Default for MvSearchState {
+    fn default() -> Self {
+        Self {
+            dr: [Candidate::default(); 6],
+            sngl: [SnglMvBlock { mv: Mv::default(), r#ref: 0 }; 4],
+            drvd_cnt: 0,
+            sngl_cnt: 0,
+            drvd_iter_cntr: 0,
+            sngl_iter_cntr: 0,
+            iter_cntr: 0,
+            b8x8: 0,
+        }
+    }
+}
+
+pub fn add_derived(
+    st: &mut MvSearchState,
+    mvstack: &mut [Candidate; 6],
+    cnt: &mut i32,
+    lim: i32,
+    comp: bool,
+) {
+    for n in 0..st.drvd_cnt as usize {
+        if *cnt >= 6 { break; }
+        if comp {
+            add_candidate_comp(mvstack, cnt, lim, 0, 8,
+                               &st.dr[n].mv, &mut st.iter_cntr, 16);
+        } else {
+            add_candidate_sngl(mvstack, cnt, lim, 0, st.dr[n].mv[0],
+                               0, 0, &mut st.iter_cntr, 16);
+        }
+    }
+}
+
+pub fn add_temporal_candidate(
+    rf: &Frame,
+    rp_proj: &[SnglMvBlock],
+    rp_traj: &[Vec<Mv>; 7],
+    st: &mut MvSearchState,
+    mvstack: &mut [Candidate; 6],
+    cnt: &mut i32,
+    off_8x8: isize,
+    r#ref: RefPair,
+    seq_mv_traj: bool,
+) -> bool {
+    let (ref0, ref1) = unsafe { (r#ref.r[0], r#ref.r[1]) };
+    if ref0 as usize >= crate::levels::TIP_FRAME { return false; }
+
+    let off = off_8x8 as usize;
+    let mv = if seq_mv_traj && unsafe { rp_traj[ref0 as usize][off].c.y } != INVALID_MV {
+        rp_traj[ref0 as usize][off]
+    } else {
+        let proj_mv = rp_proj[off].mv;
+        if unsafe { proj_mv.c.y } == INVALID_MV { return false; }
+        mv_projection(proj_mv, rf.pocdiff[ref0 as usize] as i32,
+                      rp_proj[off].r#ref as i32, -0xffff, 0xffff)
+    };
+
+    if ref1 == -1 {
+        let weight = 1 + (rf.abspocdiff[ref0 as usize] <= 2) as u16;
+        return add_candidate_sngl(mvstack, cnt, 6, weight, mv,
+                                  0, 0, &mut st.iter_cntr, 16);
+    }
+
+    let mv2 = if seq_mv_traj && unsafe { rp_traj[ref1 as usize][off].c.y } != INVALID_MV {
+        rp_traj[ref1 as usize][off]
+    } else {
+        let proj_mv = rp_proj[off].mv;
+        if unsafe { proj_mv.c.y } == INVALID_MV { return false; }
+        mv_projection(proj_mv, rf.pocdiff[ref1 as usize] as i32,
+                      rp_proj[off].r#ref as i32, -0xffff, 0xffff)
+    };
+
+    let cand_mv = [mv, mv2];
+    add_candidate_comp(mvstack, cnt, 6, 1, 8, &cand_mv, &mut st.iter_cntr, 16)
+}
+
+pub fn add_spatial_candidate(
+    y_off: i32,
+    x_off: i32,
+    rf: &Frame,
+    rp_proj: &[SnglMvBlock],
+    rp_traj: &[Vec<Mv>; 7],
+    st: &mut MvSearchState,
+    mvstack: &mut [Candidate; 6],
+    cnt: &mut i32,
+    weight: u16,
+    b: &Block,
+    mut off_y_8x8: isize,
+    mut off_x_8x8: isize,
+    r#ref: RefPair,
+    gmv: &[Mv; 2],
+    seq_hdr: &crate::headers::SequenceHeader,
+    frm_hdr: &crate::headers::FrameHeader,
+) {
+    use crate::levels::TIP_FRAME;
+
+    if *cnt >= 6 { return; }
+    if unsafe { b.mv[0].c.y } == INVALID_MV { return; }
+
+    if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
+        let b_dim = &crate::tables::BLOCK_DIMENSIONS[b.bs as usize];
+        let tip16 = if frm_hdr.tip.frame_mode == 2 {
+            !seq_hdr.tip_refine_mv || frm_hdr.tip.subpel_filter != 4
+        } else {
+            (!seq_hdr.tip_refine_mv && imin(b_dim[0] as i32, b_dim[1] as i32) >= 4)
+                || b.bs == crate::levels::BlockSize::Bs256x256 as u8
+        };
+        let tip16m = !(tip16 as isize);
+        off_y_8x8 &= tip16m;
+        off_x_8x8 &= tip16m;
+    }
+    let off_8x8 = (rf.rp_stride * off_y_8x8 + off_x_8x8) as usize;
+    let (ref0, ref1) = unsafe { (r#ref.r[0], r#ref.r[1]) };
+
+    if ref1 == -1 {
+        let num = 1 + (ref0 >= 0) as usize;
+        for n in 0..num {
+            let b_ref_n = unsafe { b.r#ref.r[n] };
+            if b_ref_n == ref0 {
+                let cand_mv = if b.mf & 1 != 0 && unsafe { gmv[0].c.y } != INVALID_MV {
+                    gmv[0]
+                } else {
+                    b.mv[n]
+                };
+                add_candidate_sngl(mvstack, cnt, 6, weight, cand_mv,
+                                   y_off as i8, x_off as i8, &mut st.iter_cntr, 16);
+            } else if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8
+                && unsafe { rf.tip.r#ref.r[n] } == ref0
+            {
+                let mut tmv = rp_proj[off_8x8].mv;
+                unsafe { if tmv.c.y == INVALID_MV { tmv.n = 0; } }
+                let tipmv = scale_mv(tmv, rf.tip.sf[n]);
+                let cand_mv = Mv { c: MvXY {
+                    y: iclip(unsafe { tipmv.c.y + b.mv[0].c.y }, -0xffff, 0xffff),
+                    x: iclip(unsafe { tipmv.c.x + b.mv[0].c.x }, -0xffff, 0xffff),
+                }};
+                add_candidate_sngl(mvstack, cnt, 6, weight, cand_mv,
+                                   y_off as i8, x_off as i8, &mut st.iter_cntr, 16);
+            } else if ref0 == TIP_FRAME as i8
+                && unsafe { b.r#ref.pair } == unsafe { rf.tip.r#ref.pair }
+            {
+                let in_delta = Mv { c: MvXY {
+                    y: unsafe { b.mv[0].c.y - b.mv[1].c.y },
+                    x: unsafe { b.mv[0].c.x - b.mv[1].c.x },
+                }};
+                let out_delta = scale_mv(in_delta, rf.tip.sf[0]);
+                let cand_mv = Mv { c: MvXY {
+                    y: iclip(unsafe { b.mv[0].c.y - out_delta.c.y }, -0xffff, 0xffff),
+                    x: iclip(unsafe { b.mv[0].c.x - out_delta.c.x }, -0xffff, 0xffff),
+                }};
+                add_candidate_sngl(&mut st.dr, &mut st.drvd_cnt, 4, weight, cand_mv,
+                                   0, 0, &mut st.drvd_iter_cntr, 2);
+                break;
+            } else if seq_hdr.mv_traj && frm_hdr.use_ref_frame_mvs != 0
+                && (ref0 as usize) < TIP_FRAME
+                && (unsafe { b.r#ref.r[0] } == TIP_FRAME as i8
+                    || (unsafe { b.r#ref.r[n] } as usize) < TIP_FRAME)
+                && rp_traj[ref0 as usize].len() > st.b8x8 as usize
+                && unsafe { rp_traj[ref0 as usize][st.b8x8 as usize].c.y } != INVALID_MV
+            {
+                let src_ref = if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
+                    (unsafe { rf.tip.r#ref.r[n] }) as usize
+                } else {
+                    (unsafe { b.r#ref.r[n] }) as usize
+                };
+                if src_ref < rp_traj.len() && rp_traj[src_ref].len() > st.b8x8 as usize
+                    && unsafe { rp_traj[src_ref][st.b8x8 as usize].c.y } != INVALID_MV
+                {
+                    let (a_mv, b_mv);
+                    if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
+                        a_mv = rp_traj[unsafe { rf.tip.r#ref.r[n] } as usize][st.b8x8 as usize];
+                        let mut tmv = rp_proj[off_8x8].mv;
+                        unsafe { if tmv.c.y == INVALID_MV { tmv.n = 0; } }
+                        let tipmv = scale_mv(tmv, rf.tip.sf[n]);
+                        b_mv = Mv { c: MvXY {
+                            y: iclip(unsafe { tipmv.c.y + b.mv[0].c.y }, -0xffff, 0xffff),
+                            x: iclip(unsafe { tipmv.c.x + b.mv[0].c.x }, -0xffff, 0xffff),
+                        }};
+                    } else {
+                        a_mv = rp_traj[unsafe { b.r#ref.r[n] } as usize][st.b8x8 as usize];
+                        b_mv = b.mv[n];
+                    }
+                    let c_mv = rp_traj[ref0 as usize][st.b8x8 as usize];
+                    let cand_mv = Mv { c: MvXY {
+                        y: iclip(unsafe { b_mv.c.y + c_mv.c.y - a_mv.c.y }, -0xffff, 0xffff),
+                        x: iclip(unsafe { b_mv.c.x + c_mv.c.x - a_mv.c.x }, -0xffff, 0xffff),
+                    }};
+                    add_candidate_sngl(&mut st.dr, &mut st.drvd_cnt, 4, weight, cand_mv,
+                                       0, 0, &mut st.drvd_iter_cntr, 2);
+                }
+            } else if (ref0 as usize) < TIP_FRAME && unsafe { b.r#ref.r[0] } >= 0 {
+                let src_ref = if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
+                    (unsafe { rf.tip.r#ref.r[n] }) as usize
+                } else {
+                    (unsafe { b.r#ref.r[n] }) as usize
+                };
+                if rf.ref_sign[ref0 as usize] == rf.ref_sign[src_ref] {
+                    let (cand_mv_in, den) = if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
+                        let mut tmv = rp_proj[off_8x8].mv;
+                        unsafe { if tmv.c.y == INVALID_MV { tmv.n = 0; } }
+                        let tipmv = scale_mv(tmv, rf.tip.sf[n]);
+                        (Mv { c: MvXY {
+                            y: iclip(unsafe { tipmv.c.y + b.mv[0].c.y }, -0xffff, 0xffff),
+                            x: iclip(unsafe { tipmv.c.x + b.mv[0].c.x }, -0xffff, 0xffff),
+                        }}, rf.abspocdiff[unsafe { rf.tip.r#ref.r[n] } as usize])
+                    } else {
+                        (b.mv[n], rf.abspocdiff[unsafe { b.r#ref.r[n] } as usize])
+                    };
+                    let cand_mv = mv_projection(cand_mv_in, rf.abspocdiff[ref0 as usize] as i32,
+                                                den as i32, -0xffff, 0xffff);
+                    add_candidate_sngl(&mut st.dr, &mut st.drvd_cnt, 4, weight, cand_mv,
+                                       0, 0, &mut st.drvd_iter_cntr, 2);
+                }
+            }
+            if unsafe { b.r#ref.r[1] } < 0 && unsafe { b.r#ref.r[0] } != TIP_FRAME as i8 {
+                break;
+            }
+        }
+    } else if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8
+        && unsafe { r#ref.pair } == unsafe { rf.tip.r#ref.pair }
+    {
+        let mut tmv = rp_proj[off_8x8].mv;
+        unsafe { if tmv.c.y == INVALID_MV { tmv.n = 0; } }
+        let tip0mv = scale_mv(tmv, rf.tip.sf[0]);
+        let tip1mv = scale_mv(tmv, rf.tip.sf[1]);
+        let cand_mv = [
+            Mv { c: MvXY {
+                y: iclip(unsafe { tip0mv.c.y + b.mv[0].c.y }, -0xffff, 0xffff),
+                x: iclip(unsafe { tip0mv.c.x + b.mv[0].c.x }, -0xffff, 0xffff),
+            }},
+            Mv { c: MvXY {
+                y: iclip(unsafe { tip1mv.c.y + b.mv[0].c.y }, -0xffff, 0xffff),
+                x: iclip(unsafe { tip1mv.c.x + b.mv[0].c.x }, -0xffff, 0xffff),
+            }},
+        ];
+        add_candidate_comp(mvstack, cnt, 6, weight, 8, &cand_mv, &mut st.iter_cntr, 16);
+    } else if unsafe { b.r#ref.pair == r#ref.pair } {
+        let cand_mv = [
+            if b.mf & 1 != 0 && unsafe { gmv[0].c.y } != INVALID_MV { gmv[0] } else { b.mv[0] },
+            if b.mf & 1 != 0 && unsafe { gmv[1].c.y } != INVALID_MV { gmv[1] } else { b.mv[1] },
+        ];
+        add_candidate_comp(mvstack, cnt, 6, weight, (b.mf >> 2) as i8,
+                           &cand_mv, &mut st.iter_cntr, 16);
+    } else {
+        if seq_hdr.mv_traj && frm_hdr.use_ref_frame_mvs != 0
+            && unsafe { b.r#ref.r[0] } != TIP_FRAME as i8
+            && ref0 != ref1
+            && rp_traj[ref0 as usize].len() > st.b8x8 as usize
+            && rp_traj[ref1 as usize].len() > st.b8x8 as usize
+            && unsafe { rp_traj[ref0 as usize][st.b8x8 as usize].c.y } != INVALID_MV
+            && unsafe { rp_traj[ref1 as usize][st.b8x8 as usize].c.y } != INVALID_MV
+        {
+            let b1_mv = rp_traj[ref0 as usize][st.b8x8 as usize];
+            let b2_mv = rp_traj[ref1 as usize][st.b8x8 as usize];
+            for n in 0..2 {
+                if unsafe { b.r#ref.r[n] } < 0 { break; }
+                let br = (unsafe { b.r#ref.r[n] }) as usize;
+                if rp_traj[br].len() <= st.b8x8 as usize { continue; }
+                let a_mv = rp_traj[br][st.b8x8 as usize];
+                if unsafe { a_mv.c.y } == INVALID_MV { continue; }
+                let cand_mv = [
+                    Mv { c: MvXY {
+                        y: iclip(unsafe { b.mv[n].c.y + b1_mv.c.y - a_mv.c.y }, -0xffff, 0xffff),
+                        x: iclip(unsafe { b.mv[n].c.x + b1_mv.c.x - a_mv.c.x }, -0xffff, 0xffff),
+                    }},
+                    Mv { c: MvXY {
+                        y: iclip(unsafe { b.mv[n].c.y + b2_mv.c.y - a_mv.c.y }, -0xffff, 0xffff),
+                        x: iclip(unsafe { b.mv[n].c.x + b2_mv.c.x - a_mv.c.x }, -0xffff, 0xffff),
+                    }},
+                ];
+                add_candidate_comp(&mut st.dr, &mut st.drvd_cnt, 4, weight, 8,
+                                   &cand_mv, &mut st.drvd_iter_cntr, 2);
+            }
+        }
+
+        let mut ns = 1i32;
+        if ref0 == unsafe { b.r#ref.r[0] } || ref0 == unsafe { b.r#ref.r[1] } {
+            ns = 0;
+        } else if ref1 != unsafe { b.r#ref.r[0] } && ref1 != unsafe { b.r#ref.r[1] } {
+            return;
+        }
+        let nc = (unsafe { r#ref.r[ns as usize] } != unsafe { b.r#ref.r[0] }) as usize;
+        let mut oidx = 0;
+        while oidx < st.sngl_cnt as usize {
+            if unsafe { r#ref.r[1 - ns as usize] } == st.sngl[oidx].r#ref as i8 { break; }
+            oidx += 1;
+        }
+        if oidx < st.sngl_cnt as usize {
+            let mut cand_mv = [Mv::default(); 2];
+            cand_mv[ns as usize] = b.mv[nc];
+            cand_mv[1 - ns as usize] = st.sngl[oidx].mv;
+            add_candidate_comp(&mut st.dr, &mut st.drvd_cnt, 4, weight, 8,
+                               &cand_mv, &mut st.drvd_iter_cntr, 2);
+        }
+        let cand_mv = if b.mf & 1 != 0 && unsafe { gmv[nc].c.y } != INVALID_MV {
+            gmv[ns as usize]
+        } else {
+            b.mv[nc]
+        };
+        add_candidate_c2s(&mut st.sngl, &mut st.sngl_cnt, 4,
+                          (unsafe { b.r#ref.r[nc] }) as u8, cand_mv,
+                          &mut st.sngl_iter_cntr, 2);
+    }
+}
+
 pub fn splat_mv(
     s_dst: &mut [Block],
     s_src: &mut Block,
