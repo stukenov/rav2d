@@ -1,4 +1,4 @@
-use crate::intops::{ctz, iclip, imax, imin, ulog2};
+use crate::intops::{clz, ctz, iclip, imax, imin, ulog2};
 use crate::levels::CflMhDir;
 use crate::levels::{
     ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG, ANGLE_IS_LUMA,
@@ -1042,7 +1042,7 @@ pub fn cfl_gen_y_420_8bpc(
         let has_tsb = top_sb_edge.is_some();
         let (tsb, tsb_off) = top_sb_edge.unwrap_or((src, src_off));
         let mut top_sp: usize;
-        let mut top_buf: &[u8];
+        let top_buf: &[u8];
         let b: isize;
         let mut t: isize;
 
@@ -1150,6 +1150,117 @@ pub fn cfl_gen_y_420_8bpc(
         sp += src_stride << 1;
         dst_lp += n_left;
     }
+}
+
+pub const CFL_MHCCP_MAX_EDGE_SAMPLES: usize = 386;
+
+#[inline(always)]
+fn sqrnd_8bpc(v: i32) -> i32 {
+    (v * v + 128) >> 8
+}
+
+pub fn cfl_gen_mat_8bpc(
+    mat: &mut [[i32; 3]; 3],
+    imat: &mut [[u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2],
+    y: &[u8],
+    y_off: usize,
+    y_top_stride: usize,
+    refw: usize,
+    refh: usize,
+    edge_flags: i32,
+    dir: CflMhDir,
+) {
+    let has_t = edge_flags & CFL_HAS_TOP != 0;
+    let has_l = edge_flags & CFL_HAS_LEFT != 0;
+    let dir_t = dir == CflMhDir::Top;
+    let dir_l = dir == CflMhDir::Left;
+    let n_top = if has_t { 1 + dir_t as usize } else { 0 };
+    let n_left = if has_l { 1 + dir_l as usize } else { 0 };
+    let left_off = y_off + n_top * y_top_stride + 64 * 64;
+
+    for r in mat.iter_mut() { r.fill(0); }
+
+    let mut n: usize = 0;
+
+    if has_t {
+        for i in 0..n_left {
+            let v0 = y[left_off + i] as i32;
+            let neighbor = if i == 0 {
+                y[left_off + i + (dir_t as usize | dir_l as usize)] as i32
+            } else {
+                y[y_off] as i32
+            };
+            let v1 = sqrnd_8bpc(neighbor);
+            imat[0][n] = v0 as u16;
+            imat[1][n] = v1 as u16;
+            mat[0][0] += v0 * v0;
+            mat[0][1] += v0 * v1;
+            mat[0][2] += v0 << 7;
+            mat[1][1] += v1 * v1;
+            mat[1][2] += v1 << 7;
+            n += 1;
+        }
+        let start: usize = if !dir_l && !has_l { 1 } else { 0 };
+        let end = imax(start as i32, refw as i32 - n_left as i32 - 1 - (start == 0) as i32) as usize;
+        for i in start..end {
+            let v0 = y[y_off + i] as i32;
+            let yi = y_off + dir_t as usize * y_top_stride + i + dir_l as usize;
+            let v1 = sqrnd_8bpc(y[yi] as i32);
+            imat[0][n] = v0 as u16;
+            imat[1][n] = v1 as u16;
+            mat[0][0] += v0 * v0;
+            mat[0][1] += v0 * v1;
+            mat[0][2] += v0 << 7;
+            mat[1][1] += v1 * v1;
+            mat[1][2] += v1 << 7;
+            n += 1;
+        }
+    }
+
+    if has_l {
+        let start = if dir_t && !has_t { 0 } else { 1 };
+        let end = if dir_t && !has_t { refh } else { refh - 1 };
+        for i in start..end {
+            let v0 = y[left_off + i * n_left] as i32;
+            let ni = left_off + (i + dir_t as usize) * n_left + dir_l as usize;
+            let v1 = sqrnd_8bpc(y[ni] as i32);
+            imat[0][n] = v0 as u16;
+            imat[1][n] = v1 as u16;
+            mat[0][0] += v0 * v0;
+            mat[0][1] += v0 * v1;
+            mat[0][2] += v0 << 7;
+            mat[1][1] += v1 * v1;
+            mat[1][2] += v1 << 7;
+            n += 1;
+        }
+    }
+
+    mat[2][2] = (n as i32) << 14;
+
+    if n > 0 {
+        let nl2 = 31 - clz(n as u32) as i32;
+        let mat_sh = 22 - 16 - nl2 - (n as i32 & ((1 << nl2) - 1) != 0) as i32;
+        if mat_sh > 0 {
+            for i in 0..3 {
+                for j in i..3 {
+                    mat[i][j] <<= mat_sh;
+                }
+            }
+        } else if mat_sh < 0 {
+            for i in 0..3 {
+                for j in i..3 {
+                    mat[i][j] >>= -mat_sh;
+                }
+            }
+        }
+    }
+
+    mat[0][0] += 2;
+    mat[1][1] += 2;
+    mat[2][2] += 2;
+    mat[1][0] = mat[0][1];
+    mat[2][0] = mat[0][2];
+    mat[2][1] = mat[1][2];
 }
 
 #[cfg(test)]
@@ -1703,5 +1814,40 @@ mod tests {
         let top = vec![100u8; 128];
         let v = cfl_filter(&src, 2, 1, 3, 64, &top, 2, CFL_FLT_TYPE_GAUSS);
         assert_eq!(v, 100);
+    }
+
+    #[test]
+    fn test_cfl_gen_mat_no_edges() {
+        let y = vec![128u8; 64 * 64 + 512];
+        let mut mat = [[0i32; 3]; 3];
+        let mut imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
+        cfl_gen_mat_8bpc(&mut mat, &mut imat, &y, 0, 8, 4, 4, 0, CflMhDir::Center);
+        assert_eq!(mat[2][2], 2);
+    }
+
+    #[test]
+    fn test_cfl_gen_mat_symmetric() {
+        let mut y = vec![100u8; 64 * 64 + 512];
+        for i in 0..512 { y[64 * 64 + i] = 100; }
+        let mut mat = [[0i32; 3]; 3];
+        let mut imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
+        cfl_gen_mat_8bpc(
+            &mut mat, &mut imat, &y, 0, 8, 4, 4,
+            CFL_HAS_TOP | CFL_HAS_LEFT, CflMhDir::Center,
+        );
+        assert_eq!(mat[1][0], mat[0][1]);
+        assert_eq!(mat[2][0], mat[0][2]);
+        assert_eq!(mat[2][1], mat[1][2]);
+    }
+
+    #[test]
+    fn test_cfl_gen_mat_regularization() {
+        let y = vec![128u8; 64 * 64 + 512];
+        let mut mat = [[0i32; 3]; 3];
+        let mut imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
+        cfl_gen_mat_8bpc(&mut mat, &mut imat, &y, 0, 8, 4, 4, 0, CflMhDir::Center);
+        assert!(mat[0][0] >= 2);
+        assert!(mat[1][1] >= 2);
+        assert!(mat[2][2] >= 2);
     }
 }
