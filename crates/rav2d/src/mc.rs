@@ -209,6 +209,51 @@ pub fn sad_nxn_8bpc(
     sad
 }
 
+pub fn sad_refine_mv_8bpc(
+    p0: &[u8],
+    p0_stride: usize,
+    p1: &[u8],
+    p1_stride: usize,
+    w: usize,
+    h: usize,
+    is_implicit: bool,
+) -> (i32, i32) {
+    let sadw = w + 4;
+    let sadh = h + 4;
+    let sad_thr = (sadw * sadh * 2) as i32;
+    let mut best_sad = i32::MAX;
+    let mut best_dx = 0i32;
+    let mut best_dy = 0i32;
+
+    if is_implicit {
+        best_sad = sad_nxn_8bpc(
+            &p0[2 * p0_stride + 2..], p0_stride,
+            &p1[2 * p1_stride + 2..], p1_stride,
+            sadw, sadh,
+        );
+        best_sad = (best_sad * 7 + 7) >> 3;
+        if best_sad < sad_thr {
+            return (best_dx, best_dy);
+        }
+    }
+
+    for y_off in -2i32..=2 {
+        for x_off in -2i32..=2 {
+            if x_off == 0 && y_off == 0 { continue; }
+            let sad = sad_nxn_8bpc(
+                &p0[((2 + y_off) as usize) * p0_stride + (2 + x_off) as usize..], p0_stride,
+                &p1[((2 - y_off) as usize) * p1_stride + (2 - x_off) as usize..], p1_stride,
+                sadw, sadh,
+            );
+            if sad >= best_sad { continue; }
+            best_sad = sad;
+            best_dx = x_off;
+            best_dy = y_off;
+        }
+    }
+    (best_dx, best_dy)
+}
+
 fn filter_warp_rnd(src: &[i16], x: usize, f: &[i8; 8], stride: usize, sh: i32) -> i16 {
     let v = f[0] as i32 * src[x.wrapping_sub(3 * stride)] as i32
         + f[1] as i32 * src[x.wrapping_sub(2 * stride)] as i32
@@ -532,6 +577,34 @@ mod tests {
         emu_edge_8bpc(4, 4, 8, 8, -2, -2, &mut dst, 4, &r, 8);
         assert_eq!(dst[0], 200);
         assert_eq!(dst[1], 200);
+    }
+
+    #[test]
+    fn test_sad_refine_identical() {
+        let p = vec![128u8; 20 * 20];
+        let (dx, dy) = sad_refine_mv_8bpc(&p, 20, &p, 20, 8, 8, false);
+        assert_eq!((dx, dy), (-2, -2));
+    }
+
+    #[test]
+    fn test_sad_refine_implicit_low_sad() {
+        let p = vec![128u8; 20 * 20];
+        let (dx, dy) = sad_refine_mv_8bpc(&p, 20, &p, 20, 8, 8, true);
+        assert_eq!((dx, dy), (0, 0));
+    }
+
+    #[test]
+    fn test_sad_refine_finds_offset() {
+        let mut p0 = vec![100u8; 20 * 20];
+        let mut p1 = vec![100u8; 20 * 20];
+        for y in 0..12 {
+            for x in 0..12 {
+                p0[(y + 3) * 20 + (x + 3)] = 200;
+                p1[(y + 1) * 20 + (x + 1)] = 200;
+            }
+        }
+        let (dx, dy) = sad_refine_mv_8bpc(&p0, 20, &p1, 20, 8, 8, false);
+        assert!(dx != 0 || dy != 0);
     }
 
     #[test]

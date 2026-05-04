@@ -1,5 +1,92 @@
 use crate::intops::{apply_sign, imax, imin, ulog2};
 
+pub const CDEF_HAVE_LEFT: u8 = 1 << 0;
+pub const CDEF_HAVE_RIGHT: u8 = 1 << 1;
+pub const CDEF_HAVE_TOP: u8 = 1 << 2;
+pub const CDEF_HAVE_BOTTOM: u8 = 1 << 3;
+
+/// Fill CDEF padding buffer around a block.
+/// `tmp` is a flat buffer, `o` is the origin offset (top-left of the block).
+/// The buffer must have 2 extra rows/cols on each side from `o`.
+/// `left[y]` contains the 2 left-neighbor pixels for row y: `left[y][0]` is col -2, `left[y][1]` is col -1.
+pub fn cdef_padding_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    src_off: usize,
+    left: &[[u8; 2]],
+    top: &[u8],
+    top_off: usize,
+    bottom: &[u8],
+    bottom_off: usize,
+    w: usize,
+    h: usize,
+    edges: u8,
+) {
+    let o = 2 * tmp_stride + 2;
+
+    let mut x_start: i32 = -2;
+    let mut x_end: i32 = w as i32 + 2;
+    let mut y_start: i32 = -2;
+    let mut y_end: i32 = h as i32 + 2;
+
+    if edges & CDEF_HAVE_TOP == 0 {
+        let base = o.wrapping_sub(2).wrapping_sub(2 * tmp_stride);
+        fill(&mut tmp[base..], tmp_stride, w + 4, 2);
+        y_start = 0;
+    }
+    if edges & CDEF_HAVE_BOTTOM == 0 {
+        let base = o + h * tmp_stride - 2;
+        fill(&mut tmp[base..], tmp_stride, w + 4, 2);
+        y_end -= 2;
+    }
+    if edges & CDEF_HAVE_LEFT == 0 {
+        let base = (o as i32 + y_start * tmp_stride as i32 - 2) as usize;
+        fill(&mut tmp[base..], tmp_stride, 2, (y_end - y_start) as usize);
+        x_start = 0;
+    }
+    if edges & CDEF_HAVE_RIGHT == 0 {
+        let base = (o as i32 + y_start * tmp_stride as i32 + w as i32) as usize;
+        fill(&mut tmp[base..], tmp_stride, 2, (y_end - y_start) as usize);
+        x_end -= 2;
+    }
+
+    let mut toff = top_off;
+    for y in y_start..0 {
+        for x in x_start..x_end {
+            let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
+            tmp[ti] = top[(toff as i32 + x) as usize] as i16;
+        }
+        toff += src_stride;
+    }
+
+    for y in 0..h as i32 {
+        for x in x_start..0 {
+            let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
+            tmp[ti] = left[y as usize][(2 + x) as usize] as i16;
+        }
+    }
+
+    let mut soff = src_off;
+    for y in 0..h as i32 {
+        for x in 0..x_end {
+            let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
+            tmp[ti] = src[(soff as i32 + x) as usize] as i16;
+        }
+        soff += src_stride;
+    }
+
+    let mut boff = bottom_off;
+    for y in h as i32..y_end {
+        for x in x_start..x_end {
+            let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
+            tmp[ti] = bottom[(boff as i32 + x) as usize] as i16;
+        }
+        boff += src_stride;
+    }
+}
+
 #[inline(always)]
 pub fn constrain(diff: i32, threshold: i32, shift: i32) -> i32 {
     let adiff = diff.abs();
@@ -236,5 +323,44 @@ mod tests {
         let c = adjust_strength(100, 4096);
         assert!(a <= b);
         assert!(b <= c);
+    }
+
+    #[test]
+    fn test_cdef_padding_all_edges() {
+        let src = vec![100u8; 16 * 16];
+        let left = vec![[50u8, 60]; 8];
+        let top = vec![200u8; 64];
+        let bottom = vec![150u8; 64];
+        let mut tmp = vec![0i16; 12 * 20];
+        let tmp_stride = 12;
+        cdef_padding_8bpc(
+            &mut tmp, tmp_stride, &src, 16, 2,
+            &left, &top, 2, &bottom, 2,
+            8, 8,
+            CDEF_HAVE_TOP | CDEF_HAVE_BOTTOM | CDEF_HAVE_LEFT | CDEF_HAVE_RIGHT,
+        );
+        let o = 2 * tmp_stride + 2;
+        assert_eq!(tmp[o], 100);
+        assert_eq!(tmp[o - 1], 60);
+        assert_eq!(tmp[o - 2], 50);
+    }
+
+    #[test]
+    fn test_cdef_padding_no_edges() {
+        let src = vec![100u8; 16 * 16];
+        let left = vec![[0u8; 2]; 8];
+        let top = vec![0u8; 32];
+        let bottom = vec![0u8; 32];
+        let mut tmp = vec![0i16; 12 * 20];
+        let tmp_stride = 12;
+        cdef_padding_8bpc(
+            &mut tmp, tmp_stride, &src, 16, 0,
+            &left, &top, 0, &bottom, 0,
+            8, 8, 0,
+        );
+        let o = 2 * tmp_stride + 2;
+        assert_eq!(tmp[o], 100);
+        assert_eq!(tmp[o - 1], i16::MIN);
+        assert_eq!(tmp[o - tmp_stride], i16::MIN);
     }
 }
