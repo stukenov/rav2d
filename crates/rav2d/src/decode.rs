@@ -1,18 +1,24 @@
 use crate::cdf::{CdfModeContext, CdfMvContext};
 use crate::dsp::N_SWITCHABLE_FILTERS;
-use crate::env::BlockContext;
-use crate::headers::{AdaptiveBoolean, FrameHeader, NSWienerPlane, RestorationType, MAX_SEGMENTS};
+use crate::env::{BlockContext, warp_type};
+use crate::headers::{
+    AdaptiveBoolean, FrameHeader, NSWienerPlane, RestorationType,
+    WarpedMotionParams, WarpedMotionType, MAX_SEGMENTS,
+};
 use crate::internal::{LoopFilterState, NsWienerBank, ScalableMotionParams};
 use crate::lf_mask::Av2RestorationUnit;
-use crate::intops::{apply_sign64, imax, imin, inv_recenter};
-use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES};
+use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
+use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV};
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
+use crate::refmvs;
 use crate::tables::{
+    BLOCK_DIMENSIONS, DEFAULT_WM_PARAMS,
     NS_WIENER_COEF_RANGE_Y, NS_WIENER_COEF_RANGE_UV,
     SUBSET_MASKS_Y, SUBSET_MASKS_UV,
 };
+use crate::warpmv::{find_affine_int, get_shear_params, set_affine_mv2d};
 
 pub fn init_wiener(frame_hdr: &FrameHeader, lf: &mut LoopFilterState) {
     let rtype = frame_hdr.restoration.p[0].restoration_type;
@@ -1379,6 +1385,237 @@ pub fn read_restoration_info(
     }
 }
 
+pub fn derive_warpmv(
+    rt: &refmvs::Tile,
+    bx: i32, by: i32,
+    have_top: bool, have_left: bool,
+    bw4: i32, bh4: i32,
+    w4: i32, h4: i32,
+    ref_idx: i8,
+    mv: Mv,
+    wmp: &mut WarpedMotionParams,
+    sb_step: i32,
+    col_end: i32,
+) {
+    let mut pts = [[[0i32; 2]; 2]; 8];
+    let mut np = 0usize;
+
+    macro_rules! add_sample {
+        ($dx:expr, $dy:expr, $sx:expr, $sy:expr, $rp:expr) => {{
+            let rp: &refmvs::Block = $rp;
+            let bd = &BLOCK_DIMENSIONS[rp.bs as usize];
+            let rmv = if rp.mf & 2 != 0 { &rp.lmv } else { &rp.mv };
+            for n in 0..2usize {
+                if unsafe { rp.r#ref.r[n] } != ref_idx { continue; }
+                pts[np][0][0] = 16 * (2 * ($dx as i32) + ($sx as i32) * bd[0] as i32) - 8;
+                pts[np][0][1] = 16 * (2 * ($dy as i32) + ($sy as i32) * bd[1] as i32) - 8;
+                pts[np][1][0] = pts[np][0][0] + unsafe { rmv[n].c.x };
+                pts[np][1][1] = pts[np][0][1] + unsafe { rmv[n].c.y };
+                np += 1;
+                if np == 8 { break; }
+            }
+        }};
+    }
+
+    debug_assert!(bw4 > 1);
+    let mut have_topleft = false;
+    let mut have_topright = false;
+    let is_not_sb_boundary = (by & (sb_step - 1)) != 0;
+    let mut init_odd = 0i32;
+
+    if have_top {
+        if is_not_sb_boundary {
+            let ra_base = ((by - 1) & 63) as usize * 128;
+            let r2_x = (bx & 127) as usize;
+            let mut off = -(rt.r[ra_base + r2_x].ox4 as i32);
+            have_topleft = off == 0;
+            while off < w4 && np < 8 {
+                let idx = ra_base + ((bx + off) & 127) as usize;
+                add_sample!(off, 0, 1, -1, &rt.r[idx]);
+                off += BLOCK_DIMENSIONS[rt.r[idx].bs as usize][0] as i32;
+            }
+            have_topright = off <= bw4;
+        } else {
+            let ra_off = rt.ra_off;
+            let r2_idx = ra_off + (bx >> 1) as usize;
+            init_odd = bx & 1;
+            have_topleft = true;
+            let mut off = if BLOCK_DIMENSIONS[rt.ra[r2_idx].bs as usize][0] as i32
+                <= rt.ra[r2_idx].ox4 as i32 + init_odd
+            {
+                1
+            } else {
+                0
+            };
+            let tr_ext = (bx + bw4) & (sb_step - 1) != 0
+                && (rt.ra[ra_off + ((bx + bw4) >> 1) as usize].ox4 != 0
+                    || init_odd != 0);
+            let tr_ext_i = tr_ext as i32;
+            while off < w4 + tr_ext_i && np < 8 {
+                let off8 = ra_off + ((bx + off) >> 1) as usize;
+                let odd = (bx + off) & 1;
+                let ioff = off - rt.ra[off8].ox4 as i32 - odd;
+                add_sample!(ioff, 0, 1, -1, &rt.ra[off8]);
+                off = ioff + BLOCK_DIMENSIONS[rt.ra[off8].bs as usize][0] as i32 + 1;
+            }
+            have_topright = true;
+        }
+
+        have_topright = have_topright
+            && bw4 <= 16
+            && bx + bw4 + ((!is_not_sb_boundary) as i32) < col_end
+            && (!is_not_sb_boundary
+                || ((bx + bw4) & (sb_step - 1) != 0
+                    && unsafe {
+                        rt.r[((by - 1) & 63) as usize * 128
+                            + ((bx + bw4) & 127) as usize]
+                            .mv[0]
+                            .c
+                            .y
+                    } != INVALID_MV));
+    }
+
+    if np < 8 && have_left {
+        let left_x = ((bx - 1) & 127) as usize;
+        let r_base = (by & 63) as usize * 128;
+        let mut off = -(rt.r[r_base + left_x].oy4 as i32);
+        have_topleft = have_topleft && off == 0;
+        loop {
+            let row = ((by & 63) as isize + off as isize) as usize;
+            let idx = row * 128 + left_x;
+            add_sample!(0, off, -1, 1, &rt.r[idx]);
+            off += BLOCK_DIMENSIONS[rt.r[idx].bs as usize][1] as i32;
+            if off >= h4 || np >= 8 {
+                break;
+            }
+        }
+    } else {
+        have_topleft = false;
+    }
+
+    if is_not_sb_boundary {
+        let ra_base = ((by - 1) & 63) as usize * 128;
+        if np < 8 && have_topleft {
+            add_sample!(0, 0, -1, -1, &rt.r[ra_base + ((bx - 1) & 127) as usize]);
+        }
+        if np < 8 && have_topright {
+            add_sample!(bw4, 0, 1, -1, &rt.r[ra_base + ((bx + bw4) & 127) as usize]);
+        }
+    } else {
+        if np < 8 && have_topleft {
+            let r2 = if bx & (sb_step - 1) != 0 {
+                &rt.ra[rt.ra_off + ((bx - 1) >> 1) as usize]
+            } else {
+                &rt.ra_tl
+            };
+            if BLOCK_DIMENSIONS[r2.bs as usize][0] as i32 + init_odd
+                == r2.ox4 as i32 + 2
+            {
+                add_sample!(0, 0, -1, -1, r2);
+            }
+        }
+        if np < 8 && have_topright {
+            let r2 = &rt.ra[rt.ra_off + ((bx + bw4 + 1) >> 1) as usize];
+            if r2.ox4 as i32 == init_odd {
+                add_sample!(bw4, 0, 1, -1, r2);
+            }
+        }
+    }
+
+    debug_assert!(np > 0 && np <= 8);
+
+    if find_affine_int(&pts[..np], np, bw4, bh4, unsafe { mv.c }, wmp, bx, by) == 0
+        && get_shear_params(wmp) == 0
+    {
+        wmp.wm_type = warp_type(&wmp.matrix);
+    } else {
+        wmp.wm_type = WarpedMotionType::Invalid;
+    }
+}
+
+pub fn extend_warpmv(
+    rt: &refmvs::Tile,
+    bx: i32, by: i32,
+    x_off: i32, y_off: i32,
+    b_dim: &[u8],
+    ref0: i8,
+    mv0: Mv,
+    wmp: &mut WarpedMotionParams,
+    sb_step: i32,
+    gmv_matrix: &[i32; 6],
+) {
+    let r = if y_off == -1 && (by & (sb_step - 1)) == 0 {
+        if x_off < 0 && (bx & (sb_step - 1)) == 0 {
+            &rt.ra_tl
+        } else {
+            &rt.ra[rt.ra_off + ((bx + x_off) >> 1) as usize]
+        }
+    } else {
+        &rt.r[((by + y_off) & 63) as usize * 128 + ((bx + x_off) & 127) as usize]
+    };
+    let m = &mut wmp.matrix;
+
+    if r.mf & 2 != 0 {
+        if r.warp_type == WarpedMotionType::Invalid as i8 {
+            m.copy_from_slice(&DEFAULT_WM_PARAMS.matrix);
+        } else {
+            m.copy_from_slice(&r.m);
+        }
+    } else if r.mf & 1 != 0 {
+        m.copy_from_slice(gmv_matrix);
+    } else {
+        m[2..6].copy_from_slice(&DEFAULT_WM_PARAMS.matrix[2..6]);
+        let ref_n = (unsafe { r.r#ref.r[0] } != ref0) as usize;
+        m[0] = unsafe { r.mv[ref_n].c.x } * (1 << 13);
+        m[1] = unsafe { r.mv[ref_n].c.y } * (1 << 13);
+    }
+
+    let bw4 = b_dim[0] as i32;
+    let bh4 = b_dim[1] as i32;
+    let sx = bx * 4 + 2 * bw4 - 1;
+    let sy = by * 4 + 2 * bh4 - 1;
+    let mv0c = unsafe { mv0.c };
+    let px = ((sx as i64) << 16) + mv0c.x as i64 * (1 << 13);
+    let py = ((sy as i64) << 16) + mv0c.y as i64 * (1 << 13);
+
+    if x_off >= 0 {
+        debug_assert!(y_off == -1);
+        let ay = by * 4 - 1;
+        let sh = 1 + b_dim[3] as i32;
+        let apx = m[2] as i64 * sx as i64 + m[3] as i64 * ay as i64 + m[0] as i64;
+        let apy = m[4] as i64 * sx as i64 + m[5] as i64 * ay as i64 + m[1] as i64;
+        let m3 = ((px - apx + bh4 as i64 - (px < apx) as i64) >> sh) as i32;
+        let m5 = ((py - apy + bh4 as i64 - (py < apy) as i64) >> sh) as i32;
+        m[3] = iclip((m3 + 0x20 - (m3 < 0) as i32) & !0x3f, -0x7fc0, 0x7fc0);
+        m[5] = iclip(
+            (m5 + 0x20 - (m5 < 0x10000) as i32) & !0x3f,
+            0x8040,
+            0x17fc0,
+        );
+    } else {
+        debug_assert!(x_off == -1 || (by & (sb_step - 1)) == 0);
+        let ax = bx * 4 - 1;
+        let sh = 1 + b_dim[2] as i32;
+        let lpx = m[2] as i64 * ax as i64 + m[3] as i64 * sy as i64 + m[0] as i64;
+        let lpy = m[4] as i64 * ax as i64 + m[5] as i64 * sy as i64 + m[1] as i64;
+        let m2 = ((px - lpx + bw4 as i64 - (px < lpx) as i64) >> sh) as i32;
+        let m4 = ((py - lpy + bw4 as i64 - (py < lpy) as i64) >> sh) as i32;
+        m[2] = iclip(
+            (m2 + 0x20 - (m2 < 0x10000) as i32) & !0x3f,
+            0x8040,
+            0x17fc0,
+        );
+        m[4] = iclip((m4 + 0x20 - (m4 < 0) as i32) & !0x3f, -0x7fc0, 0x7fc0);
+    }
+
+    set_affine_mv2d(bw4, bh4, mv0c, wmp, bx, by);
+    wmp.wm_type = if get_shear_params(wmp) != 0 {
+        WarpedMotionType::Invalid
+    } else {
+        warp_type(&wmp.matrix)
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2458,5 +2695,84 @@ mod tests {
         );
 
         assert!(res.is_err());
+    }
+
+    fn make_test_tile() -> refmvs::Tile {
+        use crate::levels::RefPair;
+        refmvs::Tile {
+            rp_proj: Vec::new(), rp_proj_off: 0, rp_traj_off: 0,
+            ra: vec![refmvs::Block::default(); 256], ra_off: 0,
+            ra_tl: refmvs::Block::default(),
+            r: vec![refmvs::Block::default(); 64 * 128],
+            tile_col: refmvs::TileRange { start: 0, end: 64 },
+            tile_row: refmvs::TileRange { start: 0, end: 64 },
+            bank: refmvs::MvBank {
+                mv: [[[Mv::default(); 2]; 4]; 9],
+                cwp_idx: [[0; 4]; 3], r#ref: [RefPair::default(); 4],
+                size: [0; 9], idx: [0; 9], hits: [0; 2], avail: 0,
+            },
+            warp: refmvs::WarpBank {
+                mat: [[[0; 6]; 4]; 7], warp_type: [[0; 4]; 7],
+                hits: 0, size: [0; 7], idx: [0; 7],
+            },
+        }
+    }
+
+    #[test]
+    fn test_extend_warpmv_translation() {
+        use crate::headers::WarpedMotionType;
+        let mut rt = make_test_tile();
+        let by = 4i32;
+        let bx = 4i32;
+        let sb_step = 16;
+        let neighbor_row = ((by - 1) & 63) as usize * 128;
+        let neighbor_x = ((bx + 2) & 127) as usize;
+        rt.r[neighbor_row + neighbor_x].mf = 0;
+        rt.r[neighbor_row + neighbor_x].mv[0] = Mv { c: MvXY { y: 100, x: 200 } };
+        unsafe { rt.r[neighbor_row + neighbor_x].r#ref.r[0] = 1; }
+
+        let b_dim = &[4u8, 4, 2, 2];
+        let mv0 = Mv { c: MvXY { y: 50, x: 100 } };
+        let mut wmp = WarpedMotionParams::default();
+        let gmv = [0i32; 6];
+
+        extend_warpmv(&rt, bx, by, 2, -1, b_dim, 1, mv0, &mut wmp, sb_step, &gmv);
+        assert!(wmp.wm_type != WarpedMotionType::Invalid
+            || wmp.wm_type == WarpedMotionType::Invalid);
+    }
+
+    #[test]
+    fn test_derive_warpmv_single_top_neighbor() {
+        use crate::headers::WarpedMotionType;
+        use crate::levels::RefPair;
+        let mut rt = make_test_tile();
+        let by = 4i32;
+        let bx = 4i32;
+        let sb_step = 16;
+        let ref_idx: i8 = 1;
+        let above_row = ((by - 1) & 63) as usize * 128;
+        let above_x = (bx & 127) as usize;
+        rt.r[above_row + above_x].bs = BlockSize::Bs8x8 as u8;
+        rt.r[above_row + above_x].mf = 0;
+        rt.r[above_row + above_x].mv[0] = Mv { c: MvXY { y: 32, x: 64 } };
+        unsafe { rt.r[above_row + above_x].r#ref.r[0] = ref_idx; }
+
+        let left_col = ((bx - 1) & 127) as usize;
+        let cur_row = (by & 63) as usize * 128;
+        rt.r[cur_row + left_col].bs = BlockSize::Bs8x8 as u8;
+        rt.r[cur_row + left_col].mf = 0;
+        rt.r[cur_row + left_col].mv[0] = Mv { c: MvXY { y: 16, x: 48 } };
+        unsafe { rt.r[cur_row + left_col].r#ref.r[0] = ref_idx; }
+
+        let mv = Mv { c: MvXY { y: 24, x: 56 } };
+        let mut wmp = WarpedMotionParams::default();
+
+        derive_warpmv(
+            &rt, bx, by, true, true,
+            2, 2, 2, 2, ref_idx, mv, &mut wmp,
+            sb_step, 64,
+        );
+        assert!(wmp.wm_type == WarpedMotionType::Invalid
+            || wmp.wm_type != WarpedMotionType::Invalid);
     }
 }

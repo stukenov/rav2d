@@ -6,7 +6,7 @@ use crate::dsp::{DSPContext, PalDSPContext, RefmvsDSPContext};
 use crate::env::{BlockContext, SBEdgeCtx};
 use crate::headers::{
     ContentInterpretation, ContentLightLevel, FilmGrainData, FrameHeader, MasteringDisplay,
-    SequenceHeader, MAX_SEGMENTS,
+    SequenceHeader, WarpedMotionParams, MAX_SEGMENTS,
 };
 use crate::levels::{Av2Block, BlockSize, N_RECT_TX_SIZES, RefPair};
 use crate::lf_mask::{Av2Filter, Av2Restoration, Av2RestorationUnit};
@@ -289,6 +289,7 @@ pub struct TaskContext {
     pub luma_fsc_map: [u8; 256],
 
     pub txtp_map: [u8; 256],
+    pub warpmv: [WarpedMotionParams; 2],
     pub lf_mask: Vec<Av2Filter>,
     pub top_pre_cdef_toggle: i32,
     pub u_has_cf: u8,

@@ -2097,7 +2097,7 @@ pub fn load_tmvs(
     tip_frame_mode: u8,
     tip_hole_fill: bool,
     tmvp_sample_step: i32,
-    _n_ref_frames: i32,
+    n_ref_frames: i32,
 ) {
     if !rf.have_threading {
         tile_row_idx = 0;
@@ -2281,11 +2281,25 @@ pub fn load_tmvs(
                        col_start8, col_end8, row_start8, row_end8,
                        mfmv_sbsz8, sbsz8, tmvp_sample_step, tip_delta);
         if tip_hole_fill {
-            // TODO: fill_holes + smoothen calls
+            fill_holes(&mut rf.rp_proj[pp..], stride,
+                       col_start8, col_end8, row_start8, row_end8,
+                       mfmv_sbsz8, sbsz8, tmvp_sample_step, tip_delta);
+            smoothen(&mut rf.rp_proj[pp..], stride,
+                     col_start8, col_end8, row_start8, row_end8,
+                     mfmv_sbsz8, sbsz8, tmvp_sample_step, tip_delta);
         }
     }
     if tmvp_sample_step > 1 {
-        // TODO: fill_gap_traj + fill_gap_proj calls
+        let off = offset as usize;
+        for n in 0..n_ref_frames as usize {
+            fill_gap_traj(&mut rf.rp_traj[n][off..], stride,
+                          col_start8, col_end8, row_start8, row_end8,
+                          mfmv_sbsz8, sbsz8);
+        }
+        let pp = poffset as usize;
+        fill_gap_proj(&mut rf.rp_proj[pp..], stride,
+                      col_start8, col_end8, row_start8, row_end8,
+                      mfmv_sbsz8, sbsz8);
     }
 }
 
