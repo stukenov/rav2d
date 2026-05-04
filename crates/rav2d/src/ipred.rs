@@ -1341,6 +1341,78 @@ pub fn cfl_calc_alphas_8bpc(
     alpha[0] -= mul32(tmp[0][0], alpha[1], 16) + mul32(tmp[0][1], alpha[2], 16);
 }
 
+pub fn cfl_mhccp_pred_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    src_top_stride: usize,
+    w: usize,
+    h: usize,
+    alpha: &[i32; 3],
+    edge_flags: i32,
+    dir: CflMhDir,
+) {
+    let has_t = edge_flags & CFL_HAS_TOP != 0;
+    let has_l = edge_flags & CFL_HAS_LEFT != 0;
+    let dir_t = dir == CflMhDir::Top;
+    let dir_l = dir == CflMhDir::Left;
+    let n_top = if has_t { 1 + dir_t as usize } else { 0 };
+    let n_left = if has_l { 1 + dir_l as usize } else { 0 };
+    let left_off = src_off + 64 * 64 + n_left * n_top;
+
+    let a2v2 = mul32(alpha[2], 128, 16);
+    let mut sp = src_off;
+    let mut dp = 0usize;
+    let mut y = 0usize;
+
+    while y < dir_t as usize && has_t {
+        for x in 0..w {
+            let v0 = src[sp + x - src_top_stride] as i32;
+            let v1 = sqrnd_8bpc(src[sp + x] as i32);
+            dst[dp + x] = iclip(
+                mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2,
+                0, 255,
+            ) as u8;
+        }
+        sp += w;
+        dp += dst_stride;
+        y += 1;
+    }
+
+    while y < h {
+        let mut x = 0usize;
+        while x < dir_l as usize && has_l {
+            let v0 = src[left_off + y * n_left + dir_l as usize] as i32;
+            let v1 = sqrnd_8bpc(src[sp] as i32);
+            dst[dp] = iclip(
+                mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2,
+                0, 255,
+            ) as u8;
+            x += 1;
+        }
+        while x < w {
+            let v0_idx = if dir_t {
+                sp + x - (((y > 0) as usize) | has_t as usize) * w
+            } else if dir_l {
+                sp + imax(x as i32 - 1, 0) as usize
+            } else {
+                sp + x
+            };
+            let v0 = src[v0_idx] as i32;
+            let v1 = sqrnd_8bpc(src[sp + x] as i32);
+            dst[dp + x] = iclip(
+                mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2,
+                0, 255,
+            ) as u8;
+            x += 1;
+        }
+        sp += w;
+        dp += dst_stride;
+        y += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1965,5 +2037,35 @@ mod tests {
             &mut mat, &imat, CFL_HAS_TOP,
         );
         assert!(alpha[0] != 0 || alpha[1] != 0 || alpha[2] != 0);
+    }
+
+    #[test]
+    fn test_cfl_mhccp_pred_center_zero_alpha() {
+        let src = vec![128u8; 64 * 64 + 256];
+        let alpha = [0i32; 3];
+        let mut dst = vec![0u8; 64];
+        cfl_mhccp_pred_8bpc(
+            &mut dst, 8, &src, 0, 8, 4, 4,
+            &alpha, 0, CflMhDir::Center,
+        );
+        for &v in &dst[..32] {
+            assert_eq!(v, 0);
+        }
+    }
+
+    #[test]
+    fn test_cfl_mhccp_pred_center_identity() {
+        let src = vec![100u8; 64 * 64 + 256];
+        let alpha = [1 << 16, 0, 0];
+        let mut dst = vec![0u8; 64];
+        cfl_mhccp_pred_8bpc(
+            &mut dst, 8, &src, 0, 8, 4, 4,
+            &alpha, 0, CflMhDir::Center,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert!(dst[y * 8 + x] > 0);
+            }
+        }
     }
 }
