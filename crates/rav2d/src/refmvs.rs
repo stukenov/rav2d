@@ -2247,8 +2247,8 @@ pub fn load_tmvs(
 
     let mask = !(tmvp_sample_step - 1);
     let shift = rf.mfmv_k_shift;
-    let _col_start8_shifted = col_start8 >> shift;
-    let _col_end8_shifted = (col_end8 - 1) >> shift;
+    let col_start8_shifted = col_start8 >> shift;
+    let col_end8_shifted = (col_end8 - 1) >> shift;
 
     for n in 0..rf.n_mfmvs as usize {
         let ref2cur = rf.mfmv_ref2cur[n];
@@ -2274,7 +2274,6 @@ pub fn load_tmvs(
                     continue;
                 }
                 if mv_traj && ref2idx != -1 {
-                    let _off = offset as usize;
                     let mut rp_traj_local: [Vec<Mv>; 7] = Default::default();
                     for i in 0..7 {
                         rp_traj_local[i] = std::mem::take(&mut rf.rp_traj[i]);
@@ -2285,9 +2284,11 @@ pub fn load_tmvs(
                             map_local[k][r] = std::mem::take(&mut rf.rp_map[k][r]);
                         }
                     }
-                    // We can't easily call check_traj_intersect with partial borrows.
-                    // For now, skip the trajectory intersection in this port.
-                    // TODO: refactor to allow calling check_traj_intersect from load_tmvs
+                    check_traj_intersect(
+                        rf, &mut rp_traj_local, &mut map_local,
+                        mfmv_ref, ref2idx as usize, y, x, b_mv,
+                        col_start8_shifted, col_end8_shifted, mask,
+                    );
                     for i in 0..7 {
                         rf.rp_traj[i] = std::mem::replace(&mut rp_traj_local[i], Vec::new());
                     }
