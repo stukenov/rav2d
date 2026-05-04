@@ -885,6 +885,119 @@ pub fn prep_8tap_scaled_8bpc(
     }
 }
 
+pub fn put_bilin_scaled_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    src_stride: isize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    mut my: i32,
+    dx: i32,
+    dy: i32,
+) {
+    let intermediate_bits: i32 = 4;
+    let mut mid = [[0i16; 64]; 2];
+    let mut in_y: i32 = -2;
+    let mut src_p = src_off;
+    let mut dst_p = 0usize;
+
+    for _row in 0..h {
+        let y = my >> 10;
+        let mid1_idx = (y & 1) as usize;
+        let mid2_idx = mid1_idx ^ 1;
+        let dmy = my & 0x3ff;
+
+        while in_y < y {
+            let mut imx = mx;
+            let mut ioff = 0usize;
+            let ri = (in_y & 1) as usize;
+            for x in 0..w {
+                let frac = imx >> 6;
+                mid[ri][x] = bilin_rnd(
+                    src[src_p + ioff] as i32,
+                    src[src_p + ioff + 1] as i32,
+                    frac, 4 - intermediate_bits,
+                ) as i16;
+                imx += dx;
+                ioff += (imx >> 10) as usize;
+                imx &= 0x3ff;
+            }
+            src_p = (src_p as isize + src_stride) as usize;
+            in_y += 1;
+        }
+
+        for x in 0..w {
+            dst[dst_p + x] = iclip(
+                bilin_rnd(mid[mid1_idx][x] as i32, mid[mid2_idx][x] as i32,
+                          dmy >> 6, 4 + intermediate_bits),
+                0, 255,
+            ) as u8;
+        }
+
+        my += dy;
+        dst_p += dst_stride;
+    }
+}
+
+pub fn prep_bilin_scaled_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    src_stride: isize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    mut my: i32,
+    dx: i32,
+    dy: i32,
+) {
+    let intermediate_bits: i32 = 4;
+    let mut mid = [[0i16; 64]; 2];
+    let mut in_y: i32 = -2;
+    let mut src_p = src_off;
+    let mut tmp_p = 0usize;
+
+    for _row in 0..h {
+        let y = my >> 10;
+        let mid1_idx = (y & 1) as usize;
+        let mid2_idx = mid1_idx ^ 1;
+        let dmy = my & 0x3ff;
+
+        while in_y < y {
+            let mut imx = mx;
+            let mut ioff = 0usize;
+            let ri = (in_y & 1) as usize;
+            for x in 0..w {
+                let frac = imx >> 6;
+                mid[ri][x] = bilin_rnd(
+                    src[src_p + ioff] as i32,
+                    src[src_p + ioff + 1] as i32,
+                    frac, 4 - intermediate_bits,
+                ) as i16;
+                imx += dx;
+                ioff += (imx >> 10) as usize;
+                imx &= 0x3ff;
+            }
+            src_p = (src_p as isize + src_stride) as usize;
+            in_y += 1;
+        }
+
+        for x in 0..w {
+            tmp[tmp_p + x] = bilin_rnd(
+                mid[mid1_idx][x] as i32, mid[mid2_idx][x] as i32,
+                dmy >> 6, 4,
+            ) as i16;
+        }
+
+        my += dy;
+        tmp_p += tmp_stride;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1383,6 +1496,57 @@ mod tests {
         prep_8tap_scaled_8bpc(
             &mut tmp, 8, &src, src_off, stride,
             4, 4, 0, 0, 1024, 1024, 0,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(tmp[y * 8 + x], (128 << 4) as i16);
+            }
+        }
+    }
+
+    #[test]
+    fn test_put_bilin_scaled_identity() {
+        let stride: isize = 16;
+        let src = vec![128u8; 128];
+        let src_off = (stride * 2) as usize;
+        let mut dst = [0u8; 64];
+        put_bilin_scaled_8bpc(
+            &mut dst, 8, &src, src_off, stride,
+            4, 4, 0, 0, 1024, 1024,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 8 + x], 128);
+            }
+        }
+    }
+
+    #[test]
+    fn test_put_bilin_scaled_uniform_subpel() {
+        let stride: isize = 16;
+        let src = vec![100u8; 128];
+        let src_off = (stride * 2) as usize;
+        let mut dst = [0u8; 64];
+        put_bilin_scaled_8bpc(
+            &mut dst, 8, &src, src_off, stride,
+            4, 4, 8 << 6, 8 << 6, 1024, 1024,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 8 + x], 100);
+            }
+        }
+    }
+
+    #[test]
+    fn test_prep_bilin_scaled_identity() {
+        let stride: isize = 16;
+        let src = vec![128u8; 128];
+        let src_off = (stride * 2) as usize;
+        let mut tmp = [0i16; 64];
+        prep_bilin_scaled_8bpc(
+            &mut tmp, 8, &src, src_off, stride,
+            4, 4, 0, 0, 1024, 1024,
         );
         for y in 0..4 {
             for x in 0..4 {
