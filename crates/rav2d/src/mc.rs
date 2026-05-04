@@ -1,5 +1,5 @@
 use crate::intops::iclip;
-use crate::tables::MC_WARP_FILTER;
+use crate::tables::{EXT_WARP_FILTER, MC_SUBPEL_FILTERS, MC_WARP_FILTER};
 
 pub const INTERMEDIATE_BITS_8BPC: i32 = 4;
 pub const PREP_BIAS_8BPC: i32 = 0;
@@ -207,6 +207,197 @@ pub fn sad_nxn_8bpc(
         y += 2;
     }
     sad
+}
+
+fn get_h_filter(mx: i32, filter_type: i32, w: usize) -> Option<[i8; 8]> {
+    if mx == 0 { return None; }
+    let f = if filter_type == -1 {
+        EXT_WARP_FILTER[(mx - 1) as usize]
+    } else if w > 4 {
+        MC_SUBPEL_FILTERS[filter_type as usize][(mx - 1) as usize]
+    } else {
+        MC_SUBPEL_FILTERS[(3 + (filter_type & 1)) as usize][(mx - 1) as usize]
+    };
+    Some(f)
+}
+
+fn get_v_filter(my: i32, filter_type: i32, h: usize) -> Option<[i8; 8]> {
+    if my == 0 { return None; }
+    let f = if filter_type == -1 {
+        EXT_WARP_FILTER[(my - 1) as usize]
+    } else if h > 4 {
+        MC_SUBPEL_FILTERS[filter_type as usize][(my - 1) as usize]
+    } else {
+        MC_SUBPEL_FILTERS[(3 + (filter_type & 1)) as usize][(my - 1) as usize]
+    };
+    Some(f)
+}
+
+#[inline(always)]
+fn filter_8tap_u8(src: &[u8], center: usize, f: &[i8; 8], stride: isize) -> i32 {
+    let c = center as isize;
+    f[0] as i32 * src[(c - 3 * stride) as usize] as i32
+        + f[1] as i32 * src[(c - 2 * stride) as usize] as i32
+        + f[2] as i32 * src[(c - stride) as usize] as i32
+        + f[3] as i32 * src[center] as i32
+        + f[4] as i32 * src[(c + stride) as usize] as i32
+        + f[5] as i32 * src[(c + 2 * stride) as usize] as i32
+        + f[6] as i32 * src[(c + 3 * stride) as usize] as i32
+        + f[7] as i32 * src[(c + 4 * stride) as usize] as i32
+}
+
+#[inline(always)]
+fn filter_8tap_i16(mid: &[i16], center: usize, f: &[i8; 8], stride: isize) -> i32 {
+    let c = center as isize;
+    f[0] as i32 * mid[(c - 3 * stride) as usize] as i32
+        + f[1] as i32 * mid[(c - 2 * stride) as usize] as i32
+        + f[2] as i32 * mid[(c - stride) as usize] as i32
+        + f[3] as i32 * mid[center] as i32
+        + f[4] as i32 * mid[(c + stride) as usize] as i32
+        + f[5] as i32 * mid[(c + 2 * stride) as usize] as i32
+        + f[6] as i32 * mid[(c + 3 * stride) as usize] as i32
+        + f[7] as i32 * mid[(c + 4 * stride) as usize] as i32
+}
+
+/// 8-tap subpixel MC filter. `src_off` is the origin in `src` — must have
+/// 3 rows above and 4 rows below, and 3 cols left and 4 cols right of padding.
+pub fn put_8tap_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+    filter_type: i32,
+) {
+    let bits = 6 + (filter_type < 0) as i32;
+    let intermediate_bits = INTERMEDIATE_BITS_8BPC;
+    let intermediate_rnd = ((1 << bits) >> 1) + ((1 << (bits - intermediate_bits)) >> 1);
+    let fh = get_h_filter(mx, filter_type, w);
+    let fv = get_v_filter(my, filter_type, h);
+    let ss = src_stride as isize;
+
+    match (fh, fv) {
+        (Some(fh), Some(fv)) => {
+            let tmp_h = h + 7;
+            let mut mid = vec![0i16; 64 * tmp_h];
+            for y in 0..tmp_h {
+                for x in 0..w {
+                    let si = (src_off as isize + (y as isize - 3) * src_stride as isize + x as isize) as usize;
+                    mid[y * 64 + x] = ((filter_8tap_u8(src, si, &fh, 1)
+                        + ((1 << (bits - intermediate_bits)) >> 1))
+                        >> (bits - intermediate_bits)) as i16;
+                }
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    let mi = (y + 3) * 64 + x;
+                    dst[y * dst_stride + x] = iclip(
+                        (filter_8tap_i16(&mid, mi, &fv, 64)
+                            + ((1 << (bits + intermediate_bits)) >> 1))
+                            >> (bits + intermediate_bits),
+                        0, 255,
+                    ) as u8;
+                }
+            }
+        }
+        (Some(fh), None) => {
+            for y in 0..h {
+                for x in 0..w {
+                    let si = src_off + y * src_stride + x;
+                    dst[y * dst_stride + x] = iclip(
+                        (filter_8tap_u8(src, si, &fh, 1) + intermediate_rnd) >> bits,
+                        0, 255,
+                    ) as u8;
+                }
+            }
+        }
+        (None, Some(fv)) => {
+            for y in 0..h {
+                for x in 0..w {
+                    let si = src_off + y * src_stride + x;
+                    dst[y * dst_stride + x] = iclip(
+                        (filter_8tap_u8(src, si, &fv, ss)
+                            + ((1 << bits) >> 1)) >> bits,
+                        0, 255,
+                    ) as u8;
+                }
+            }
+        }
+        (None, None) => {
+            put_8bpc(dst, dst_stride, &src[src_off..], src_stride, w, h);
+        }
+    }
+}
+
+pub fn prep_8tap_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+    filter_type: i32,
+) {
+    let bits = 6 + (filter_type < 0) as i32;
+    let intermediate_bits = INTERMEDIATE_BITS_8BPC;
+    let fh = get_h_filter(mx, filter_type, w);
+    let fv = get_v_filter(my, filter_type, h);
+    let ss = src_stride as isize;
+
+    match (fh, fv) {
+        (Some(fh), Some(fv)) => {
+            let tmp_h = h + 7;
+            let mut mid = vec![0i16; 64 * tmp_h];
+            for y in 0..tmp_h {
+                for x in 0..w {
+                    let si = (src_off as isize + (y as isize - 3) * src_stride as isize + x as isize) as usize;
+                    mid[y * 64 + x] = ((filter_8tap_u8(src, si, &fh, 1)
+                        + ((1 << (bits - intermediate_bits)) >> 1))
+                        >> (bits - intermediate_bits)) as i16;
+                }
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    let mi = (y + 3) * 64 + x;
+                    tmp[y * tmp_stride + x] = ((filter_8tap_i16(&mid, mi, &fv, 64)
+                        + ((1 << bits) >> 1)) >> bits) as i16
+                        - PREP_BIAS_8BPC as i16;
+                }
+            }
+        }
+        (Some(fh), None) => {
+            for y in 0..h {
+                for x in 0..w {
+                    let si = src_off + y * src_stride + x;
+                    tmp[y * tmp_stride + x] = ((filter_8tap_u8(src, si, &fh, 1)
+                        + ((1 << (bits - intermediate_bits)) >> 1))
+                        >> (bits - intermediate_bits)) as i16
+                        - PREP_BIAS_8BPC as i16;
+                }
+            }
+        }
+        (None, Some(fv)) => {
+            for y in 0..h {
+                for x in 0..w {
+                    let si = src_off + y * src_stride + x;
+                    tmp[y * tmp_stride + x] = ((filter_8tap_u8(src, si, &fv, ss)
+                        + ((1 << (bits - intermediate_bits)) >> 1))
+                        >> (bits - intermediate_bits)) as i16
+                        - PREP_BIAS_8BPC as i16;
+                }
+            }
+        }
+        (None, None) => {
+            prep_8bpc(tmp, &src[src_off..], src_stride, w, h);
+        }
+    }
 }
 
 #[inline(always)]
@@ -712,6 +903,69 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_put_8tap_no_filter() {
+        let src = vec![42u8; 64];
+        let mut dst = vec![0u8; 64];
+        put_8tap_8bpc(&mut dst, 8, &src, 0, 8, 8, 8, 0, 0, 0);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_put_8tap_h_only() {
+        let src = vec![128u8; 22 * 22];
+        let mut dst = vec![0u8; 64];
+        let so = 3 * 22 + 3;
+        put_8tap_8bpc(&mut dst, 8, &src, so, 22, 8, 8, 8, 0, 0);
+        for &v in &dst[..64] {
+            assert_eq!(v, 128);
+        }
+    }
+
+    #[test]
+    fn test_put_8tap_v_only() {
+        let src = vec![128u8; 22 * 22];
+        let mut dst = vec![0u8; 64];
+        let so = 3 * 22 + 3;
+        put_8tap_8bpc(&mut dst, 8, &src, so, 22, 8, 8, 0, 8, 0);
+        for &v in &dst[..64] {
+            assert_eq!(v, 128);
+        }
+    }
+
+    #[test]
+    fn test_put_8tap_hv() {
+        let src = vec![128u8; 22 * 22];
+        let mut dst = vec![0u8; 64];
+        let so = 3 * 22 + 3;
+        put_8tap_8bpc(&mut dst, 8, &src, so, 22, 8, 8, 8, 8, 0);
+        for &v in &dst[..64] {
+            assert_eq!(v, 128);
+        }
+    }
+
+    #[test]
+    fn test_put_8tap_smooth() {
+        let src = vec![128u8; 22 * 22];
+        let mut dst = vec![0u8; 64];
+        let so = 3 * 22 + 3;
+        put_8tap_8bpc(&mut dst, 8, &src, so, 22, 8, 8, 8, 8, 1);
+        for &v in &dst[..64] {
+            assert_eq!(v, 128);
+        }
+    }
+
+    #[test]
+    fn test_prep_8tap_hv() {
+        let src = vec![128u8; 22 * 22];
+        let mut tmp = vec![0i16; 64];
+        let so = 3 * 22 + 3;
+        prep_8tap_8bpc(&mut tmp, 8, &src, so, 22, 8, 8, 8, 8, 0);
+        for &v in &tmp {
+            assert_eq!(v, 2048);
+        }
+    }
+
     #[test]
     fn test_put_bilin_no_interp() {
         let src = vec![42u8; 64];
