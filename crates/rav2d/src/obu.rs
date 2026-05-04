@@ -3418,14 +3418,33 @@ mod tests {
 
         let mut offset = 0;
         while offset < data.len() {
+            let prev_fh = c.frame_hdr.clone();
             match parse_obus(&mut c, &data[offset..]) {
                 Ok(consumed) => {
                     assert!(consumed > 0);
                     offset += consumed;
-                    // Stop after first frame header — without full decode pipeline
-                    // we can't maintain ref state for subsequent inter frames
-                    if c.frame_hdr.is_some() {
-                        break;
+                    // Maintain ref state: if a frame was parsed and cleared,
+                    // update refs so subsequent inter frames can find valid refs
+                    if prev_fh.is_none() {
+                        if let Some(ref fh) = c.frame_hdr {
+                            let flags = fh.refresh_frame_flags;
+                            for i in 0..8u8 {
+                                if flags & (1 << i) != 0 {
+                                    c.refs[i as usize].p.frame_hdr = Some(fh.clone());
+                                    c.refs[i as usize].p.showable = true;
+                                }
+                            }
+                        }
+                    } else if c.frame_hdr.is_none() {
+                        // parse_obus consumed the frame — update refs from what was parsed
+                        let fh = prev_fh.unwrap();
+                        let flags = fh.refresh_frame_flags;
+                        for i in 0..8u8 {
+                            if flags & (1 << i) != 0 {
+                                c.refs[i as usize].p.frame_hdr = Some(fh.clone());
+                                c.refs[i as usize].p.showable = true;
+                            }
+                        }
                     }
                 }
                 Err(_) => break,
