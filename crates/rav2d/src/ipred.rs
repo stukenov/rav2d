@@ -1,5 +1,6 @@
-use crate::intops::{iclip, imin, ulog2};
-use crate::tables::SM_WEIGHTS;
+use crate::intops::{ctz, iclip, imin, ulog2};
+use crate::levels::{ANGLE_IBP_FLAG, ANGLE_MULTI_MRL_FLAG};
+use crate::tables::{DC_IBP_WEIGHTS, DIV_RECIP, SM_WEIGHTS};
 
 #[derive(Clone, Copy)]
 pub struct DrFilter4Tap {
@@ -111,6 +112,184 @@ pub fn filter_edge(
     while i < sz {
         out[i] = inp[iclip(i as i32, from, to - 1) as usize];
         i += 1;
+    }
+}
+
+fn splat_dc(dst: &mut [u8], stride: usize, off: usize, width: usize, mut height: usize, dc: u8) {
+    let mut p = off;
+    while height > 0 {
+        for x in 0..width {
+            dst[p + x] = dc;
+        }
+        p += stride;
+        height -= 1;
+    }
+}
+
+fn dc_gen_top(tl: &[u8], o: usize, width: usize) -> u32 {
+    let mut dc = (width >> 1) as u32;
+    for i in 0..width {
+        dc += tl[o + 1 + i] as u32;
+    }
+    dc >> ctz(width as u32)
+}
+
+fn dc_gen_left(tl: &[u8], o: usize, height: usize) -> u32 {
+    let mut dc = (height >> 1) as u32;
+    for i in 0..height {
+        dc += tl[o - 1 - i] as u32;
+    }
+    dc >> ctz(height as u32)
+}
+
+fn fast_div32_dc(num: u32, den: u32) -> u32 {
+    debug_assert!(den > 0 && den <= 255);
+    let mut shift = ulog2(den);
+    let rem = den as i32 - (1 << shift);
+    let idx = (rem << (7 - shift)) as usize;
+    debug_assert!(idx <= 128);
+    shift += 9;
+    ((num as u64 * DIV_RECIP[idx] as u64) as u32 + ((1u32 << shift) >> 1)) >> shift
+}
+
+fn dc_gen(tl: &[u8], o: usize, width: usize, height: usize) -> u32 {
+    let n_pel = width + height;
+    let mut dc = 0u32;
+    for i in 0..width {
+        dc += tl[o + 1 + i] as u32;
+    }
+    for i in 0..height {
+        dc += tl[o - 1 - i] as u32;
+    }
+    if n_pel & (n_pel - 1) == 0 {
+        return (dc + width as u32) >> ctz(n_pel as u32);
+    }
+    (fast_div32_dc(dc, n_pel as u32)).min(255)
+}
+
+pub fn ipred_dc_128(dst: &mut [u8], stride: usize, width: usize, height: usize) {
+    splat_dc(dst, stride, 0, width, height, 128);
+}
+
+pub fn ipred_dc_top(
+    dst: &mut [u8], stride: usize, tl: &[u8], o: usize,
+    width: usize, mut height: usize, angle: i32,
+) {
+    let dc = dc_gen_top(tl, o, width);
+    let mut off = 0;
+
+    if angle & ANGLE_IBP_FLAG != 0 {
+        let h = height >> 2;
+        let w_y = &DC_IBP_WEIGHTS[h..];
+        for y in 0..h {
+            let wy = 128 - w_y[y] as u32;
+            let dc_wy = dc * w_y[y] as u32;
+            for x in 0..width {
+                dst[off + x] = ((tl[o + 1 + x] as u32 * wy + dc_wy + 64) >> 7) as u8;
+            }
+            off += stride;
+        }
+        height -= h;
+    }
+
+    splat_dc(dst, stride, off, width, height, dc as u8);
+}
+
+pub fn ipred_dc_left(
+    dst: &mut [u8], stride: usize, tl: &[u8], o: usize,
+    mut width: usize, height: usize, angle: i32,
+) {
+    let dc = dc_gen_left(tl, o, height);
+    let mut off = 0;
+    let mut x_off = 0;
+
+    if angle & ANGLE_IBP_FLAG != 0 {
+        let w = width >> 2;
+        let w_x = &DC_IBP_WEIGHTS[w..];
+        for y in 0..height {
+            let left = tl[o - 1 - y] as u32;
+            for x in 0..w {
+                dst[off + x] = ((left * (128 - w_x[x] as u32) + dc * w_x[x] as u32 + 64) >> 7) as u8;
+            }
+            off += stride;
+        }
+        off = 0;
+        x_off = w;
+        width -= w;
+    }
+
+    let mut p = off;
+    for _ in 0..height {
+        for x in 0..width {
+            dst[p + x_off + x] = dc as u8;
+        }
+        p += stride;
+    }
+}
+
+pub fn ipred_dc(
+    dst: &mut [u8], stride: usize, tl: &[u8], o: usize,
+    mut width: usize, mut height: usize, angle: i32,
+) {
+    let dc = dc_gen(tl, o, width, height);
+    let mut off = 0;
+    let mut x_off = 0;
+
+    if angle & ANGLE_IBP_FLAG != 0 {
+        let h = height >> 2;
+        let w = width >> 2;
+        let x_start = if width < height { w } else { 0 };
+        let w_y = &DC_IBP_WEIGHTS[h..];
+        for y in 0..h {
+            let wy = 128 - w_y[y] as u32;
+            let dc_wy = dc * w_y[y] as u32;
+            for x in x_start..width {
+                dst[off + x] = ((tl[o + 1 + x] as u32 * wy + dc_wy + 64) >> 7) as u8;
+            }
+            off += stride;
+        }
+
+        let y_start = if width >= height { h } else { 0 };
+        off = y_start * stride;
+        let w_x = &DC_IBP_WEIGHTS[w..];
+        for y in y_start..height {
+            let left = tl[o - 1 - y] as u32;
+            for x in 0..w {
+                dst[off + x] = ((left * (128 - w_x[x] as u32) + dc * w_x[x] as u32 + 64) >> 7) as u8;
+            }
+            off += stride;
+        }
+        off = h * stride + w;
+        x_off = 0;
+        width -= w;
+        height -= h;
+    }
+
+    let mut p = off;
+    for _ in 0..height {
+        for x in 0..width {
+            dst[p + x_off + x] = dc as u8;
+        }
+        p += stride;
+    }
+}
+
+pub fn ipred_v(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, width: usize, height: usize) {
+    let mut off = 0;
+    for _ in 0..height {
+        dst[off..off + width].copy_from_slice(&tl[o + 1..o + 1 + width]);
+        off += stride;
+    }
+}
+
+pub fn ipred_h(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, width: usize, height: usize) {
+    let mut off = 0;
+    for y in 0..height {
+        let v = tl[o - 1 - y];
+        for x in 0..width {
+            dst[off + x] = v;
+        }
+        off += stride;
     }
 }
 
@@ -226,6 +405,78 @@ mod tests {
             }
         }
         tl
+    }
+
+    #[test]
+    fn test_ipred_dc_128() {
+        let mut dst = [0u8; 16];
+        ipred_dc_128(&mut dst, 4, 4, 4);
+        assert!(dst.iter().all(|&v| v == 128));
+    }
+
+    #[test]
+    fn test_ipred_dc_top_uniform() {
+        let tl = vec![100u8; 20];
+        let mut dst = [0u8; 16];
+        ipred_dc_top(&mut dst, 4, &tl, 8, 4, 4, 0);
+        assert!(dst.iter().all(|&v| v == 100));
+    }
+
+    #[test]
+    fn test_ipred_dc_left_uniform() {
+        let tl = vec![100u8; 20];
+        let mut dst = [0u8; 16];
+        ipred_dc_left(&mut dst, 4, &tl, 8, 4, 4, 0);
+        assert!(dst.iter().all(|&v| v == 100));
+    }
+
+    #[test]
+    fn test_ipred_dc_uniform() {
+        let tl = vec![100u8; 20];
+        let mut dst = [0u8; 16];
+        ipred_dc(&mut dst, 4, &tl, 8, 4, 4, 0);
+        assert!(dst.iter().all(|&v| v == 100));
+    }
+
+    #[test]
+    fn test_ipred_v_basic() {
+        let tl = make_tl_buf(4, 4, 8);
+        let mut dst = [0u8; 16];
+        ipred_v(&mut dst, 4, &tl, 8, 4, 4);
+        for y in 1..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 4 + x], dst[x]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ipred_h_basic() {
+        let tl = make_tl_buf(4, 4, 8);
+        let mut dst = [0u8; 16];
+        ipred_h(&mut dst, 4, &tl, 8, 4, 4);
+        for y in 0..4 {
+            let v = dst[y * 4];
+            for x in 1..4 {
+                assert_eq!(dst[y * 4 + x], v);
+            }
+        }
+    }
+
+    #[test]
+    fn test_fast_div32_dc() {
+        assert_eq!(fast_div32_dc(256, 4), 64);
+        assert_eq!(fast_div32_dc(100, 10), 10);
+    }
+
+    #[test]
+    fn test_dc_gen_top_basic() {
+        let mut tl = vec![0u8; 20];
+        for i in 0..4 {
+            tl[9 + i] = 80;
+        }
+        let dc = dc_gen_top(&tl, 8, 4);
+        assert_eq!(dc, 80);
     }
 
     #[test]

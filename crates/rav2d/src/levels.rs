@@ -100,6 +100,10 @@ pub const Z2_PRED: u8 = 17;
 pub const Z3_PRED: u8 = 18;
 pub const DIP_PRED: u8 = 13;
 
+pub const ANGLE_USE_EDGE_FILTER_FLAG: i32 = 1 << 11;
+pub const ANGLE_IBP_FLAG: i32 = 1 << 12;
+pub const ANGLE_MULTI_MRL_FLAG: i32 = 1 << 15;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum InterIntraPredMode {

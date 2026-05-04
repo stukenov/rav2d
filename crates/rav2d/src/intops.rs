@@ -70,6 +70,11 @@ pub fn u64log2(v: u64) -> i32 {
 }
 
 #[inline(always)]
+pub fn ctz(v: u32) -> u32 {
+    v.trailing_zeros()
+}
+
+#[inline(always)]
 pub fn inv_recenter(r: u32, v: u32) -> u32 {
     if v > r << 1 {
         v
