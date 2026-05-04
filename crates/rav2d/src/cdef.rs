@@ -1,4 +1,4 @@
-use crate::intops::{apply_sign, imax, imin};
+use crate::intops::{apply_sign, imax, imin, ulog2};
 
 #[inline(always)]
 pub fn constrain(diff: i32, threshold: i32, shift: i32) -> i32 {
@@ -96,6 +96,18 @@ pub fn cdef_apply_constrain(
     tap: i32,
 ) -> i32 {
     tap * constrain(p0 - px, strength, shift) + tap * constrain(p1 - px, strength, shift)
+}
+
+pub fn adjust_strength(strength: i32, var: u32) -> i32 {
+    if var == 0 {
+        return 0;
+    }
+    let i = if var >> 6 != 0 {
+        imin(ulog2(var >> 6), 12)
+    } else {
+        0
+    };
+    (strength * (4 + i) + 8) >> 4
 }
 
 #[cfg(test)]
@@ -198,5 +210,31 @@ mod tests {
     fn test_cdef_apply_constrain_symmetric() {
         let r = cdef_apply_constrain(100, 105, 95, 10, 1, 4);
         assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_adjust_strength_zero_var() {
+        assert_eq!(adjust_strength(100, 0), 0);
+    }
+
+    #[test]
+    fn test_adjust_strength_low_var() {
+        let r = adjust_strength(100, 32);
+        assert_eq!(r, (100 * 4 + 8) >> 4);
+    }
+
+    #[test]
+    fn test_adjust_strength_high_var() {
+        let r = adjust_strength(100, 1 << 18);
+        assert!(r > adjust_strength(100, 64));
+    }
+
+    #[test]
+    fn test_adjust_strength_monotonic() {
+        let a = adjust_strength(100, 64);
+        let b = adjust_strength(100, 256);
+        let c = adjust_strength(100, 4096);
+        assert!(a <= b);
+        assert!(b <= c);
     }
 }
