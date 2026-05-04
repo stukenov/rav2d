@@ -288,7 +288,7 @@ pub struct WarpedMotionParams {
     pub affine: i32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SegmentationDataSet {
     pub delta_q: [i16; MAX_SEGMENTS],
     pub delta_q_mask: u16,
@@ -310,7 +310,7 @@ pub struct MasteringDisplay {
     pub min_luminance: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TileInfo {
     pub uniform: bool,
     pub min_log2_cols: u8,
@@ -343,7 +343,7 @@ impl Default for TileInfo {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SequenceHeader {
     pub id: u8,
     pub profile: u8,
@@ -468,7 +468,7 @@ pub struct SequenceHeader {
     pub film_grain_present: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CropInfo {
     pub enabled: bool,
     pub left: u32,
@@ -477,7 +477,7 @@ pub struct CropInfo {
     pub bottom: u32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SeqSegmentation {
     pub ext: bool,
     pub info_present: bool,
@@ -485,7 +485,7 @@ pub struct SeqSegmentation {
     pub d: SegmentationDataSet,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SeqTiling {
     pub present: AdaptiveBoolean,
     pub t: TileInfo,

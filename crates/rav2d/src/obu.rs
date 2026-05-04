@@ -3,13 +3,14 @@ use std::sync::Arc;
 use crate::env::get_poc_diff;
 use crate::getbits::GetBits;
 use crate::headers::*;
-use crate::internal::RefState;
+use crate::internal::{DecoderContext, RefState, TileGroup};
 use crate::intops::{iclip, iclip_u8, imax, imin, ulog2};
 use crate::warpmv::resolve_divisor_32;
 
 #[derive(Debug)]
 pub enum Dav2dError {
     InvalidData,
+    FrameTooLarge,
 }
 
 pub type Result<T> = std::result::Result<T, Dav2dError>;
@@ -2375,6 +2376,291 @@ pub fn derive_pri_sec_ref(
     result
 }
 
+fn u32_to_obu_type(v: u32) -> Option<ObuType> {
+    match v {
+        1 => Some(ObuType::SeqHdr),
+        2 => Some(ObuType::Td),
+        3 => Some(ObuType::MultiFrameHdr),
+        4 => Some(ObuType::ClosedLoopKf),
+        5 => Some(ObuType::OpenLoopKf),
+        6 => Some(ObuType::LeadingTileGrp),
+        7 => Some(ObuType::TileGrp),
+        8 => Some(ObuType::Metadata),
+        9 => Some(ObuType::MetadataGrp),
+        10 => Some(ObuType::Switch),
+        11 => Some(ObuType::LeadingSef),
+        12 => Some(ObuType::Sef),
+        13 => Some(ObuType::LeadingTip),
+        14 => Some(ObuType::Tip),
+        15 => Some(ObuType::BufRmTiming),
+        16 => Some(ObuType::LayerCfgRec),
+        17 => Some(ObuType::AtlasSeg),
+        18 => Some(ObuType::OpPtSet),
+        19 => Some(ObuType::Bridge),
+        20 => Some(ObuType::Msdo),
+        21 => Some(ObuType::Ras),
+        22 => Some(ObuType::Qm),
+        23 => Some(ObuType::Fgm),
+        24 => Some(ObuType::ContentInterp),
+        25 => Some(ObuType::Padding),
+        _ => None,
+    }
+}
+
+pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
+    use crate::levels::ObuMetaType;
+
+    let mut hdr_gb = GetBits::new(data);
+
+    let len = hdr_gb.get_uleb128() as usize;
+    hdr_gb.bytealign();
+    if hdr_gb.has_error() || len > hdr_gb.remaining_bytes() {
+        return Err(Dav2dError::InvalidData);
+    }
+    let body_start = hdr_gb.byte_pos();
+    let total_consumed = body_start + len;
+
+    let body = &data[body_start..body_start + len];
+    let mut gb = GetBits::new(if body.is_empty() { &[0u8] } else { body });
+
+    let has_extension = gb.get_bit() != 0;
+    let obu_type_raw = gb.get_bits(5);
+    let tlayer_id = gb.get_bits(2) as i32;
+
+    let mut mlayer_id = 0i32;
+    let mut xlayer_id = 0i32;
+    if has_extension {
+        mlayer_id = gb.get_bits(3) as i32;
+        xlayer_id = gb.get_bits(5) as i32;
+    }
+
+    if gb.has_error() {
+        return Err(Dav2dError::InvalidData);
+    }
+
+    let obu_type = u32_to_obu_type(obu_type_raw);
+
+    // skip OBUs not belonging to selected operating point
+    if obu_type != Some(ObuType::SeqHdr)
+        && obu_type != Some(ObuType::Td)
+        && has_extension
+        && c.operating_point_idc != 0
+    {
+        return Ok(total_consumed);
+    }
+
+    match obu_type {
+        Some(ObuType::SeqHdr) => {
+            let seq_hdr = parse_seq_hdr(&mut gb, c.strict_std_compliance)?;
+
+            c.operating_point_idc = 0;
+            let spatial_mask = c.operating_point_idc >> 8;
+            c.max_spatial_id = if spatial_mask != 0 {
+                ulog2(spatial_mask) as i32
+            } else {
+                0
+            };
+
+            if c.seq_hdr.is_none() {
+                c.frame_hdr = None;
+            } else if c.seq_hdr.as_ref().map_or(true, |old| **old != seq_hdr) {
+                c.frame_hdr = None;
+                c.content_light = None;
+                c.mastering_display = None;
+                for i in 0..8 {
+                    c.refs[i] = RefState::default();
+                    c.fgm[i] = None;
+                }
+                c.ci = None;
+            }
+            c.seq_hdr = Some(Arc::new(seq_hdr));
+        }
+
+        Some(
+            ObuType::OpenLoopKf
+            | ObuType::ClosedLoopKf
+            | ObuType::LeadingTileGrp
+            | ObuType::TileGrp
+            | ObuType::Switch
+            | ObuType::LeadingSef
+            | ObuType::Sef
+            | ObuType::LeadingTip
+            | ObuType::Tip
+            | ObuType::Bridge
+            | ObuType::Ras,
+        ) => {
+            let obu_type = obu_type.unwrap();
+            let seqhdr = c
+                .seq_hdr
+                .as_ref()
+                .ok_or(Dav2dError::InvalidData)?
+                .clone();
+
+            let first_tile = matches!(
+                obu_type,
+                ObuType::Sef | ObuType::Tip | ObuType::Bridge
+            ) || gb.get_bit() != 0;
+            let has_hdr = first_tile || gb.get_bit() != 0;
+
+            if has_hdr {
+                let mut hdr = parse_frame_hdr(&seqhdr, &c.refs, obu_type, &mut gb)?;
+                hdr.tlayer_id = tlayer_id as u8;
+                hdr.mlayer_id = mlayer_id as u8;
+                hdr.xlayer_id = xlayer_id as u8;
+                c.frame_hdr = Some(Arc::new(hdr));
+            }
+
+            c.tile.clear();
+            c.n_tile_data = 0;
+            c.n_tiles = 0;
+
+            if matches!(obu_type, ObuType::Sef | ObuType::Tip | ObuType::Bridge) {
+                check_trailing_bits(&mut gb, c.strict_std_compliance)?;
+            }
+
+            if let Some(ref fh) = c.frame_hdr {
+                if c.frame_size_limit > 0
+                    && (fh.width as u64) * (fh.height as u64) > c.frame_size_limit as u64
+                {
+                    c.frame_hdr = None;
+                    return Err(Dav2dError::FrameTooLarge);
+                }
+            }
+
+            if matches!(obu_type, ObuType::Sef | ObuType::Tip | ObuType::Bridge) {
+                // frame header only OBU, no tile data
+            } else {
+                let fh = c
+                    .frame_hdr
+                    .as_ref()
+                    .ok_or(Dav2dError::InvalidData)?
+                    .clone();
+                let mut tg = TileGroup {
+                    data: Vec::new(),
+                    start: 0,
+                    end: 0,
+                };
+                parse_tile_hdr(&fh, &mut tg, &mut gb);
+                gb.bytealign();
+                if gb.has_error() {
+                    return Err(Dav2dError::InvalidData);
+                }
+                tg.data = gb.remaining_slice().to_vec();
+
+                if tg.start > tg.end || tg.start != c.n_tiles {
+                    c.tile.clear();
+                    c.n_tile_data = 0;
+                    c.n_tiles = 0;
+                    return Err(Dav2dError::InvalidData);
+                }
+                c.n_tiles += 1 + tg.end - tg.start;
+                c.tile.push(tg);
+                c.n_tile_data += 1;
+            }
+        }
+
+        Some(ObuType::Fgm) => {
+            let seqhdr = c
+                .seq_hdr
+                .as_ref()
+                .ok_or(Dav2dError::InvalidData)?
+                .clone();
+            let fgm = parse_fgm_hdr(&mut gb, seqhdr.layout)?;
+            for (i, entry) in fgm.into_iter().enumerate() {
+                if entry.is_some() {
+                    c.fgm[i] = entry;
+                }
+            }
+            check_trailing_bits(&mut gb, c.strict_std_compliance)?;
+        }
+
+        Some(ObuType::ContentInterp) => {
+            let mut ci = ContentInterpretation::default();
+            parse_ci_hdr(&mut ci, &mut gb)?;
+            check_trailing_bits(&mut gb, c.strict_std_compliance)?;
+            c.ci = Some(ci);
+        }
+
+        Some(ObuType::Metadata) => {
+            let meta_type = gb.get_uleb128();
+            if gb.has_error() {
+                return Err(Dav2dError::InvalidData);
+            }
+            match meta_type {
+                v if v == ObuMetaType::HdrCll as u32 => {
+                    let cll = parse_cll(&mut gb);
+                    check_trailing_bits(&mut gb, c.strict_std_compliance)?;
+                    c.content_light = Some(cll);
+                }
+                v if v == ObuMetaType::HdrMdcv as u32 => {
+                    let md = parse_mdcv(&mut gb);
+                    check_trailing_bits(&mut gb, c.strict_std_compliance)?;
+                    c.mastering_display = Some(md);
+                }
+                _ => {} // ignore unknown metadata
+            }
+        }
+
+        Some(ObuType::Td) => {
+            // temporal delimiter — no action needed
+        }
+
+        Some(ObuType::Padding) => {
+            // ignore
+        }
+
+        _ => {
+            // unknown OBU type — ignore
+        }
+    }
+
+    // post-processing: check if frame is ready to submit
+    if c.seq_hdr.is_some() && c.frame_hdr.is_some() {
+        let fh = c.frame_hdr.as_ref().unwrap().clone();
+        if fh.show_existing_frame != 0 {
+            let idx = fh.existing_frame_idx as usize;
+            if c.refs[idx].p.frame_hdr.is_none() {
+                return Err(Dav2dError::InvalidData);
+            }
+            if c.strict_std_compliance && !c.refs[idx].p.showable {
+                return Err(Dav2dError::InvalidData);
+            }
+            // TODO: queue output of existing frame
+            if c.refs[idx]
+                .p
+                .frame_hdr
+                .as_ref()
+                .map_or(false, |h| h.frame_type == FrameType::Key)
+            {
+                let r = idx;
+                c.refs[r].p.showable = false;
+                for i in 0..8 {
+                    if i == r {
+                        continue;
+                    }
+                    c.refs[i].p = c.refs[r].p.clone();
+                    c.refs[i].segmap = c.refs[r].segmap.clone();
+                }
+            }
+            c.frame_hdr = None;
+        } else {
+            let seqhdr = c.seq_hdr.as_ref().unwrap();
+            let total_tiles = fh.tiling.t.cols as i32 * fh.tiling.t.rows as i32;
+            let frame_without_data = fh.tip.frame_mode == 2;
+            if c.n_tiles == total_tiles || frame_without_data {
+                if !frame_without_data && c.n_tile_data == 0 {
+                    return Err(Dav2dError::InvalidData);
+                }
+                // TODO: submit_frame(c)
+                c.frame_hdr = None;
+                c.n_tiles = 0;
+            }
+        }
+    }
+
+    Ok(total_consumed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3020,5 +3306,82 @@ mod tests {
         let data = [0x01, 0x28, 0x00, 0x00];
         let mut gb = GetBits::new(&data);
         assert!(parse_fgm_hdr(&mut gb, PixelLayout::I420).is_err());
+    }
+
+    fn make_decoder_ctx() -> DecoderContext {
+        use crate::dsp::{DSPContext, PalDSPContext, RefmvsDSPContext};
+        DecoderContext {
+            seq_hdr: None,
+            frame_hdr: None,
+            tile: Vec::new(),
+            n_tile_data: 0,
+            n_tiles: 0,
+            refs: std::array::from_fn(|_| RefState::default()),
+            cdf: Vec::new(),
+            dsp: Arc::new(std::array::from_fn(|_| DSPContext::default())),
+            pal_dsp: PalDSPContext::default(),
+            refmvs_dsp: RefmvsDSPContext::default(),
+            content_light: None,
+            mastering_display: None,
+            ci: None,
+            fgm: Default::default(),
+            apply_grain: false,
+            operating_point: 0,
+            operating_point_idc: 0,
+            all_layers: false,
+            max_spatial_id: 0,
+            frame_size_limit: 0,
+            strict_std_compliance: false,
+            output_invisible_frames: false,
+            n_passes: 1,
+        }
+    }
+
+    #[test]
+    fn test_parse_obus_td() {
+        // TD OBU: ULEB128(1)=0x01, body: has_ext=0, type=2(00010), tlayer=00
+        // 0b0_00010_00 = 0x08
+        let data = [0x01, 0x08];
+        let mut c = make_decoder_ctx();
+        let consumed = parse_obus(&mut c, &data).unwrap();
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn test_parse_obus_padding() {
+        // Padding OBU: ULEB128(3)=0x03, body: has_ext=0, type=25(11001), tlayer=00
+        // 0b0_11001_00 = 0x64, then 2 padding bytes
+        let data = [0x03, 0x64, 0x00, 0x00];
+        let mut c = make_decoder_ctx();
+        let consumed = parse_obus(&mut c, &data).unwrap();
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn test_parse_obus_unknown_type() {
+        // Unknown type=0: ULEB128(1)=0x01, body: has_ext=0, type=0(00000), tlayer=00
+        // 0b0_00000_00 = 0x00
+        let data = [0x01, 0x00];
+        let mut c = make_decoder_ctx();
+        let consumed = parse_obus(&mut c, &data).unwrap();
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn test_parse_obus_truncated() {
+        // ULEB128 says body is 100 bytes but we only have 2
+        let data = [0x64, 0xFF];
+        let mut c = make_decoder_ctx();
+        assert!(parse_obus(&mut c, &data).is_err());
+    }
+
+    #[test]
+    fn test_parse_obus_frame_without_seq() {
+        // ClosedLoopKf OBU without seq_hdr → error
+        // ULEB128(4)=0x04, body: has_ext=0, type=4(00100), tlayer=00
+        // 0b0_00100_00 = 0x10
+        let data = [0x04, 0x10, 0x00, 0x00, 0x00];
+        let mut c = make_decoder_ctx();
+        assert!(parse_obus(&mut c, &data).is_err());
     }
 }

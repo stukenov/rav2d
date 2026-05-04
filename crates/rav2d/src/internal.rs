@@ -4,7 +4,10 @@ use std::sync::Arc;
 use crate::cdf::CdfContext;
 use crate::dsp::{DSPContext, PalDSPContext, RefmvsDSPContext};
 use crate::env::{BlockContext, SBEdgeCtx};
-use crate::headers::{FrameHeader, SequenceHeader, MAX_SEGMENTS};
+use crate::headers::{
+    ContentInterpretation, ContentLightLevel, FilmGrainData, FrameHeader, MasteringDisplay,
+    SequenceHeader, MAX_SEGMENTS,
+};
 use crate::levels::{Av2Block, BlockSize, N_RECT_TX_SIZES, RefPair};
 use crate::lf_mask::{Av2Filter, Av2Restoration, Av2RestorationUnit};
 use crate::refmvs;
@@ -267,6 +270,11 @@ pub struct DecoderContext {
     pub dsp: Arc<[DSPContext; 3]>,
     pub pal_dsp: PalDSPContext,
     pub refmvs_dsp: RefmvsDSPContext,
+
+    pub content_light: Option<ContentLightLevel>,
+    pub mastering_display: Option<MasteringDisplay>,
+    pub ci: Option<ContentInterpretation>,
+    pub fgm: [Option<FilmGrainData>; 8],
 
     pub apply_grain: bool,
     pub operating_point: i32,

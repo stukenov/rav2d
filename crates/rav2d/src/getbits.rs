@@ -207,6 +207,21 @@ impl<'a> GetBits<'a> {
         self.bits_left = 0;
         self.state = 0;
     }
+
+    #[inline]
+    pub fn byte_pos(&self) -> usize {
+        self.ptr
+    }
+
+    #[inline]
+    pub fn remaining_bytes(&self) -> usize {
+        self.data.len() - self.ptr
+    }
+
+    #[inline]
+    pub fn remaining_slice(&self) -> &'a [u8] {
+        &self.data[self.ptr..]
+    }
 }
 
 #[cfg(test)]
