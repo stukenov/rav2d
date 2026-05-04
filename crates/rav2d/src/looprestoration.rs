@@ -209,6 +209,212 @@ pub fn gdf_add_8bpc(
     }
 }
 
+pub const REST_UNIT_STRIDE: usize = 76;
+const ROW_ORIGIN: usize = 6;
+
+pub static WIENER_NS_CONFIG_Y: [[i8; 2]; 16] = [
+    [1, 0], [0, 1], [2, 0], [0, 2],
+    [1, 1], [-1, 1], [2, 1], [2, -1],
+    [1, 2], [1, -2], [3, 0], [0, 3],
+    [4, 0], [0, 4], [3, 3], [3, -3],
+];
+
+pub fn backup_row_luma_8bpc(
+    dst: &mut [u8],
+    o: usize,
+    src: &[u8],
+    src_o: usize,
+    src_stride: usize,
+    w: usize,
+    edges: u8,
+    ss_hor: usize,
+    ss_ver: usize,
+    cfl_ds_flt: i32,
+) {
+    if ss_ver == 0 {
+        backup_row_lpf_8bpc(dst, o, src, src_o, w, 4, edges);
+        return;
+    }
+
+    let src2_o = src_o + src_stride;
+
+    match cfl_ds_flt {
+        0 => {
+            let mut x = 0;
+            while x < w {
+                dst[o + x] = ((src[src_o + x] as u16 + src[src2_o + x] as u16
+                    + src[src_o + x + 1] as u16 + src[src2_o + x + 1] as u16) >> 2) as u8;
+                x += 1 + ss_hor;
+            }
+        }
+        1 => {
+            for x in 0..w {
+                dst[o + x] = ((src[src_o + x] as u16 + src[src2_o + x] as u16) >> 1) as u8;
+            }
+        }
+        _ => {
+            dst[o..o + w].copy_from_slice(&src[src_o..src_o + w]);
+        }
+    }
+
+    if edges & LR_HAVE_LEFT != 0 {
+        match cfl_ds_flt {
+            0 => {
+                for i in 0..4usize {
+                    let si = src_o - 4 + i;
+                    let s2i = src2_o - 4 + i;
+                    dst[o - 4 + i] = ((src[si] as u16 + src[s2i] as u16
+                        + src[si + 1] as u16 + src[s2i + 1] as u16) >> 2) as u8;
+                }
+            }
+            1 => {
+                for i in 0..4usize {
+                    dst[o - 4 + i] = ((src[src_o - 4 + i] as u16
+                        + src[src2_o - 4 + i] as u16) >> 1) as u8;
+                }
+            }
+            _ => {
+                for i in 0..4usize {
+                    dst[o - 4 + i] = src[src_o - 4 + i];
+                }
+            }
+        }
+    } else {
+        let fill_val = dst[o];
+        dst[o - 4..o].fill(fill_val);
+    }
+
+    if edges & LR_HAVE_RIGHT != 0 {
+        match cfl_ds_flt {
+            0 => {
+                for i in 0..4usize {
+                    let si = src_o + w + i;
+                    let s2i = src2_o + w + i;
+                    dst[o + w + i] = ((src[si] as u16 + src[s2i] as u16
+                        + src[si + 1] as u16 + src[s2i + 1] as u16) >> 2) as u8;
+                }
+            }
+            1 => {
+                for i in 0..4usize {
+                    dst[o + w + i] = ((src[src_o + w + i] as u16
+                        + src[src2_o + w + i] as u16) >> 1) as u8;
+                }
+            }
+            _ => {
+                for i in 0..4usize {
+                    dst[o + w + i] = src[src_o + w + i];
+                }
+            }
+        }
+    } else {
+        let fill_val = dst[o + w - 2];
+        dst[o + w..o + w + 4].fill(fill_val);
+    }
+}
+
+pub fn ns_wiener_single_y_8bpc(
+    p: &mut [u8],
+    p_off: usize,
+    stride: usize,
+    left: &[[u8; 6]],
+    lpf: &[u8],
+    lpf_off: usize,
+    lpf_bottom: &[u8],
+    lpf_bottom_off: usize,
+    w: usize,
+    h: usize,
+    filter: &[i8; 16],
+    edges: u8,
+    ll_mask: &[[u16; 4]],
+) {
+    let mut row_buffers = [[0u8; REST_UNIT_STRIDE]; 9];
+    let mut ptrs: [usize; 9] = [0; 9];
+    let o = ROW_ORIGIN;
+
+    backup_row_8bpc(&mut row_buffers[4], o, &*p, p_off, &left[0], 6, w, 4, edges);
+    ptrs[4] = 4;
+
+    if edges & LR_HAVE_TOP_INTEGRATED != 0 {
+        let mut loff = lpf_off;
+        for i in 0..4 {
+            backup_row_lpf_8bpc(&mut row_buffers[i], o, lpf, loff, w, 4, edges);
+            loff += stride;
+            ptrs[i] = i;
+        }
+    } else if edges & LR_HAVE_TOP != 0 {
+        backup_row_lpf_8bpc(&mut row_buffers[2], o, lpf, lpf_off, w, 4, edges);
+        ptrs[2] = 2;
+        backup_row_lpf_8bpc(&mut row_buffers[3], o, lpf, lpf_off + stride, w, 4, edges);
+        ptrs[3] = 3;
+        ptrs[0] = 2;
+        ptrs[1] = 2;
+    } else {
+        ptrs[0] = 4;
+        ptrs[1] = 4;
+        ptrs[2] = 4;
+        ptrs[3] = 4;
+    }
+
+    backup_row_8bpc(&mut row_buffers[5], o, &*p, p_off + stride, &left[1], 6, w, 4, edges);
+    ptrs[5] = 5;
+    backup_row_8bpc(&mut row_buffers[6], o, &*p, p_off + 2 * stride, &left[2], 6, w, 4, edges);
+    ptrs[6] = 6;
+    backup_row_8bpc(&mut row_buffers[7], o, &*p, p_off + 3 * stride, &left[3], 6, w, 4, edges);
+    ptrs[7] = 7;
+
+    let mut bak_idx: usize = 8;
+
+    for y in 0..h {
+        if y + 4 < h {
+            backup_row_8bpc(
+                &mut row_buffers[bak_idx], o, &*p,
+                p_off + (y + 4) * stride, &left[y + 4], 6, w, 4, edges,
+            );
+            ptrs[8] = bak_idx;
+        } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
+            backup_row_lpf_8bpc(
+                &mut row_buffers[bak_idx], o, &*p,
+                p_off + (y + 4) * stride, w, 4, edges,
+            );
+            ptrs[8] = bak_idx;
+        } else if y + 2 < h && edges & LR_HAVE_BOTTOM != 0 {
+            let offset_y = y + 4 - h;
+            backup_row_lpf_8bpc(
+                &mut row_buffers[bak_idx], o, lpf_bottom,
+                lpf_bottom_off + offset_y * stride, w, 4, edges,
+            );
+            ptrs[8] = bak_idx;
+        } else {
+            ptrs[8] = ptrs[7];
+        }
+
+        bak_idx += 1;
+        if bak_idx == 9 { bak_idx = 0; }
+
+        for bx in 0..(w >> 2) {
+            if ll_mask[y >> 2][0] & (1 << bx) != 0 { continue; }
+            for x in bx * 4..bx * 4 + 4 {
+                let m = row_buffers[ptrs[4]][o + x] as i32;
+                let mut s = m << 7;
+                for i in 0..16 {
+                    let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
+                    let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
+                    let a = row_buffers[ptrs[(4 + dy) as usize]]
+                        [(o as i32 + x as i32 + dx) as usize] as i32;
+                    let b = row_buffers[ptrs[(4 - dy) as usize]]
+                        [(o as i32 + x as i32 - dx) as usize] as i32;
+                    let diff = a + b - 2 * m;
+                    s += diff * filter[i] as i32;
+                }
+                let v = (s + 64) >> 7;
+                p[p_off + y * stride + x] = iclip(v, 0, 255) as u8;
+            }
+        }
+
+        for r in 0..8 { ptrs[r] = ptrs[r + 1]; }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +551,172 @@ mod tests {
         let noskip = vec![0xFFFFu16; 16];
         let idx = get_class_lut_idx_8bpc(&rows, 6, &noskip, 32, 1, 1, 8);
         let _ = idx;
+    }
+
+    #[test]
+    fn test_backup_row_luma_no_ss_ver() {
+        let src = vec![42u8; 64];
+        let mut dst = vec![0u8; 32];
+        let o = 6;
+        backup_row_luma_8bpc(&mut dst, o, &src, 0, 16, 16, 0, 0, 0, 0);
+        assert_eq!(&dst[o..o + 16], &src[0..16]);
+        assert!(dst[o - 4..o].iter().all(|&v| v == 42));
+    }
+
+    #[test]
+    fn test_backup_row_luma_box_filter() {
+        let stride = 32;
+        let mut src = vec![0u8; stride * 2 + 16];
+        for x in 0..16 {
+            src[4 + x] = 100;
+            src[4 + stride + x] = 200;
+        }
+        let mut dst = vec![0u8; 32];
+        let o = 4;
+        backup_row_luma_8bpc(
+            &mut dst, o, &src, 4, stride, 8, 0, 1, 1, 0,
+        );
+        assert_eq!(dst[o], ((100 + 200 + 100 + 200) >> 2) as u8);
+    }
+
+    #[test]
+    fn test_backup_row_luma_vert_avg() {
+        let stride = 32;
+        let mut src = vec![0u8; stride * 2 + 16];
+        for x in 0..16 {
+            src[4 + x] = 100;
+            src[4 + stride + x] = 200;
+        }
+        let mut dst = vec![0u8; 32];
+        let o = 4;
+        backup_row_luma_8bpc(
+            &mut dst, o, &src, 4, stride, 8, 0, 0, 1, 1,
+        );
+        for x in 0..8 {
+            assert_eq!(dst[o + x], 150);
+        }
+    }
+
+    #[test]
+    fn test_backup_row_luma_copy() {
+        let stride = 32;
+        let mut src = vec![0u8; stride * 2 + 16];
+        for x in 0..16 {
+            src[4 + x] = 100;
+            src[4 + stride + x] = 200;
+        }
+        let mut dst = vec![0u8; 32];
+        let o = 4;
+        backup_row_luma_8bpc(
+            &mut dst, o, &src, 4, stride, 8, 0, 0, 1, 2,
+        );
+        for x in 0..8 {
+            assert_eq!(dst[o + x], 100);
+        }
+    }
+
+    #[test]
+    fn test_backup_row_luma_edges() {
+        let stride = 32;
+        let mut src = vec![80u8; stride * 2 + 16];
+        let mut dst = vec![0u8; 32];
+        let o = 6;
+        backup_row_luma_8bpc(
+            &mut dst, o, &src, 6, stride, 8,
+            LR_HAVE_LEFT | LR_HAVE_RIGHT, 0, 1, 2,
+        );
+        assert_eq!(&dst[o..o + 8], &[80u8; 8]);
+        assert_eq!(&dst[o - 4..o], &[80u8; 4]);
+        assert_eq!(&dst[o + 8..o + 12], &[80u8; 4]);
+    }
+
+    #[test]
+    fn test_ns_wiener_single_y_identity() {
+        let stride = 16;
+        let h = 8;
+        let w = 8;
+        let p_off = stride + 4;
+        let mut p = vec![128u8; stride * (h + 8)];
+        for y in 0..h + 4 {
+            for x in 0..w + 8 {
+                p[p_off - 4 + y * stride + x] = 128;
+            }
+        }
+        let left = vec![[128u8; 6]; h + 4];
+        let lpf = vec![128u8; stride * 4 + 8];
+        let lpf_bottom = vec![128u8; stride * 2 + 8];
+        let filter = [0i8; 16];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
+        ns_wiener_single_y_8bpc(
+            &mut p, p_off, stride,
+            &left, &lpf, 4, &lpf_bottom, 4,
+            w, h, &filter, edges, &ll_mask,
+        );
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(p[p_off + y * stride + x], 128,
+                    "pixel ({x},{y}) changed from 128");
+            }
+        }
+    }
+
+    #[test]
+    fn test_ns_wiener_single_y_skip_mask() {
+        let stride = 16;
+        let h = 8;
+        let w = 8;
+        let p_off = stride + 4;
+        let mut p = vec![100u8; stride * (h + 8)];
+        p[p_off + 3 * stride + 3] = 80;
+        let orig = p.clone();
+        let left = vec![[100u8; 6]; h + 4];
+        let lpf = vec![100u8; stride * 4 + 8];
+        let lpf_bottom = vec![100u8; stride * 2 + 8];
+        let filter = [4i8; 16];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
+        ns_wiener_single_y_8bpc(
+            &mut p, p_off, stride,
+            &left, &lpf, 4, &lpf_bottom, 4,
+            w, h, &filter, edges, &ll_mask,
+        );
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(p[p_off + y * stride + x], orig[p_off + y * stride + x],
+                    "pixel ({x},{y}) changed despite full skip mask");
+            }
+        }
+    }
+
+    #[test]
+    fn test_ns_wiener_single_y_filters_noise() {
+        let stride = 16;
+        let h = 8;
+        let w = 8;
+        let p_off = stride + 4;
+        let mut p = vec![128u8; stride * (h + 8)];
+        p[p_off + 4 * stride + 4] = 110;
+        let left = vec![[128u8; 6]; h + 4];
+        let lpf = vec![128u8; stride * 4 + 8];
+        let lpf_bottom = vec![128u8; stride * 2 + 8];
+        let filter = [8i8, 6, 4, 3, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
+        ns_wiener_single_y_8bpc(
+            &mut p, p_off, stride,
+            &left, &lpf, 4, &lpf_bottom, 4,
+            w, h, &filter, edges, &ll_mask,
+        );
+        let filtered = p[p_off + 4 * stride + 4];
+        assert!(filtered > 110 && filtered < 128,
+            "noisy pixel should move toward neighbors: got {filtered}");
+    }
+
+    #[test]
+    fn test_wiener_ns_config_y_table() {
+        assert_eq!(WIENER_NS_CONFIG_Y.len(), 16);
+        assert_eq!(WIENER_NS_CONFIG_Y[0], [1, 0]);
+        assert_eq!(WIENER_NS_CONFIG_Y[15], [3, -3]);
     }
 }
