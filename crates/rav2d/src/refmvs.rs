@@ -174,6 +174,12 @@ pub struct TrajMap {
     pub x: i8,
 }
 
+impl TrajMap {
+    pub unsafe fn n(&self) -> u16 {
+        *(self as *const Self as *const u16)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct SnglMvBlock {
@@ -1092,6 +1098,151 @@ pub fn splat_mv(
         t_off = (t_off as isize + t_stride) as usize;
         s_src.oy4 += 2;
         bh4 -= 2;
+    }
+}
+
+pub fn check_traj_intersect(
+    rf: &Frame,
+    rp_traj: &mut [Vec<Mv>; 7],
+    map: &mut [[Vec<TrajMap>; 7]; 3],
+    ref1: usize,
+    ref2: usize,
+    y: i32,
+    x: i32,
+    mv_in: Mv,
+    col_start8_shifted: i32,
+    col_end8_shifted: i32,
+    sample_step_mask: i32,
+) {
+    let sbsz8 = (rf.sbsz >> 1) as usize;
+    let mfmv_sbsz8 = rf.mfmv_sbsz8;
+    let mfmv_edge = rf.mfmv_edge;
+    let shift = rf.mfmv_k_shift;
+    let stride = rf.rp_stride;
+    let (mv_in_y, mv_in_x) = unsafe { (mv_in.c.y, mv_in.c.x) };
+
+    let pos = |yv: i32, xv: i32| -> usize {
+        ((yv as usize & (sbsz8 - 1)) * stride as usize) + xv as usize
+    };
+
+    let min_k = imax(-1, col_start8_shifted - (x >> shift));
+    let max_k = imin(1, col_end8_shifted - (x >> shift));
+
+    for k in (min_k + 1)..=(max_k + 1) {
+        let p = pos(y, x);
+        let map1 = map[k as usize][ref1][p];
+        if unsafe { map1.n() } == INVALID_TRAJ {
+            continue;
+        }
+        let x1 = x + map1.x as i32;
+        let k1 = (x1 >> shift) - (x >> shift);
+        if k1 + 1 != k {
+            continue;
+        }
+        let x_sb_align = x1 & !(mfmv_sbsz8 - 1);
+        let x_proj_start = imax(x_sb_align - mfmv_edge, 0);
+        let x_proj_end = imin(x_sb_align + mfmv_sbsz8 + mfmv_edge, rf.iw8);
+        if x < x_proj_start || x >= x_proj_end {
+            continue;
+        }
+        let y1 = y + map1.y as i32;
+        let y_proj_start = y1 & !(mfmv_sbsz8 - 1);
+        let y_proj_end = imin(y_proj_start + mfmv_sbsz8, rf.ih8);
+        if y < y_proj_start || y >= y_proj_end {
+            continue;
+        }
+        let pos1 = pos(y1, x1);
+        if unsafe { rp_traj[ref2][pos1].c.y } != INVALID_MV {
+            continue;
+        }
+        let src_y = unsafe { rp_traj[ref1][pos1].c.y };
+        let src_x = unsafe { rp_traj[ref1][pos1].c.x };
+        let py = iclip(src_y + mv_in_y, -2047, 2047);
+        let px = iclip(src_x + mv_in_x, -2047, 2047);
+        rp_traj[ref2][pos1] = Mv { c: MvXY { y: py, x: px } };
+
+        let mut y2 = y1 + apply_sign(py.abs() >> 6, py);
+        let mut x2 = x1 + apply_sign(px.abs() >> 6, px);
+        if x2 < x_proj_start || x2 >= x_proj_end {
+            continue;
+        }
+        if y2 < y_proj_start || y2 >= y_proj_end {
+            continue;
+        }
+        y2 &= sample_step_mask;
+        x2 &= sample_step_mask;
+        let pos2 = pos(y2, x2);
+        let k2 = (x1 >> shift) - (x2 >> shift);
+        debug_assert!(k2 >= -1 && k2 <= 1);
+        map[(k2 + 1) as usize][ref2][pos2] = TrajMap {
+            y: (y1 - y2) as i8,
+            x: (x1 - x2) as i8,
+        };
+    }
+
+    let mut y1 = y + apply_sign(mv_in_y.abs() >> 6, mv_in_y);
+    let mut x1 = x + apply_sign(mv_in_x.abs() >> 6, mv_in_x);
+    if imin(y1, x1) < 0 || y1 >= rf.ih8 || x1 >= rf.iw8 {
+        return;
+    }
+    y1 &= sample_step_mask;
+    x1 &= sample_step_mask;
+    let min_k1 = imax(-1, col_start8_shifted - (x1 >> shift));
+    let max_k1 = imin(1, col_end8_shifted - (x1 >> shift));
+
+    for k in (min_k1 + 1)..=(max_k1 + 1) {
+        let pos1 = pos(y1, x1);
+        let map1 = map[k as usize][ref2][pos1];
+        if unsafe { map1.n() } == INVALID_TRAJ {
+            continue;
+        }
+        let x2 = x1 + map1.x as i32;
+        let k2 = (x2 >> shift) - (x1 >> shift);
+        if k2 + 1 != k {
+            continue;
+        }
+        let x_sb_align = x2 & !(mfmv_sbsz8 - 1);
+        let x_proj_start = imax(x_sb_align - mfmv_edge, 0);
+        let x_proj_end = imin(x_sb_align + mfmv_sbsz8 + mfmv_edge, rf.iw8);
+        if x < x_proj_start || x >= x_proj_end {
+            continue;
+        }
+        if x1 < x_proj_start || x1 >= x_proj_end {
+            continue;
+        }
+        let y2 = y1 + map1.y as i32;
+        let y_proj_start = y2 & !(mfmv_sbsz8 - 1);
+        let y_proj_end = imin(y_proj_start + mfmv_sbsz8, rf.ih8);
+        if y < y_proj_start || y >= y_proj_end || y1 < y_proj_start || y1 >= y_proj_end {
+            continue;
+        }
+        let pos2 = pos(y2, x2);
+        if unsafe { rp_traj[ref1][pos2].c.y } != INVALID_MV {
+            continue;
+        }
+        let src_y = unsafe { rp_traj[ref2][pos2].c.y };
+        let src_x = unsafe { rp_traj[ref2][pos2].c.x };
+        let py = iclip(src_y - mv_in_y, -0xffff, 0xffff);
+        let px = iclip(src_x - mv_in_x, -0xffff, 0xffff);
+        rp_traj[ref1][pos2] = Mv { c: MvXY { y: py, x: px } };
+
+        let mut y3 = y2 + apply_sign(py.abs() >> 6, py);
+        let mut x3 = x2 + apply_sign(px.abs() >> 6, px);
+        if x3 < x_proj_start || x3 >= x_proj_end {
+            continue;
+        }
+        if y3 < y_proj_start || y3 >= y_proj_end {
+            continue;
+        }
+        y3 &= sample_step_mask;
+        x3 &= sample_step_mask;
+        let pos3 = pos(y3, x3);
+        let k3 = (x2 >> shift) - (x3 >> shift);
+        debug_assert!(k3 >= -1 && k3 <= 1);
+        map[(k3 + 1) as usize][ref1][pos3] = TrajMap {
+            y: (y2 - y3) as i8,
+            x: (x2 - x3) as i8,
+        };
     }
 }
 
@@ -2296,6 +2447,42 @@ mod tests {
 
         reset_sb(&mut rt, &ra, 16, true, true, 0, 16, 0);
         assert_eq!(rt.bank.hits[0], 0);
+    }
+
+    #[test]
+    fn test_check_traj_intersect_no_valid_maps() {
+        let rf = Frame {
+            iw8: 32, ih8: 32, sbsz: 16,
+            mfmv_sbsz8: 8, mfmv_edge: 4, mfmv_k_shift: 3,
+            rp_stride: 32,
+            ..make_default_frame()
+        };
+        let stride = rf.rp_stride as usize;
+        let sz = stride * 8;
+        let invalid_mv = Mv { c: MvXY { y: INVALID_MV, x: 0 } };
+        let mut rp_traj: [Vec<Mv>; 7] = Default::default();
+        for v in rp_traj.iter_mut() {
+            *v = vec![invalid_mv; sz];
+        }
+        let invalid_map = TrajMap { y: -128i8, x: -128i8 };
+        let mut map: [[Vec<TrajMap>; 7]; 3] = Default::default();
+        for k in 0..3 {
+            for r in 0..7 {
+                map[k][r] = vec![invalid_map; sz];
+            }
+        }
+        let mv_in = Mv { c: MvXY { y: 64, x: 32 } };
+        check_traj_intersect(&rf, &mut rp_traj, &mut map, 0, 1, 4, 4, mv_in, 0, 3, !0);
+
+        assert_eq!(unsafe { rp_traj[1][4 * stride + 4].c.y }, INVALID_MV);
+    }
+
+    #[test]
+    fn test_traj_map_n() {
+        let tm = TrajMap { y: -128i8, x: -128i8 };
+        assert_eq!(unsafe { tm.n() }, INVALID_TRAJ);
+        let tm2 = TrajMap { y: 0, x: 0 };
+        assert_eq!(unsafe { tm2.n() }, 0);
     }
 
     fn make_default_frame() -> Frame {
