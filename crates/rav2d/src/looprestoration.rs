@@ -1,3 +1,4 @@
+use crate::gdf_tables::{GDF_ALPHA, GDF_BIAS, GDF_INTRA_ERROR, GDF_INTER_ERROR, GDF_WEIGHT};
 use crate::intops::{apply_sign, iclip, imax, imin};
 use crate::tables::PC_WIENER_LUT_TO_CLASS;
 
@@ -213,6 +214,14 @@ pub fn gdf_add_8bpc(
 
 pub const REST_UNIT_STRIDE: usize = 76;
 const ROW_ORIGIN: usize = 6;
+
+pub static GDF_COORDS: [[i8; 2]; 18] = [
+    [6, 0], [5, 0], [4, 0], [3, 0], [2, 1], [2, 0],
+    [2, -1], [1, 2], [1, 1], [1, 0], [1, -1], [1, -2],
+    [0, 6], [0, 5], [0, 4], [0, 3], [0, 2], [0, 1],
+];
+
+const GRADIENT_BUF_STRIDE: usize = 33;
 
 pub static WIENER_NS_CONFIG_UV: [[i8; 2]; 6] = [
     [1, 0], [0, 1], [1, 1], [-1, 1], [2, 0], [0, 2],
@@ -830,6 +839,168 @@ pub fn ns_wiener_single_uv_8bpc(
     }
 }
 
+pub fn gdf_prep_8bpc(
+    dst: &mut [i8],
+    dst_stride: usize,
+    p: &[u8],
+    p_off: usize,
+    stride: usize,
+    left: &[[u8; 6]],
+    lpf: &[u8],
+    lpf_off: usize,
+    lpf_bottom: &[u8],
+    lpf_bottom_off: usize,
+    w: usize,
+    h: usize,
+    ref_dst_idx: usize,
+    qp_idx: usize,
+    edges: u8,
+) {
+    let mut row_buffers = [[0u8; REST_UNIT_STRIDE]; 13];
+    let mut ptrs: [usize; 13] = [0; 13];
+    let o = ROW_ORIGIN;
+
+    backup_row_8bpc(&mut row_buffers[6], o, p, p_off, &left[0], 6, w, 6, edges);
+    ptrs[6] = 6;
+
+    if edges & LR_HAVE_TOP_INTEGRATED != 0 {
+        for n in 0..6 {
+            backup_row_lpf_8bpc(&mut row_buffers[n], o, lpf, lpf_off + n * stride, w, 6, edges);
+            ptrs[n] = n;
+        }
+    } else if edges & LR_HAVE_TOP != 0 {
+        backup_row_lpf_8bpc(&mut row_buffers[4], o, lpf, lpf_off, w, 6, edges);
+        ptrs[4] = 4;
+        backup_row_lpf_8bpc(&mut row_buffers[5], o, lpf, lpf_off + stride, w, 6, edges);
+        ptrs[5] = 5;
+        ptrs[0] = 4;
+        ptrs[1] = 4;
+        ptrs[2] = 4;
+        ptrs[3] = 4;
+    } else {
+        for n in 0..6 { ptrs[n] = 6; }
+    }
+
+    let mut bak_idx = 7usize;
+    for y in 1..6 {
+        backup_row_8bpc(&mut row_buffers[bak_idx], o, p, p_off + y * stride, &left[y], 6, w, 6, edges);
+        ptrs[bak_idx] = bak_idx;
+        bak_idx += 1;
+    }
+
+    let alpha_base = ref_dst_idx * 528 + qp_idx * 88;
+    let weight_base = ref_dst_idx * 1584 + qp_idx * 264;
+    let bias_idx = ref_dst_idx * 6 + qp_idx;
+
+    let (error_lut_base, scale) = if ref_dst_idx == 0 {
+        (qp_idx * 4096, 8i32)
+    } else {
+        ((ref_dst_idx - 1) * 6000 + qp_idx * 1000, 5i32)
+    };
+
+    let mut grad = [[[0u16; 4]; GRADIENT_BUF_STRIDE]; 2];
+    {
+        let refs: [&[u8]; 13] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
+        compute_gradient_row_8bpc(&mut grad[0], &refs, 6, o, w, 0);
+    }
+    let mut grad_bit: usize = 1;
+
+    for y in 0..h {
+        if y + 6 < h {
+            backup_row_8bpc(
+                &mut row_buffers[bak_idx], o, p,
+                p_off + (y + 6) * stride, &left[y + 6], 6, w, 6, edges,
+            );
+            ptrs[12] = bak_idx;
+        } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
+            backup_row_lpf_8bpc(
+                &mut row_buffers[bak_idx], o, p,
+                p_off + (y + 6) * stride, w, 6, edges,
+            );
+            ptrs[12] = bak_idx;
+        } else if y + 4 < h && edges & LR_HAVE_BOTTOM != 0 {
+            let offset_y = y + 6 - h;
+            backup_row_lpf_8bpc(
+                &mut row_buffers[bak_idx], o, lpf_bottom,
+                lpf_bottom_off + offset_y * stride, w, 6, edges,
+            );
+            ptrs[12] = bak_idx;
+        } else {
+            ptrs[12] = ptrs[11];
+        }
+        bak_idx += 1;
+        if bak_idx == 13 { bak_idx = 0; }
+
+        if y & 1 == 0 {
+            let refs: [&[u8]; 13] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
+            compute_gradient_row_8bpc(&mut grad[grad_bit], &refs, 8, o, w, 0);
+            grad_bit ^= 1;
+        }
+
+        let mut x1 = 0usize;
+        while x1 < w {
+            let mut grad_sums = [0i32; 4];
+            let hx = x1 >> 1;
+            for d in 0..4 {
+                grad_sums[d] = grad[0][hx][d] as i32 + grad[0][hx + 1][d] as i32
+                    + grad[1][hx][d] as i32 + grad[1][hx + 1][d] as i32;
+            }
+            let cls = ((grad_sums[0] <= grad_sums[1]) as usize)
+                | (((grad_sums[2] <= grad_sums[3]) as usize) << 1);
+
+            let mut shared_vals = [0i32; 3];
+            for idx in 0..3 {
+                shared_vals[idx] = GDF_BIAS[bias_idx][idx] as i32;
+            }
+            for d in 0..4 {
+                let k = d + 18;
+                let alpha = GDF_ALPHA[alpha_base + k * 4 + cls] as i32;
+                let v = imin(grad_sums[d] >> 2, alpha);
+                for idx in 0..3 {
+                    shared_vals[idx] += v * GDF_WEIGHT[weight_base + idx * 88 + k * 4 + cls] as i32;
+                }
+            }
+
+            for x2 in 0..2 {
+                let x = x1 + x2;
+                let mut idx_vals = shared_vals;
+                let m = row_buffers[ptrs[6]][o + x] as i32;
+                for k in 0..18 {
+                    let alpha = GDF_ALPHA[alpha_base + k * 4 + cls] as i32;
+                    let dy = GDF_COORDS[k][0] as i32;
+                    let dx = GDF_COORDS[k][1] as i32;
+                    let a = row_buffers[ptrs[(6 - dy) as usize]]
+                        [(o as i32 + x as i32 - dx) as usize] as i32;
+                    let b = row_buffers[ptrs[(6 + dy) as usize]]
+                        [(o as i32 + x as i32 + dx) as usize] as i32;
+                    let above = iclip((a - m) << 2, -alpha, alpha);
+                    let below = iclip((b - m) << 2, -alpha, alpha);
+                    let v = iclip(above + below, -512, 511);
+                    for idx in 0..3 {
+                        idx_vals[idx] += v * GDF_WEIGHT[weight_base + idx * 88 + k * 4 + cls] as i32;
+                    }
+                }
+
+                let mut full_idx = 0usize;
+                for idx in 0..3 {
+                    let sv = idx_vals[idx] * scale;
+                    let v = apply_sign((sv.abs() + (1 << 14)) >> 15, sv);
+                    let sub_idx = (iclip(v, -scale, scale - 1) + scale) as usize;
+                    full_idx = full_idx * (scale as usize * 2) + sub_idx;
+                }
+                if ref_dst_idx == 0 {
+                    dst[y * dst_stride + x] = GDF_INTRA_ERROR[error_lut_base + full_idx];
+                } else {
+                    dst[y * dst_stride + x] = GDF_INTER_ERROR[error_lut_base + full_idx];
+                }
+            }
+            x1 += 2;
+        }
+
+        for r in 0..12 { ptrs[r] = ptrs[r + 1]; }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1333,6 +1504,65 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 assert_eq!(p[p_off + y * stride + x], 100, "skip mask failed");
+            }
+        }
+    }
+
+    #[test]
+    fn test_gdf_coords() {
+        assert_eq!(GDF_COORDS.len(), 18);
+        assert_eq!(GDF_COORDS[0], [6, 0]);
+        assert_eq!(GDF_COORDS[17], [0, 1]);
+    }
+
+    #[test]
+    fn test_gdf_prep_uniform() {
+        let w = 8;
+        let h = 8;
+        let stride = 24;
+        let p_off = 6 * stride + 6;
+        let p = vec![128u8; stride * (h + 14)];
+        let left = vec![[128u8; 6]; h + 8];
+        let lpf = vec![128u8; stride * 8 + 8];
+        let lpf_bottom = vec![128u8; stride * 4 + 8];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let mut dst = vec![0i8; h * w];
+
+        gdf_prep_8bpc(
+            &mut dst, w, &p, p_off, stride,
+            &left, &lpf, 6, &lpf_bottom, 6,
+            w, h, 0, 0, edges,
+        );
+
+        for y in 0..h {
+            for x in 0..w {
+                let _ = dst[y * w + x];
+            }
+        }
+    }
+
+    #[test]
+    fn test_gdf_prep_inter() {
+        let w = 8;
+        let h = 8;
+        let stride = 24;
+        let p_off = 6 * stride + 6;
+        let p = vec![128u8; stride * (h + 14)];
+        let left = vec![[128u8; 6]; h + 8];
+        let lpf = vec![128u8; stride * 8 + 8];
+        let lpf_bottom = vec![128u8; stride * 4 + 8];
+        let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
+        let mut dst = vec![0i8; h * w];
+
+        gdf_prep_8bpc(
+            &mut dst, w, &p, p_off, stride,
+            &left, &lpf, 6, &lpf_bottom, 6,
+            w, h, 1, 0, edges,
+        );
+
+        for y in 0..h {
+            for x in 0..w {
+                let _ = dst[y * w + x];
             }
         }
     }
