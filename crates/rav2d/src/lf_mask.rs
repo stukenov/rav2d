@@ -352,6 +352,144 @@ pub fn transpose_lossless_mask(
     }
 }
 
+use crate::headers::{FrameHeader, PixelLayout, SequenceHeader};
+use crate::levels::{
+    Av2Block, BlockSize, CompInterPredMode, CompInterType, TxfmSize, N_BS_SIZES, TIP_FRAME,
+};
+use crate::tables::{BLOCK_DIMENSIONS, MAX_TXFM_SIZE_FOR_BS, TXFM_DIMENSIONS, TX_PART_TBL};
+
+const FILTER_8TAP_SHARP: u8 = 2;
+
+fn subpu_flt_lvl(
+    seq_hdr: &SequenceHeader,
+    frame_hdr: &FrameHeader,
+    bs: BlockSize,
+    bw4: i32,
+    bh4: i32,
+    b: &Av2Block,
+    max_lvl: i32,
+) -> i32 {
+    let r = unsafe { b.ref_pair.r };
+    if b.is_intra != 0 || frame_hdr.deblock.sub_pu == 0 {
+        // do nothing
+    } else if r[0] == TIP_FRAME as i8 {
+        let opfl = seq_hdr.tip_refine_mv
+            && (frame_hdr.tip.frame_mode == 1
+                || frame_hdr.tip.subpel_filter == FILTER_8TAP_SHARP);
+        return 1 + if frame_hdr.tip.frame_mode == 2 {
+            !opfl as i32
+        } else {
+            ((!opfl && imin(bw4, bh4) >= 4) || bs == BlockSize::Bs256x256) as i32
+        };
+    } else if r[1] != -1 {
+        let inter = unsafe { b.data.inter };
+        if inter.inter_mode >= CompInterPredMode::OpflNearMvNearMv as u8 {
+            return 1 - (bs == BlockSize::Bs8x8) as i32;
+        } else if inter.refine_mv != 0 && inter.comp_type == CompInterType::Avg as u8 {
+            return 2;
+        }
+    }
+    max_lvl
+}
+
+pub fn create_db_mask(
+    masks: &mut [FilterMasks; 2],
+    b: &Av2Block,
+    bs: BlockSize,
+    bx: i32,
+    by: i32,
+    iw: i32,
+    ih: i32,
+    layout: PixelLayout,
+    chroma: bool,
+    a: &mut [u8],
+    l: &mut [u8],
+    frame_hdr: &FrameHeader,
+    seq_hdr: &SequenceHeader,
+) {
+    let ss_ver = (chroma && layout == PixelLayout::I420) as i32;
+    let ss_hor = (chroma && layout != PixelLayout::I444) as i32;
+    let b_dim = &BLOCK_DIMENSIONS[bs as usize];
+    let bw4 = imin(iw - bx, b_dim[0] as i32) >> ss_hor;
+    let bh4 = imin(ih - by, b_dim[1] as i32) >> ss_ver;
+    let bx4 = (bx & 63) >> ss_hor;
+    let by4 = (by & 63) >> ss_ver;
+    assert!(bw4 > 0 && bh4 > 0);
+
+    let subpu_l2 = subpu_flt_lvl(seq_hdr, frame_hdr, bs, b_dim[0] as i32, b_dim[1] as i32, b, 3);
+    let ds_subpu_mask = (frame_hdr.tip.frame_mode != 2) as i32 * 15;
+    let twl4c;
+    let thl4c;
+
+    let chroma_i = chroma as i32;
+    let lossless = frame_hdr.segmentation.lossless[b.seg_id as usize];
+    if b.is_intra != 0 || b.skip_txfm == 0 {
+        let tx_part = if chroma {
+            TxPartition::None
+        } else {
+            unsafe { std::mem::transmute::<u8, TxPartition>(b.tx_part) }
+        };
+        let tx: usize = if lossless != 0 {
+            if !chroma && b.tx_size_ll != 0 {
+                MAX_TXFM_SIZE_FOR_BS[bs as usize][3] as usize
+            } else {
+                TxfmSize::Tx4x4 as usize
+            }
+        } else if chroma {
+            MAX_TXFM_SIZE_FOR_BS[bs as usize]
+                [PixelLayout::I444 as usize - layout as usize] as usize
+        } else {
+            TX_PART_TBL[bs as usize][tx_part as usize] as usize
+        };
+        let t_dim = &TXFM_DIMENSIONS[tx];
+        mask_edges_part(
+            masks,
+            by4,
+            bx4,
+            bw4,
+            bh4,
+            tx_part,
+            t_dim,
+            iclip(subpu_l2 - ss_hor, 0, 3 - chroma_i),
+            iclip(subpu_l2 - ss_ver, 0, 3 - chroma_i),
+            a,
+            l,
+        );
+        twl4c = imin(subpu_l2, t_dim.lw as i32);
+        thl4c = imin(subpu_l2, t_dim.lh as i32);
+    } else {
+        let (hlim, vlim) = if lossless != 0 {
+            (0u8, 0u8)
+        } else {
+            (
+                iclip(imin(subpu_l2, b_dim[2] as i32) - ss_hor, 0, 3 - chroma_i) as u8,
+                iclip(imin(subpu_l2, b_dim[3] as i32) - ss_ver, 0, 3 - chroma_i) as u8,
+            )
+        };
+        mask_outer_edge_l(&mut masks[0][bx4 as usize], by4, bh4, hlim, l);
+        mask_outer_edge_t(&mut masks[1][by4 as usize], bx4, bw4, vlim, a);
+        twl4c = subpu_l2;
+        thl4c = subpu_l2;
+    }
+
+    if subpu_l2 != 3 {
+        let h_subpu_l2 = twl4c - (ss_hor != 0 && twl4c != 0) as i32;
+        let v_subpu_l2 = thl4c - (ss_ver != 0 && thl4c != 0) as i32;
+        mask_subpu_edges(
+            masks,
+            by4,
+            bx4,
+            bw4,
+            bh4,
+            h_subpu_l2,
+            v_subpu_l2,
+            (1 << subpu_l2) >> ss_hor,
+            (1 << subpu_l2) >> ss_ver,
+            ds_subpu_mask,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,5 +791,44 @@ mod tests {
         let src = [[0u16; 4]; 16];
         transpose_lossless_mask(&mut dst, &src, 0, 0, 0);
         assert_eq!(dst[0], 0xABCD);
+    }
+
+    #[test]
+    fn test_create_db_mask_intra_block() {
+        use crate::headers::{FrameHeader, PixelLayout, SequenceHeader};
+        use crate::levels::{Av2Block, BlockSize};
+
+        let mut masks: [FilterMasks; 2] = [[[[0u16; 4]; 5]; 64], [[[0u16; 4]; 5]; 64]];
+        let b = Av2Block {
+            bs: BlockSize::Bs8x8 as i8,
+            is_intra: 1,
+            seg_id: 0,
+            skip_txfm: 0,
+            tx_part: 0,
+            tx_size_ll: 0,
+            ..Default::default()
+        };
+        let fh = FrameHeader::default();
+        let sh = SequenceHeader::default();
+        let mut a = [0u8; 64];
+        let mut l = [0u8; 64];
+
+        create_db_mask(
+            &mut masks,
+            &b,
+            BlockSize::Bs8x8,
+            0, 0, 64, 64,
+            PixelLayout::I420,
+            false,
+            &mut a,
+            &mut l,
+            &fh,
+            &sh,
+        );
+        // intra block with skip_txfm=0 should set some mask bits
+        // At minimum, outer edges should be marked
+        let has_any_mask = masks[0].iter().any(|row| row.iter().any(|col| col.iter().any(|&v| v != 0)))
+            || masks[1].iter().any(|row| row.iter().any(|col| col.iter().any(|&v| v != 0)));
+        assert!(has_any_mask);
     }
 }
