@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
+use crate::env::get_poc_diff;
 use crate::getbits::GetBits;
 use crate::headers::*;
+use crate::internal::RefState;
 use crate::intops::{iclip, imax, imin, ulog2};
 use crate::warpmv::resolve_divisor_32;
 
@@ -418,19 +422,31 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     }
 
     if hdr.max_tlayer_id > 0 {
-        let dep_present = gb.get_bit() != 0;
-        if dep_present {
+        hdr.tlayer_dependency_present = gb.get_bit() != 0;
+        if hdr.tlayer_dependency_present {
             for n in 1..hdr.max_tlayer_id as usize {
-                let _dep = gb.get_bits(n as i32);
+                hdr.tlayer_dependencies[n] = gb.get_bits(n as i32) as u8;
+            }
+        } else {
+            let mut mask = !0u32;
+            for n in 1..hdr.max_tlayer_id as usize {
+                hdr.tlayer_dependencies[n] = (!mask) as u8;
+                mask <<= 1;
             }
         }
     }
 
     if hdr.max_mlayer_id > 0 {
-        let dep_present = gb.get_bit() != 0;
-        if dep_present {
+        hdr.mlayer_dependency_present = gb.get_bit() != 0;
+        if hdr.mlayer_dependency_present {
             for n in 1..hdr.max_mlayer_id as usize {
-                let _dep = gb.get_bits(n as i32);
+                hdr.mlayer_dependencies[n] = gb.get_bits(n as i32) as u8;
+            }
+        } else {
+            let mut mask = !0u32;
+            for n in 1..hdr.max_mlayer_id as usize {
+                hdr.mlayer_dependencies[n] = (!mask) as u8;
+                mask <<= 1;
             }
         }
     }
@@ -729,6 +745,315 @@ pub fn parse_sequence_header(data: &[u8]) -> Result<SequenceHeader> {
     parse_seq_hdr(&mut gb, false)
 }
 
+pub fn read_frame_size(
+    hdr: &mut FrameHeader,
+    seqhdr: &SequenceHeader,
+    refs: &[RefState; 8],
+    gb: &mut GetBits,
+) -> Result<()> {
+    if hdr.frame_size_override != 0 && hdr.is_inter_or_switch() {
+        for i in 0..hdr.n_ref_frames as usize {
+            if gb.get_bit() != 0 {
+                let refhdr = refs[hdr.refidx[i] as usize]
+                    .p
+                    .frame_hdr
+                    .as_ref()
+                    .ok_or(Dav2dError::InvalidData)?;
+                hdr.width = refhdr.width;
+                hdr.height = refhdr.height;
+                return Ok(());
+            }
+        }
+    }
+    if hdr.frame_size_override != 0 {
+        hdr.width = gb.get_bits(seqhdr.width_n_bits as i32) as i32 + 1;
+        hdr.height = gb.get_bits(seqhdr.height_n_bits as i32) as i32 + 1;
+    } else {
+        hdr.width = seqhdr.max_width;
+        hdr.height = seqhdr.max_height;
+    }
+    Ok(())
+}
+
+pub fn get_ref_frames(
+    hdr: &mut FrameHeader,
+    seqhdr: &SequenceHeader,
+    refs: &[RefState; 8],
+    have_resolution: bool,
+) -> i32 {
+    struct Score {
+        score: i32,
+        poc: u8,
+        pocdiff: i8,
+        qidx: u16,
+        mlayer: u8,
+        res_ratio_log2: i8,
+    }
+    let mut ref_info: [Score; 8] = std::array::from_fn(|_| Score {
+        score: 0,
+        poc: 0,
+        pocdiff: 0,
+        qidx: 0,
+        mlayer: 0,
+        res_ratio_log2: 0,
+    });
+    let mut sort_idx = [0u8; 8];
+    let mut n_refs = 0i32;
+    let mut have_fwd_refs = false;
+    let poc = hdr.frame_offset as i32;
+    let nbits = seqhdr.order_hint_n_bits as i32;
+
+    for n in 0..8 {
+        if have_fwd_refs {
+            break;
+        }
+        if let Some(refhdr) = refs[n].p.frame_hdr.as_ref() {
+            have_fwd_refs = get_poc_diff(nbits, poc, refhdr.frame_offset as i32) < 0;
+        }
+    }
+
+    let mlayer = hdr.mlayer_id as i32;
+    let tlayer = hdr.tlayer_id as i32;
+    let w = hdr.width;
+    let h = hdr.height;
+    let mut minq = 512i32;
+    let mut maxq = -1i32;
+    let mut last_refhdr_ptr: Option<*const FrameHeader> = None;
+
+    for n in 0..8usize {
+        let refhdr_arc = match refs[n].p.frame_hdr.as_ref() {
+            Some(fh) => fh,
+            None => continue,
+        };
+        let refhdr_ptr = Arc::as_ptr(refhdr_arc);
+        if last_refhdr_ptr == Some(refhdr_ptr) {
+            continue;
+        }
+        let refhdr = refhdr_arc.as_ref();
+
+        if seqhdr.tlayer_dependency_present {
+            if seqhdr.tlayer_dependencies[tlayer as usize] & (1 << refhdr.tlayer_id) == 0 {
+                continue;
+            }
+        } else if tlayer < refhdr.tlayer_id as i32 {
+            continue;
+        }
+
+        let ref_mlayer = refhdr.mlayer_id;
+        if seqhdr.mlayer_dependency_present {
+            if seqhdr.mlayer_dependencies[mlayer as usize] & (1 << ref_mlayer) == 0 {
+                continue;
+            }
+        } else if mlayer < ref_mlayer as i32 {
+            continue;
+        }
+
+        if have_resolution
+            && (2 * w < refhdr.width
+                || 2 * h < refhdr.height
+                || w > 16 * refhdr.width
+                || h > 16 * refhdr.height)
+        {
+            continue;
+        }
+
+        let ref_poc = refhdr.frame_offset;
+        let pocdiff = get_poc_diff(nbits, poc, ref_poc as i32) as i8;
+        let ref_qidx = refhdr.quant.yac;
+        let res_ratio = -(ulog2((refhdr.width * refhdr.height) as u32) as i8);
+        let tdist = (pocdiff as i32).abs() + mlayer - ref_mlayer as i32;
+        let mut score = if have_fwd_refs {
+            tdist << 6
+        } else {
+            128 - (128 >> imin(tdist, 6)) + imax(tdist - 6, 0)
+        };
+        score += res_ratio as i32 * (1 << 5) + ref_qidx as i32;
+
+        ref_info[n] = Score {
+            score,
+            poc: ref_poc,
+            pocdiff,
+            qidx: ref_qidx,
+            mlayer: ref_mlayer,
+            res_ratio_log2: res_ratio,
+        };
+
+        let mut m = 0usize;
+        while m < n_refs as usize {
+            let r2 = &ref_info[sort_idx[m] as usize];
+            if score == r2.score && ref_poc == r2.poc && ref_mlayer == r2.mlayer {
+                break;
+            }
+            m += 1;
+        }
+        if (m as i32) < n_refs {
+            continue;
+        }
+
+        maxq = imax(ref_qidx as i32, maxq);
+        minq = imin(ref_qidx as i32, minq);
+
+        while m > 0 {
+            let idx = sort_idx[m - 1] as usize;
+            if ref_info[idx].score <= score {
+                break;
+            }
+            sort_idx[m] = idx as u8;
+            m -= 1;
+        }
+        sort_idx[m] = n as u8;
+        n_refs += 1;
+        last_refhdr_ptr = Some(refhdr_ptr);
+    }
+
+    if n_refs == 8 {
+        let q_thr = (maxq + minq + 1) >> 1;
+        let mut maxpocdiff = [0i32; 2];
+        let mut num = [0i32; 2];
+        let mut furthest_idx = [0usize; 2];
+        for n in 0..8usize {
+            let r = &ref_info[sort_idx[n] as usize];
+            if (r.qidx as i32) < q_thr {
+                continue;
+            }
+            if r.pocdiff > 0 {
+                if (r.pocdiff as i32) > maxpocdiff[0] {
+                    maxpocdiff[0] = r.pocdiff as i32;
+                    furthest_idx[0] = n;
+                }
+                num[0] += 1;
+            } else if r.pocdiff < 0 {
+                if (r.pocdiff as i32) < maxpocdiff[1] {
+                    maxpocdiff[1] = r.pocdiff as i32;
+                    furthest_idx[1] = n;
+                }
+                num[1] += 1;
+            }
+        }
+        let idx = if num[0] > num[1] {
+            furthest_idx[0]
+        } else if num[0] < num[1] {
+            furthest_idx[1]
+        } else {
+            furthest_idx[if maxpocdiff[0] < -maxpocdiff[1] { 1 } else { 0 }]
+        };
+        if idx < 7 {
+            sort_idx.copy_within(idx + 1..8, idx);
+            sort_idx[7] = idx as u8;
+        }
+    }
+
+    for n in 0..7usize {
+        hdr.refidx[n] = sort_idx[if (n as i32) < n_refs { n } else { 0 }] as i8;
+    }
+
+    imin(7, n_refs)
+}
+
+pub fn find_tip_ref_frames(
+    hdr: &mut FrameHeader,
+    seqhdr: &SequenceHeader,
+    refs: &[RefState; 8],
+) {
+    let n_refs = hdr.n_ref_frames as usize;
+    if n_refs == 1 {
+        hdr.tip.r#ref[0] = 0;
+        hdr.tip.r#ref[1] = 0;
+        return;
+    }
+
+    let poc = hdr.frame_offset as i32;
+    let nbits = seqhdr.order_hint_n_bits as i32;
+    let mut order = [0u8; 7];
+    let mut refdist = [0i8; 7];
+    let mut n_past = 0usize;
+
+    for n in 0..n_refs {
+        let refpoc = refs[hdr.refidx[n] as usize]
+            .p
+            .frame_hdr
+            .as_ref()
+            .unwrap()
+            .frame_offset;
+        let dist = get_poc_diff(nbits, refpoc as i32, poc);
+        refdist[n] = dist as i8;
+        let mut m = n;
+        while m > 0 && (refdist[order[m - 1] as usize] as i32) > dist {
+            order[m] = order[m - 1];
+            m -= 1;
+        }
+        order[m] = n as u8;
+        if dist < 0 {
+            n_past += 1;
+        }
+    }
+
+    if n_past == n_refs {
+        hdr.tip.r#ref[0] = order[n_refs - 1] as i8;
+        hdr.tip.r#ref[1] = order[n_refs - 2] as i8;
+    } else if n_past == 0 {
+        hdr.tip.r#ref[0] = order[0] as i8;
+        hdr.tip.r#ref[1] = order[1] as i8;
+    } else {
+        hdr.tip.r#ref[0] = order[n_past - 1] as i8;
+        hdr.tip.r#ref[1] = order[n_past] as i8;
+    }
+}
+
+pub fn derive_pri_sec_ref(
+    hdr: &FrameHeader,
+    seqhdr: &SequenceHeader,
+    refs: &[RefState; 8],
+) -> [i32; 2] {
+    let mut result = [PRIMARY_REF_NONE as i32, PRIMARY_REF_NONE as i32];
+    let mut best_qdiff = [0i32; 2];
+    let mut best_pocdiff = [0i32; 2];
+    let mut best_poc = [0i32; 2];
+    let mut best = 0usize;
+    let qidx = hdr.quant.yac as i32;
+    let poc = hdr.frame_offset as i32;
+    let nbits = seqhdr.order_hint_n_bits as i32;
+
+    for i in 0..hdr.n_ref_frames as usize {
+        let refhdr = match refs[hdr.refidx[i] as usize].p.frame_hdr.as_ref() {
+            Some(fh) => fh,
+            None => continue,
+        };
+        if refhdr.is_key_or_intra() {
+            continue;
+        }
+        let ref_qidx = refhdr.quant.yac as i32;
+        let qdiff = (ref_qidx - qidx).abs();
+        let ref_poc = refhdr.frame_offset as i32;
+        let pocdiff = get_poc_diff(nbits, poc, ref_poc).abs();
+        for n in 0..2usize {
+            let m = if n == 0 { best } else { 1 - best };
+            if result[m] == PRIMARY_REF_NONE as i32
+                || qdiff < best_qdiff[m]
+                || (qdiff == best_qdiff[m]
+                    && (pocdiff < best_pocdiff[m]
+                        || (pocdiff == best_pocdiff[m]
+                            && get_poc_diff(nbits, best_poc[m], ref_poc) < 0)))
+            {
+                let slot = 1 - best;
+                result[slot] = i as i32;
+                best_pocdiff[slot] = pocdiff;
+                best_qdiff[slot] = qdiff;
+                best_poc[slot] = ref_poc;
+                if n == 0 {
+                    best = 1 - best;
+                }
+                break;
+            }
+        }
+    }
+
+    if best != 0 {
+        result.swap(0, 1);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -969,5 +1294,220 @@ mod tests {
         let fgd = parse_film_grain_data(&mut gb, PixelLayout::I444).unwrap();
         assert!(!fgd.chroma_scaling_from_luma);
         assert_eq!(fgd.num_points[0], 0);
+    }
+
+    fn make_ref_hdr(frame_offset: u8, frame_type: FrameType, w: i32, h: i32, qidx: u16) -> FrameHeader {
+        let mut fh = FrameHeader::default();
+        fh.frame_offset = frame_offset;
+        fh.frame_type = frame_type;
+        fh.width = w;
+        fh.height = h;
+        fh.quant.yac = qidx;
+        fh
+    }
+
+    fn make_refs_with(hdrs: &[(usize, FrameHeader)]) -> [RefState; 8] {
+        let mut refs: [RefState; 8] = Default::default();
+        for (idx, fh) in hdrs {
+            refs[*idx].p.frame_hdr = Some(Arc::new(fh.clone()));
+        }
+        refs
+    }
+
+    #[test]
+    fn test_read_frame_size_no_override() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_size_override = 0;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.max_width = 1920;
+        seqhdr.max_height = 1080;
+        let refs: [RefState; 8] = Default::default();
+        let data = [0x00; 4];
+        let mut gb = GetBits::new(&data);
+        read_frame_size(&mut hdr, &seqhdr, &refs, &mut gb).unwrap();
+        assert_eq!(hdr.width, 1920);
+        assert_eq!(hdr.height, 1080);
+    }
+
+    #[test]
+    fn test_read_frame_size_override_intra() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_size_override = 1;
+        hdr.frame_type = FrameType::Key;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.width_n_bits = 11;
+        seqhdr.height_n_bits = 11;
+        // encode width=640 (639 in 11 bits) and height=480 (479 in 11 bits)
+        // 639 = 0b01001111111, 479 = 0b00111011111
+        // combined: 01001111111_00111011111_...
+        let bits: u32 = (639 << 21) | (479 << 10);
+        let data = bits.to_be_bytes();
+        let mut gb = GetBits::new(&data);
+        let refs: [RefState; 8] = Default::default();
+        read_frame_size(&mut hdr, &seqhdr, &refs, &mut gb).unwrap();
+        assert_eq!(hdr.width, 640);
+        assert_eq!(hdr.height, 480);
+    }
+
+    #[test]
+    fn test_read_frame_size_override_inter_ref_match() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_size_override = 1;
+        hdr.frame_type = FrameType::Inter;
+        hdr.n_ref_frames = 2;
+        hdr.refidx[0] = 3;
+        hdr.refidx[1] = 5;
+        let ref_fh = make_ref_hdr(1, FrameType::Inter, 800, 600, 100);
+        let refs = make_refs_with(&[(3, ref_fh.clone())]);
+        // first bit=0 (skip ref 0), second bit=1 (use ref 1)... but refidx[0]=3
+        // Actually: bit0=1 means use refidx[0]=3
+        let data = [0x80, 0x00, 0x00, 0x00]; // first bit = 1
+        let mut gb = GetBits::new(&data);
+        read_frame_size(&mut hdr, &SequenceHeader::default(), &refs, &mut gb).unwrap();
+        assert_eq!(hdr.width, 800);
+        assert_eq!(hdr.height, 600);
+    }
+
+    #[test]
+    fn test_read_frame_size_override_inter_missing_ref() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_size_override = 1;
+        hdr.frame_type = FrameType::Inter;
+        hdr.n_ref_frames = 1;
+        hdr.refidx[0] = 0;
+        let refs: [RefState; 8] = Default::default();
+        let data = [0x80, 0x00, 0x00, 0x00]; // bit=1 → try ref 0, but no frame_hdr
+        let mut gb = GetBits::new(&data);
+        assert!(read_frame_size(&mut hdr, &SequenceHeader::default(), &refs, &mut gb).is_err());
+    }
+
+    #[test]
+    fn test_get_ref_frames_basic() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_offset = 4;
+        hdr.width = 320;
+        hdr.height = 240;
+        hdr.n_ref_frames = 7;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.order_hint_n_bits = 8;
+        let refs = make_refs_with(&[
+            (0, make_ref_hdr(2, FrameType::Inter, 320, 240, 50)),
+            (1, make_ref_hdr(3, FrameType::Inter, 320, 240, 50)),
+            (2, make_ref_hdr(1, FrameType::Inter, 320, 240, 50)),
+        ]);
+        let n = get_ref_frames(&mut hdr, &seqhdr, &refs, false);
+        assert!(n >= 1);
+        assert!(n <= 7);
+    }
+
+    #[test]
+    fn test_get_ref_frames_layer_dep_filter() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_offset = 4;
+        hdr.tlayer_id = 1;
+        hdr.width = 320;
+        hdr.height = 240;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.order_hint_n_bits = 8;
+        seqhdr.tlayer_dependency_present = true;
+        seqhdr.tlayer_dependencies[1] = 0b01; // layer 1 depends on layer 0 only
+        let refs = make_refs_with(&[
+            (0, { let mut fh = make_ref_hdr(2, FrameType::Inter, 320, 240, 50); fh.tlayer_id = 0; fh }),
+            (1, { let mut fh = make_ref_hdr(3, FrameType::Inter, 320, 240, 50); fh.tlayer_id = 2; fh }),
+        ]);
+        let n = get_ref_frames(&mut hdr, &seqhdr, &refs, false);
+        // ref 1 (tlayer=2) should be filtered out since dep mask only allows layer 0
+        assert_eq!(n, 1);
+        assert_eq!(hdr.refidx[0], 0);
+    }
+
+    #[test]
+    fn test_find_tip_ref_frames_single_ref() {
+        let mut hdr = FrameHeader::default();
+        hdr.n_ref_frames = 1;
+        hdr.tip.r#ref = [-1, -1];
+        let seqhdr = SequenceHeader::default();
+        let refs: [RefState; 8] = Default::default();
+        find_tip_ref_frames(&mut hdr, &seqhdr, &refs);
+        assert_eq!(hdr.tip.r#ref[0], 0);
+        assert_eq!(hdr.tip.r#ref[1], 0);
+    }
+
+    #[test]
+    fn test_find_tip_ref_frames_past_and_future() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_offset = 4;
+        hdr.n_ref_frames = 3;
+        hdr.refidx[0] = 0;
+        hdr.refidx[1] = 1;
+        hdr.refidx[2] = 2;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.order_hint_n_bits = 8;
+        let refs = make_refs_with(&[
+            (0, make_ref_hdr(2, FrameType::Inter, 320, 240, 50)), // past (poc=2 < 4)
+            (1, make_ref_hdr(6, FrameType::Inter, 320, 240, 50)), // future (poc=6 > 4)
+            (2, make_ref_hdr(3, FrameType::Inter, 320, 240, 50)), // past (poc=3 < 4)
+        ]);
+        find_tip_ref_frames(&mut hdr, &seqhdr, &refs);
+        // mixed: n_past=2, picks order[n_past-1] and order[n_past]
+        // sorted by dist: ref0(poc2,dist=-2), ref2(poc3,dist=-1), ref1(poc6,dist=2)
+        // n_past=2 → tip.ref[0] = order[1] = closest past, tip.ref[1] = order[2] = closest future
+        assert!(hdr.tip.r#ref[0] >= 0 && hdr.tip.r#ref[0] < 3);
+        assert!(hdr.tip.r#ref[1] >= 0 && hdr.tip.r#ref[1] < 3);
+        assert_ne!(hdr.tip.r#ref[0], hdr.tip.r#ref[1]);
+    }
+
+    #[test]
+    fn test_derive_pri_sec_ref_no_valid_refs() {
+        let mut hdr = FrameHeader::default();
+        hdr.n_ref_frames = 2;
+        hdr.refidx[0] = 0;
+        hdr.refidx[1] = 1;
+        let seqhdr = SequenceHeader::default();
+        // all refs are key frames → filtered out
+        let refs = make_refs_with(&[
+            (0, make_ref_hdr(1, FrameType::Key, 320, 240, 50)),
+            (1, make_ref_hdr(2, FrameType::Key, 320, 240, 50)),
+        ]);
+        let result = derive_pri_sec_ref(&hdr, &seqhdr, &refs);
+        assert_eq!(result[0], PRIMARY_REF_NONE as i32);
+    }
+
+    #[test]
+    fn test_derive_pri_sec_ref_inter_refs() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_offset = 4;
+        hdr.quant.yac = 100;
+        hdr.n_ref_frames = 3;
+        hdr.refidx[0] = 0;
+        hdr.refidx[1] = 1;
+        hdr.refidx[2] = 2;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.order_hint_n_bits = 8;
+        let refs = make_refs_with(&[
+            (0, make_ref_hdr(2, FrameType::Inter, 320, 240, 95)),
+            (1, make_ref_hdr(3, FrameType::Inter, 320, 240, 200)),
+            (2, make_ref_hdr(1, FrameType::Inter, 320, 240, 98)),
+        ]);
+        let result = derive_pri_sec_ref(&hdr, &seqhdr, &refs);
+        // ref 2 (qidx=98, qdiff=2) is closest in quality, should be primary
+        assert_eq!(result[0], 2);
+    }
+
+    #[test]
+    fn test_seq_hdr_layer_deps_parsed() {
+        // Verify that parse_seq_hdr stores layer dependency defaults
+        // when tlayer_dependency_present=false
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.max_tlayer_id = 3;
+        seqhdr.tlayer_dependency_present = false;
+        // defaults: dep[1]=0, dep[2]=1, dep[3]=3 (each depends on all lower layers)
+        let mut mask = !0u32;
+        for n in 1..3usize {
+            seqhdr.tlayer_dependencies[n] = (!mask) as u8;
+            mask <<= 1;
+        }
+        assert_eq!(seqhdr.tlayer_dependencies[1], 0);
+        assert_eq!(seqhdr.tlayer_dependencies[2], 1);
     }
 }

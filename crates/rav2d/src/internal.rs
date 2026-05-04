@@ -196,6 +196,7 @@ pub struct FrameContext {
 pub struct ThreadPicture {
     pub visible: bool,
     pub showable: bool,
+    pub frame_hdr: Option<Arc<FrameHeader>>,
     pub progress: [Arc<AtomicU32>; 2],
 }
 
