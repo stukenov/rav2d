@@ -4,6 +4,7 @@ use crate::levels::{
     ANGLE_MRL_IDX_MASK, ANGLE_MRL_IDX_SHIFT, ANGLE_MULTI_MRL_FLAG,
     ANGLE_SMOOTH_LEFT_EDGE_FLAG, ANGLE_SMOOTH_TOP_EDGE_FLAG, ANGLE_USE_EDGE_FILTER_FLAG,
 };
+use crate::dip_tables::DIP_WEIGHTS;
 use crate::tables::{
     DC_IBP_WEIGHTS, DIV_RECIP, DIV_SCALE_SH_BIAS, DIV_SCALE_SH_COEFW, DIV_SCALE_SH_OFFSET,
     DR_INTRA_DERIVATIVE, SM_WEIGHTS,
@@ -824,6 +825,135 @@ pub fn mul32(a: i32, b: i32, sh: i32) -> i32 {
     }
 }
 
+pub fn ipred_dip_8bpc(
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    width: usize,
+    height: usize,
+    mode: i32,
+) {
+    let trans = (mode & 16) != 0;
+    let wd = width >> 2;
+    let hd = height >> 2;
+    let wl2 = ulog2(wd as u32);
+    let hl2 = ulog2(hd as u32);
+    let wrnd = width >> 3;
+    let hrnd = height >> 3;
+    let i_t: usize = if trans { 5 } else { 1 };
+    let i_l: usize = if trans { 1 } else { 5 };
+    let mut inp = [0i32; 11];
+    inp[0] = tl[o] as i32;
+    let mut in_sum = inp[0];
+
+    let mut ti = o + 1;
+    for i in 0..4 {
+        let mut sum = 0i32;
+        for _ in 0..wd {
+            sum += tl[ti] as i32;
+            ti += 1;
+        }
+        inp[i_t + i] = (sum + wrnd as i32) >> wl2;
+        in_sum += inp[i_t + i];
+    }
+
+    let mut li = o;
+    for i in 0..4 {
+        let mut sum = 0i32;
+        for _ in 0..hd {
+            li -= 1;
+            sum += tl[li] as i32;
+        }
+        inp[i_l + i] = (sum + hrnd as i32) >> hl2;
+        in_sum += inp[i_l + i];
+    }
+
+    let mut sum = 0i32;
+    for x in 0..wd {
+        sum += tl[o + x + width + 1] as i32;
+    }
+    let idx_tr = if trans { 10 } else { 9 };
+    inp[idx_tr] = (sum + wrnd as i32) >> wl2;
+    in_sum += inp[idx_tr];
+
+    sum = 0;
+    for y in 0..hd {
+        sum += tl[o - (y + height + 1)] as i32;
+    }
+    let idx_bl = if trans { 9 } else { 10 };
+    inp[idx_bl] = (sum + hrnd as i32) >> hl2;
+    in_sum += inp[idx_bl];
+
+    let m = (mode & 7) as usize;
+
+    let mut uwl2 = wl2 as i32 - 1;
+    let mut dwl2 = 0i32;
+    if uwl2 < 0 { dwl2 = -uwl2; uwl2 = 0; }
+    let step_x = 1usize << uwl2;
+    let dw = 1usize << dwl2;
+    let mut uhl2 = hl2 as i32 - 1;
+    let mut dhl2 = 0i32;
+    if uhl2 < 0 { dhl2 = -uhl2; uhl2 = 0; }
+    let step_y = 1usize << uhl2;
+    let dh = 1usize << dhl2;
+    let grid_h = 8usize >> dhl2;
+    let grid_w = 8usize >> dwl2;
+
+    let mut y = step_y - 1;
+    for gy in 0..grid_h {
+        let iy = gy * dh;
+        let mut x = step_x - 1;
+        for gx in 0..grid_w {
+            let ix = gx * dw;
+            let idx = if trans { ix * 8 + iy } else { iy * 8 + ix };
+            let mut s = 0i32;
+            for i in 0..11 {
+                s += DIP_WEIGHTS[m][idx][i] as i32 * inp[i];
+            }
+            dst[y * stride + x] = iclip(((s + 2048) >> 12) - in_sum, 0, 255) as u8;
+            x += step_x;
+        }
+        y += step_y;
+    }
+
+    if step_x > 1 {
+        y = step_y - 1;
+        for _gy in 0..grid_h {
+            let mut p1 = tl[o - (y + 1)] as i32;
+            let mut x = 0usize;
+            for _gx in 0..grid_w {
+                let p0 = p1;
+                p1 = dst[y * stride + x + step_x - 1] as i32;
+                for z in 0..step_x - 1 {
+                    let z1 = (z + 1) as i32;
+                    dst[y * stride + x + z] =
+                        ((p0 * (step_x as i32 - z1) + p1 * z1) >> uwl2) as u8;
+                }
+                x += step_x;
+            }
+            y += step_y;
+        }
+    }
+
+    if step_y > 1 {
+        for x in 0..width {
+            let mut p1 = tl[o + x + 1] as i32;
+            y = 0;
+            for _gy in 0..grid_h {
+                let p0 = p1;
+                p1 = dst[(y + step_y - 1) * stride + x] as i32;
+                for z in 0..step_y - 1 {
+                    let z1 = (z + 1) as i32;
+                    dst[(y + z) * stride + x] =
+                        ((p0 * (step_y as i32 - z1) + p1 * z1) >> uhl2) as u8;
+                }
+                y += step_y;
+            }
+        }
+    }
+}
+
 pub fn pal_pred_8bpc(
     dst: &mut [u8],
     stride: usize,
@@ -1237,6 +1367,51 @@ mod tests {
         ipred_z2(&mut dst, 8, &tl, o, 8, 8,
                  135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 8, 8);
         assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_dip_mode0_8x8() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..64 { tl[o + 1 + i] = 200; }
+        for i in 1..=64 { tl[o - i] = 100; }
+        let mut dst = [0u8; 64];
+        ipred_dip_8bpc(&mut dst, 8, &tl, o, 8, 8, 0);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_dip_mode1_4x4() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..32 { tl[o + 1 + i] = 180; }
+        for i in 1..=32 { tl[o - i] = 80; }
+        let mut dst = [0u8; 16];
+        ipred_dip_8bpc(&mut dst, 4, &tl, o, 4, 4, 1);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_dip_transposed() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..64 { tl[o + 1 + i] = 200; }
+        for i in 1..=64 { tl[o - i] = 100; }
+        let mut dst = [0u8; 64];
+        ipred_dip_8bpc(&mut dst, 8, &tl, o, 8, 8, 16);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_dip_uniform_input() {
+        let tl = [128u8; 256];
+        let o = 128;
+        let mut dst = [0u8; 64];
+        ipred_dip_8bpc(&mut dst, 8, &tl, o, 8, 8, 0);
+        // uniform input → all predictions close to 128
+        for &v in &dst {
+            assert!((v as i32 - 128).abs() < 30);
+        }
     }
 
     #[test]
