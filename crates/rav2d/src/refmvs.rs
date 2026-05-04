@@ -1450,6 +1450,292 @@ pub fn load_tmvs(
     }
 }
 
+pub fn init_frame(
+    rf: &mut Frame,
+    seq_hdr: &crate::headers::SequenceHeader,
+    frm_hdr: &crate::headers::FrameHeader,
+    ref_poc: &[u8; 7],
+    ref_ref_poc: &[[u8; 7]; 7],
+    refcnt: &[u8; 7],
+    rp_ref: &[Option<Vec<TemporalBlock>>; 7],
+    have_threading: bool,
+    have_frame_threading: bool,
+) {
+    use crate::env::get_poc_diff;
+
+    let rp_stride = ((frm_hdr.width + 255) & !255) >> 3;
+    let n_tile_rows = if have_threading { frm_hdr.tiling.t.rows as i32 } else { 1 };
+    let n_blocks = rp_stride * n_tile_rows;
+
+    rf.sbsz = (16 << frm_hdr.sb128) as i32;
+    let mfmv_sb128 = (frm_hdr.sb128 != 0 && frm_hdr.tmvp_sample_step > 1) as i32;
+    rf.mfmv_k_shift = 3 + mfmv_sb128;
+    rf.mfmv_sbsz8 = 8 << mfmv_sb128;
+    rf.mfmv_edge = rf.mfmv_sbsz8 >> (frm_hdr.tmvp_sample_step == 1) as i32;
+    rf.iw8 = (frm_hdr.width + 7) >> 3;
+    rf.ih8 = (frm_hdr.height + 7) >> 3;
+    rf.iw4 = rf.iw8 << 1;
+    rf.ih4 = rf.ih8 << 1;
+    rf.rp_stride = rp_stride as isize;
+    rf.have_threading = have_threading;
+    rf.have_frame_threading = have_frame_threading;
+
+    if n_blocks * rf.sbsz > rf.n_blocks {
+        let sbsz8 = rf.sbsz >> 1;
+        let rp_proj_sz = if have_frame_threading {
+            ((rf.ih8 + 31) & !31) as usize * rp_stride as usize
+        } else {
+            (2 + sbsz8) as usize * n_blocks as usize
+        };
+        let rp_traj_sz = sbsz8 as usize * n_blocks as usize;
+        let rp_map_sz = sbsz8 as usize * n_blocks as usize;
+        let r_above_sz = n_blocks as usize;
+
+        rf.rp_proj = vec![SnglMvBlock { mv: Mv::default(), r#ref: 0 }; rp_proj_sz];
+        for n in 0..7 {
+            rf.rp_traj[n] = vec![Mv::default(); rp_traj_sz];
+        }
+        for n in 0..3 {
+            for m in 0..7 {
+                rf.rp_map[n][m] = vec![TrajMap::default(); rp_map_sz];
+            }
+        }
+        rf.ra = vec![Block::default(); r_above_sz];
+        rf.n_blocks = n_blocks * rf.sbsz;
+    }
+
+    let poc = frm_hdr.frame_offset as i32;
+    let nbits = seq_hdr.order_hint_n_bits as i32;
+    let n_refs = frm_hdr.n_ref_frames as usize;
+
+    let mut ref2ref = [[0i8; 7]; 7];
+    let mut ref2cur = [[0i8; 7]; 7];
+    let mut refref2curref_idx = [[0i8; 7]; 7];
+    let mut have_ref_sign = [[0u8; 2]; 7];
+
+    for i in 0..n_refs {
+        let poc_diff = get_poc_diff(nbits, ref_poc[i] as i32, poc);
+        rf.ref_sign[i] = (poc_diff < 0) as u8;
+        rf.pocdiff[i] = iclip(get_poc_diff(nbits, poc, ref_poc[i] as i32), -31, 31) as i8;
+        rf.abspocdiff[i] = rf.pocdiff[i].unsigned_abs();
+        let rn = if refcnt[i] != 0 { 7 } else { 0 };
+        for n in 0..rn {
+            ref2ref[i][n] = get_poc_diff(nbits, ref_poc[i] as i32, ref_ref_poc[i][n] as i32) as i8;
+            if ref2ref[i][n] > 0 { have_ref_sign[i][0] = 1; }
+            if ref2ref[i][n] < 0 { have_ref_sign[i][1] = 1; }
+            ref2cur[i][n] = get_poc_diff(nbits, poc, ref_ref_poc[i][n] as i32) as i8;
+            let mut m = 0;
+            while m < n_refs {
+                if ref_ref_poc[i][n] == ref_poc[m] { break; }
+                m += 1;
+            }
+            refref2curref_idx[i][n] = if m == n_refs { -1 } else { m as i8 };
+        }
+    }
+
+    let mut flipmask: u64 = 0;
+    for i in 0..n_refs {
+        for n in 0..n_refs {
+            let flip = if rf.ref_sign[i] == rf.ref_sign[n] {
+                (get_poc_diff(nbits, ref_poc[i] as i32, ref_poc[n] as i32) < 0) as u64
+            } else {
+                rf.ref_sign[n] as u64
+            };
+            flipmask |= flip << (i * 8 + n);
+        }
+    }
+    rf.ref_flip = flipmask;
+
+    // tip setup
+    unsafe {
+        rf.tip.r#ref.r[0] = frm_hdr.tip.r#ref[0];
+        rf.tip.r#ref.r[1] = frm_hdr.tip.r#ref[1];
+    }
+    if frm_hdr.tip.frame_mode != 0 {
+        let tip_ref = unsafe { rf.tip.r#ref.r };
+        let tip0poc = ref_poc[tip_ref[0] as usize] as i32;
+        let tip1poc = ref_poc[tip_ref[1] as usize] as i32;
+        let d2 = get_poc_diff(nbits, tip1poc, tip0poc);
+        rf.tip.delta = d2.unsigned_abs() as i8;
+        let d1 = rf.pocdiff[tip_ref[0] as usize] as i32;
+        let dv = DIV_MULT[imin(d2.abs(), 31) as usize] as i32;
+        rf.tip.sf[0] = imin(d1.abs(), 31) * dv;
+        if (d1 < 0) ^ (d2 < 0) { rf.tip.sf[0] *= -1; }
+        let d3 = rf.pocdiff[tip_ref[1] as usize] as i32;
+        rf.tip.sf[1] = imin(d3.abs(), 31) * dv;
+        if (d3 < 0) ^ (d2 < 0) { rf.tip.sf[1] *= -1; }
+    }
+
+    // temporal MV setup
+    rf.n_mfmvs = 0;
+    rf.mfmv_mask = 0;
+    if frm_hdr.use_ref_frame_mvs != 0 && nbits != 0 {
+        let mut order = [0u8; 7];
+        for n in 0..n_refs {
+            let pocdiff = rf.pocdiff[n];
+            let mut m = n;
+            while m > 0 && pocdiff > rf.pocdiff[order[m - 1] as usize] {
+                order[m] = order[m - 1];
+                m -= 1;
+            }
+            order[m] = n as u8;
+        }
+        let mut first_fut = 0usize;
+        while first_fut < n_refs && rf.ref_sign[order[first_fut] as usize] != 0 {
+            first_fut += 1;
+        }
+        let mut topo_order = [0i8; 7];
+        let mut rev_topo_order = [-1i8; 7];
+        let mut topo_cnt = 0i32;
+        for n in 0..n_refs {
+            topo_cnt = topo_insert(topo_cnt, n, &mut topo_order, &mut rev_topo_order,
+                                   &refref2curref_idx, refcnt);
+        }
+        if topo_cnt > 1 {
+            let mut ref_done = [[0u8; 2]; 7];
+            for n in 0..n_refs {
+                if rp_ref[n].is_none() {
+                    ref_done[n][0] = 1;
+                    ref_done[n][1] = 1;
+                }
+            }
+
+            if seq_hdr.tip && (rf.ref_sign[unsafe { rf.tip.r#ref.r[0] } as usize] != 0
+                            || rf.ref_sign[unsafe { rf.tip.r#ref.r[1] } as usize] != 0)
+            {
+                let tip_ref = unsafe { rf.tip.r#ref.r };
+                let o = (rev_topo_order[tip_ref[0] as usize] > rev_topo_order[tip_ref[1] as usize]) as usize;
+                let dir = (get_poc_diff(nbits, ref_poc[tip_ref[1 - o] as usize] as i32,
+                                        ref_poc[tip_ref[o] as usize] as i32) < 0) as u8;
+                let n_mfmvs = rf.n_mfmvs as usize;
+                rf.mfmv[n_mfmvs] = MfmvRef {
+                    r#ref: tip_ref[1 - o] as u8,
+                    tgt: tip_ref[o],
+                    dir,
+                };
+                rf.n_mfmvs += 1;
+                ref_done[tip_ref[1 - o] as usize][dir as usize] = 1;
+            }
+
+            'adj: for n in 0..2usize {
+                let ref1 = if first_fut as i32 - n as i32 > 0 {
+                    let r = order[first_fut - n - 1] as usize;
+                    if have_ref_sign[r][1] != 0 { r as i32 } else { -1 }
+                } else { -1 };
+                let ref2 = if first_fut + n < n_refs {
+                    let r = order[first_fut + n] as usize;
+                    if have_ref_sign[r][0] != 0 { r as i32 } else { -1 }
+                } else { -1 };
+                let mut ord = 0;
+                if ref1 >= 0 && ref2 >= 0 {
+                    let acr1 = abs_closest_ref(&ref2ref[ref1 as usize], &ref2cur[ref1 as usize], false);
+                    let acr2 = abs_closest_ref(&ref2ref[ref2 as usize], &ref2cur[ref2 as usize], true);
+                    ord = (acr1 < acr2) as i32;
+                }
+                if ord != 0 && ref_done[ref1 as usize][1] == 0 {
+                    debug_assert!(ref1 >= 0);
+                    let nm = rf.n_mfmvs as usize;
+                    rf.mfmv[nm] = MfmvRef { r#ref: ref1 as u8, tgt: -1, dir: 1 };
+                    rf.n_mfmvs += 1;
+                    ref_done[ref1 as usize][1] = 1;
+                    if rf.n_mfmvs == 3 { break 'adj; }
+                }
+                if ref2 >= 0 && ref_done[ref2 as usize][0] == 0 {
+                    let nm = rf.n_mfmvs as usize;
+                    rf.mfmv[nm] = MfmvRef { r#ref: ref2 as u8, tgt: -1, dir: 0 };
+                    rf.n_mfmvs += 1;
+                    ref_done[ref2 as usize][0] = 1;
+                    if rf.n_mfmvs == 3 { break 'adj; }
+                }
+                if ord == 0 && ref1 >= 0 && ref_done[ref1 as usize][1] == 0 {
+                    let nm = rf.n_mfmvs as usize;
+                    rf.mfmv[nm] = MfmvRef { r#ref: ref1 as u8, tgt: -1, dir: 1 };
+                    rf.n_mfmvs += 1;
+                    ref_done[ref1 as usize][1] = 1;
+                    if rf.n_mfmvs == 3 { break 'adj; }
+                }
+            }
+
+            if rf.n_mfmvs < 3 && first_fut > 0 {
+                let r = order[first_fut - 1] as usize;
+                if ref_done[r][0] == 0 {
+                    let nm = rf.n_mfmvs as usize;
+                    rf.mfmv[nm] = MfmvRef { r#ref: r as u8, tgt: -1, dir: 0 };
+                    rf.n_mfmvs += 1;
+                    ref_done[r][0] = 1;
+                }
+                if rf.n_mfmvs < 3 && first_fut > 1 {
+                    let r2 = order[first_fut - 2] as usize;
+                    if ref_done[r2][0] == 0 {
+                        let nm = rf.n_mfmvs as usize;
+                        rf.mfmv[nm] = MfmvRef { r#ref: r2 as u8, tgt: -1, dir: 0 };
+                        rf.n_mfmvs += 1;
+                        ref_done[r2][0] = 1;
+                    }
+                }
+            }
+
+            let mut n_idx = topo_cnt as usize;
+            while n_idx > 0 {
+                n_idx -= 1;
+                let r = topo_order[n_idx] as usize;
+                let dir = (rf.pocdiff[r] >= 0) as usize;
+                if ref_done[r][dir] == 0 {
+                    let nm = rf.n_mfmvs as usize;
+                    rf.mfmv[nm] = MfmvRef { r#ref: r as u8, tgt: -1, dir: dir as u8 };
+                    rf.n_mfmvs += 1;
+                    ref_done[r][dir] = 1;
+                    if rf.n_mfmvs == 4 { break; }
+                }
+                if ref_done[r][1 - dir] == 0 {
+                    let nm = rf.n_mfmvs as usize;
+                    rf.mfmv[nm] = MfmvRef { r#ref: r as u8, tgt: -1, dir: (1 - dir) as u8 };
+                    rf.n_mfmvs += 1;
+                    ref_done[r][1 - dir] = 1;
+                    if rf.n_mfmvs == 4 { break; }
+                }
+            }
+
+            for n in 0..7 {
+                if ref_done[n][0] != 0 || ref_done[n][1] != 0 {
+                    rf.mfmv_mask |= 1 << n;
+                }
+            }
+
+            for n in 0..rf.n_mfmvs as usize {
+                let rpoc = ref_poc[rf.mfmv[n].r#ref as usize] as i32;
+                let diff1 = get_poc_diff(nbits, rpoc, frm_hdr.frame_offset as i32);
+                if diff1.abs() > 31 {
+                    rf.mfmv_ref2cur[n] = INVALID_REF2CUR;
+                } else {
+                    rf.mfmv_ref2cur[n] = diff1 as i8;
+                    for m in 0..7 {
+                        let rrpoc = ref_ref_poc[rf.mfmv[n].r#ref as usize][m] as i32;
+                        let diff2 = get_poc_diff(nbits, rpoc, rrpoc);
+                        rf.mfmv_ref2ref[n][m] = if (diff2 + 31) as u32 + 0 < 63 { diff2 as i8 } else { 0 };
+                        let mut l = 0usize;
+                        while l < 7 {
+                            if rrpoc == ref_poc[l] as i32 { break; }
+                            l += 1;
+                        }
+                        rf.mfmv_ref2idx[n][m] = if l == 7 { -1 } else { l as i8 };
+                        let d1 = rf.mfmv_ref2cur[n] as i32;
+                        let d2 = rf.mfmv_ref2ref[n][m] as i32;
+                        let dv = DIV_MULT[imin(d2.abs(), 31) as usize] as i32;
+                        rf.mfmv_ref2sf[n][m][0] = imin(d1.abs(), 31) * dv;
+                        if (d1 < 0) ^ (d2 < 0) { rf.mfmv_ref2sf[n][m][0] *= -1; }
+                        let d3 = d1 - d2;
+                        rf.mfmv_ref2sf[n][m][1] = imin(d3.abs(), 31) * dv;
+                        if (d3 < 0) ^ (d2 > 0) { rf.mfmv_ref2sf[n][m][1] *= -1; }
+                    }
+                }
+            }
+        }
+    }
+
+    rf.use_ref_frame_mvs = if rf.n_mfmvs > 0 { 1 } else { 0 };
+}
+
 pub fn tile_sbrow_init(
     rt: &mut Tile,
     rf: &Frame,
@@ -2714,6 +3000,73 @@ mod tests {
                     "rp_proj[{idx}] should be INVALID_MV");
             }
         }
+    }
+
+    #[test]
+    fn test_init_frame_basic() {
+        use crate::headers::{SequenceHeader, FrameHeader};
+        let mut rf = make_default_frame();
+        let seq_hdr = SequenceHeader {
+            order_hint_n_bits: 4,
+            ..Default::default()
+        };
+        let mut frm_hdr = FrameHeader::default();
+        frm_hdr.width = 256;
+        frm_hdr.height = 128;
+        frm_hdr.n_ref_frames = 3;
+        frm_hdr.sb128 = 0;
+        frm_hdr.tmvp_sample_step = 1;
+
+        let ref_poc = [1, 2, 3, 0, 0, 0, 0];
+        let ref_ref_poc = [[0u8; 7]; 7];
+        let refcnt = [0u8; 7];
+        let rp_ref: [Option<Vec<TemporalBlock>>; 7] = Default::default();
+
+        init_frame(&mut rf, &seq_hdr, &frm_hdr, &ref_poc, &ref_ref_poc,
+                   &refcnt, &rp_ref, false, false);
+
+        assert_eq!(rf.iw8, 32);
+        assert_eq!(rf.ih8, 16);
+        assert_eq!(rf.iw4, 64);
+        assert_eq!(rf.ih4, 32);
+        assert_eq!(rf.sbsz, 16);
+        assert_eq!(rf.mfmv_sbsz8, 8);
+        assert!(!rf.rp_proj.is_empty());
+        assert!(!rf.ra.is_empty());
+        assert_eq!(rf.n_mfmvs, 0);
+        assert_eq!(rf.use_ref_frame_mvs, 0);
+    }
+
+    #[test]
+    fn test_init_frame_with_tmvs() {
+        use crate::headers::{SequenceHeader, FrameHeader};
+        let mut rf = make_default_frame();
+        let seq_hdr = SequenceHeader {
+            order_hint_n_bits: 4,
+            ..Default::default()
+        };
+        let mut frm_hdr = FrameHeader::default();
+        frm_hdr.width = 256;
+        frm_hdr.height = 128;
+        frm_hdr.n_ref_frames = 2;
+        frm_hdr.sb128 = 0;
+        frm_hdr.tmvp_sample_step = 1;
+        frm_hdr.use_ref_frame_mvs = 1;
+
+        let ref_poc = [5, 3, 0, 0, 0, 0, 0];
+        let ref_ref_poc = [[0u8; 7]; 7];
+        let refcnt = [1, 1, 0, 0, 0, 0, 0];
+        let rp_ref: [Option<Vec<TemporalBlock>>; 7] = [
+            Some(vec![TemporalBlock::default()]),
+            Some(vec![TemporalBlock::default()]),
+            None, None, None, None, None,
+        ];
+
+        init_frame(&mut rf, &seq_hdr, &frm_hdr, &ref_poc, &ref_ref_poc,
+                   &refcnt, &rp_ref, false, false);
+
+        assert_eq!(rf.use_ref_frame_mvs, if rf.n_mfmvs > 0 { 1 } else { 0 });
+        assert_eq!(rf.ref_sign[0], 0);
     }
 
     fn make_default_frame() -> Frame {
