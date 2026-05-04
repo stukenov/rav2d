@@ -824,6 +824,27 @@ pub fn mul32(a: i32, b: i32, sh: i32) -> i32 {
     }
 }
 
+pub fn pal_pred_8bpc(
+    dst: &mut [u8],
+    stride: usize,
+    pal: &[u8],
+    idx: &[u8],
+    w: usize,
+    h: usize,
+) {
+    let mut ii = 0;
+    for y in 0..h {
+        let mut x = 0;
+        while x < w {
+            let i = idx[ii];
+            dst[y * stride + x] = pal[(i & 7) as usize];
+            dst[y * stride + x + 1] = pal[(i >> 4) as usize];
+            x += 2;
+            ii += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1216,5 +1237,39 @@ mod tests {
         ipred_z2(&mut dst, 8, &tl, o, 8, 8,
                  135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 8, 8);
         assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_pal_pred_basic() {
+        let pal = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let idx = [0x10u8, 0x32, 0x10, 0x32, 0x10, 0x32, 0x10, 0x32];
+        let mut dst = [0u8; 16];
+        pal_pred_8bpc(&mut dst, 4, &pal, &idx, 4, 4);
+        assert_eq!(dst[0], 10);
+        assert_eq!(dst[1], 20);
+        assert_eq!(dst[2], 30);
+        assert_eq!(dst[3], 40);
+    }
+
+    #[test]
+    fn test_pal_pred_all_same() {
+        let pal = [99u8; 8];
+        let idx = [0u8; 32];
+        let mut dst = [0u8; 64];
+        pal_pred_8bpc(&mut dst, 8, &pal, &idx, 8, 8);
+        for &v in &dst {
+            assert_eq!(v, 99);
+        }
+    }
+
+    #[test]
+    fn test_pal_pred_high_indices() {
+        let pal = [0u8, 10, 20, 30, 40, 50, 60, 70];
+        let idx = [0x77u8; 8];
+        let mut dst = [0u8; 16];
+        pal_pred_8bpc(&mut dst, 4, &pal, &idx, 4, 4);
+        for &v in &dst {
+            assert_eq!(v, 70);
+        }
     }
 }

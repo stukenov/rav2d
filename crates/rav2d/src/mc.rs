@@ -1,4 +1,5 @@
 use crate::intops::iclip;
+use crate::tables::MC_WARP_FILTER;
 
 pub const INTERMEDIATE_BITS_8BPC: i32 = 4;
 pub const PREP_BIAS_8BPC: i32 = 0;
@@ -206,6 +207,109 @@ pub fn sad_nxn_8bpc(
         y += 2;
     }
     sad
+}
+
+fn filter_warp_rnd(src: &[i16], x: usize, f: &[i8; 8], stride: usize, sh: i32) -> i16 {
+    let v = f[0] as i32 * src[x.wrapping_sub(3 * stride)] as i32
+        + f[1] as i32 * src[x.wrapping_sub(2 * stride)] as i32
+        + f[2] as i32 * src[x.wrapping_sub(stride)] as i32
+        + f[3] as i32 * src[x] as i32
+        + f[4] as i32 * src[x + stride] as i32
+        + f[5] as i32 * src[x + 2 * stride] as i32
+        + f[6] as i32 * src[x + 3 * stride] as i32
+        + f[7] as i32 * src[x + 4 * stride] as i32
+        + ((1 << sh) >> 1);
+    (v >> sh) as i16
+}
+
+fn filter_warp_rnd_px(src: &[u8], x: usize, f: &[i8; 8], stride: usize, sh: i32) -> i16 {
+    let v = f[0] as i32 * src[x.wrapping_sub(3 * stride)] as i32
+        + f[1] as i32 * src[x.wrapping_sub(2 * stride)] as i32
+        + f[2] as i32 * src[x.wrapping_sub(stride)] as i32
+        + f[3] as i32 * src[x] as i32
+        + f[4] as i32 * src[x + stride] as i32
+        + f[5] as i32 * src[x + 2 * stride] as i32
+        + f[6] as i32 * src[x + 3 * stride] as i32
+        + f[7] as i32 * src[x + 4 * stride] as i32
+        + ((1 << sh) >> 1);
+    (v >> sh) as i16
+}
+
+pub fn warp_affine_8x8_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    src_off: usize,
+    abcd: &[i16; 4],
+    mut mx: i32,
+    mut my: i32,
+) {
+    let mut mid = [0i16; 15 * 8];
+
+    let mut soff = src_off.wrapping_sub(3 * src_stride);
+    for y in 0..15 {
+        let mut tmx = mx;
+        for x in 0..8 {
+            let fi = (192 + ((tmx + 512) >> 10)) as usize;
+            let f = &MC_WARP_FILTER[fi];
+            mid[y * 8 + x] = filter_warp_rnd_px(src, soff + x, f, 1, 3);
+            tmx += abcd[0] as i32;
+        }
+        soff += src_stride;
+        mx += abcd[1] as i32;
+    }
+
+    for y in 0..8 {
+        let mid_base = (3 + y) * 8;
+        let mut tmy = my;
+        for x in 0..8 {
+            let fi = (192 + ((tmy + 512) >> 10)) as usize;
+            let f = &MC_WARP_FILTER[fi];
+            let v = filter_warp_rnd(&mid, mid_base + x, f, 8, 11);
+            dst[y * dst_stride + x] = iclip(v as i32, 0, 255) as u8;
+            tmy += abcd[2] as i32;
+        }
+        my += abcd[3] as i32;
+    }
+}
+
+pub fn warp_affine_8x8t_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    src_off: usize,
+    abcd: &[i16; 4],
+    mut mx: i32,
+    mut my: i32,
+) {
+    let mut mid = [0i16; 15 * 8];
+
+    let mut soff = src_off.wrapping_sub(3 * src_stride);
+    for y in 0..15 {
+        let mut tmx = mx;
+        for x in 0..8 {
+            let fi = (192 + ((tmx + 512) >> 10)) as usize;
+            let f = &MC_WARP_FILTER[fi];
+            mid[y * 8 + x] = filter_warp_rnd_px(src, soff + x, f, 1, 3);
+            tmx += abcd[0] as i32;
+        }
+        soff += src_stride;
+        mx += abcd[1] as i32;
+    }
+
+    for y in 0..8 {
+        let mid_base = (3 + y) * 8;
+        let mut tmy = my;
+        for x in 0..8 {
+            let fi = (192 + ((tmy + 512) >> 10)) as usize;
+            let f = &MC_WARP_FILTER[fi];
+            tmp[y * tmp_stride + x] = filter_warp_rnd(&mid, mid_base + x, f, 8, 7) - PREP_BIAS_8BPC as i16;
+            tmy += abcd[2] as i32;
+        }
+        my += abcd[3] as i32;
+    }
 }
 
 #[cfg(test)]
@@ -428,5 +532,42 @@ mod tests {
         emu_edge_8bpc(4, 4, 8, 8, -2, -2, &mut dst, 4, &r, 8);
         assert_eq!(dst[0], 200);
         assert_eq!(dst[1], 200);
+    }
+
+    #[test]
+    fn test_warp_affine_identity() {
+        let mut src = vec![0u8; 22 * 22];
+        for y in 0..22 {
+            for x in 0..22 {
+                src[y * 22 + x] = 128;
+            }
+        }
+        let mut dst = [0u8; 64];
+        let abcd = [0i16, 0, 0, 0];
+        let src_off = 3 * 22 + 3;
+        warp_affine_8x8_8bpc(&mut dst, 8, &src, 22, src_off, &abcd, 0, 0);
+        for &v in &dst {
+            assert_eq!(v, 128);
+        }
+    }
+
+    #[test]
+    fn test_warp_affine_no_panic() {
+        let src = vec![100u8; 22 * 22];
+        let mut dst = [0u8; 64];
+        let abcd = [64i16, 0, 0, 64];
+        warp_affine_8x8_8bpc(&mut dst, 8, &src, 22, 3 * 22 + 3, &abcd, 0, 0);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_warp_affine_8x8t_identity() {
+        let src = vec![128u8; 22 * 22];
+        let mut tmp = [0i16; 64];
+        let abcd = [0i16, 0, 0, 0];
+        warp_affine_8x8t_8bpc(&mut tmp, 8, &src, 22, 3 * 22 + 3, &abcd, 0, 0);
+        for &v in &tmp {
+            assert_eq!(v, 2048);
+        }
     }
 }
