@@ -745,6 +745,19 @@ pub fn parse_sequence_header(data: &[u8]) -> Result<SequenceHeader> {
     parse_seq_hdr(&mut gb, false)
 }
 
+pub fn parse_tile_hdr(hdr: &FrameHeader, tile: &mut crate::internal::TileGroup, gb: &mut GetBits) {
+    let n_tiles = hdr.tiling.t.cols as i32 * hdr.tiling.t.rows as i32;
+    let have_tile_pos = if n_tiles > 1 { gb.get_bit() != 0 } else { false };
+    if have_tile_pos {
+        let n_bits = hdr.tiling.t.log2_cols as i32 + hdr.tiling.t.log2_rows as i32;
+        tile.start = gb.get_bits(n_bits) as i32;
+        tile.end = gb.get_bits(n_bits) as i32;
+    } else {
+        tile.start = 0;
+        tile.end = n_tiles - 1;
+    }
+}
+
 pub fn parse_ci_hdr(ci: &mut ContentInterpretation, gb: &mut GetBits) -> Result<()> {
     ci.scan_type = match gb.get_bits(2) {
         0 => ScanType::Unknown,
