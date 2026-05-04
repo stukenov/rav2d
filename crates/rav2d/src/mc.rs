@@ -1,4 +1,4 @@
-use crate::intops::{iclip, imin};
+use crate::intops::{iclip, imax, imin};
 use crate::tables::{EXT_WARP_FILTER, MC_SUBPEL_FILTERS, MC_WARP_FILTER};
 
 pub const INTERMEDIATE_BITS_8BPC: i32 = 4;
@@ -637,6 +637,99 @@ pub fn sad_refine_mv_8bpc(
         }
     }
     (best_dx, best_dy)
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct OpflRegressionData {
+    pub su2: i32,
+    pub suv: i32,
+    pub sv2: i32,
+    pub suw: i32,
+    pub svw: i32,
+}
+
+pub fn opfl_derive_mv_8bpc(
+    out: &mut [OpflRegressionData],
+    p0: &[u8],
+    p0_stride: usize,
+    p1: &[u8],
+    p1_stride: usize,
+    w: usize,
+    h: usize,
+    bs: usize,
+    d: [i8; 2],
+) {
+    let mut tmp0 = [0i16; 64 * 16];
+    let mut tmp1 = [0i16; 64 * 16];
+
+    for y in 0..h {
+        for x in 0..w {
+            let p0p = p0[y * p0_stride + x] as i32;
+            let p1p = p1[y * p1_stride + x] as i32;
+            tmp0[y * 64 + x] = (d[0] as i32 * p0p + d[1] as i32 * p1p) as i16;
+            tmp1[y * 64 + x] = (p0p - p1p) as i16;
+        }
+    }
+
+    let mut gx0 = [0i16; 64 * 16];
+    let mut gy0 = [0i16; 64 * 16];
+
+    let mut bx = 0usize;
+    while bx < w {
+        let x_end = imin(bx as i32 + 16, w as i32) as usize;
+        let min_x = bx & !15;
+        let max_x = x_end - 1;
+        let max_y = h - 1;
+        for y in 0..h {
+            for x in bx..x_end {
+                let pa = tmp0[y * 64 + imax(min_x as i32, x as i32 - 2) as usize] as i32;
+                let pb = tmp0[y * 64 + imax(min_x as i32, x as i32 - 1) as usize] as i32;
+                let pc = tmp0[y * 64 + imin(max_x as i32, x as i32 + 1) as usize] as i32;
+                let pd = tmp0[y * 64 + imin(max_x as i32, x as i32 + 2) as usize] as i32;
+                let e1 = (x + 1 > max_x || x < 1 + min_x) as i32;
+                let x0 = ((pc - pb) * 42 + (pd - pa) * -5) * (1 + e1);
+                gx0[y * 64 + x] = ((x0 + 63 + (x0 > 0) as i32) >> 7) as i16;
+
+                let qa = tmp0[imax(0, y as i32 - 2) as usize * 64 + x] as i32;
+                let qb = tmp0[imax(0, y as i32 - 1) as usize * 64 + x] as i32;
+                let qc = tmp0[imin(max_y as i32, y as i32 + 1) as usize * 64 + x] as i32;
+                let qd = tmp0[imin(max_y as i32, y as i32 + 2) as usize * 64 + x] as i32;
+                let e2 = (y + 1 > max_y || y < 1) as i32;
+                let y0 = ((qc - qb) * 42 + (qd - qa) * -5) * (1 + e2);
+                gy0[y * 64 + x] = ((y0 + 63 + (y0 > 0) as i32) >> 7) as i16;
+            }
+        }
+        bx += 16;
+    }
+
+    let mut oi = 0;
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let mut su2 = (bs * bs) as i32;
+            let mut suv = 0i32;
+            let mut sv2 = (bs * bs) as i32;
+            let mut suw = 0i32;
+            let mut svw = 0i32;
+            for py in y..y + bs {
+                for px in x..x + bs {
+                    let u = gx0[py * 64 + px] as i32;
+                    let v = gy0[py * 64 + px] as i32;
+                    let ww = tmp1[py * 64 + px] as i32;
+                    su2 += u * u;
+                    suv += u * v;
+                    sv2 += v * v;
+                    suw += u * ww;
+                    svw += v * ww;
+                }
+            }
+            out[oi] = OpflRegressionData { su2, suv, sv2, suw, svw };
+            oi += 1;
+            x += bs;
+        }
+        y += bs;
+    }
 }
 
 fn filter_warp_rnd(src: &[i16], x: usize, f: &[i8; 8], stride: usize, sh: i32) -> i16 {
@@ -1552,6 +1645,51 @@ mod tests {
             for x in 0..4 {
                 assert_eq!(tmp[y * 8 + x], (128 << 4) as i16);
             }
+        }
+    }
+
+    #[test]
+    fn test_opfl_derive_mv_uniform() {
+        let p0 = vec![128u8; 64 * 16];
+        let p1 = vec![128u8; 64 * 16];
+        let mut out = [OpflRegressionData::default(); 4];
+        opfl_derive_mv_8bpc(&mut out, &p0, 64, &p1, 64, 16, 16, 8, [1, -1]);
+        for r in &out {
+            assert_eq!(r.suw, 0);
+            assert_eq!(r.svw, 0);
+        }
+    }
+
+    #[test]
+    fn test_opfl_derive_mv_output_count() {
+        let p0 = vec![100u8; 64 * 16];
+        let p1 = vec![100u8; 64 * 16];
+        let mut out = [OpflRegressionData::default(); 8];
+        opfl_derive_mv_8bpc(&mut out, &p0, 64, &p1, 64, 32, 16, 8, [1, -1]);
+        for r in &out[..4] {
+            assert_eq!(r.su2, 64);
+        }
+    }
+
+    #[test]
+    fn test_opfl_derive_mv_nonzero_diff() {
+        let p0 = vec![100u8; 64 * 8];
+        let mut p1 = vec![100u8; 64 * 8];
+        for x in 4..8 { p1[2 * 64 + x] = 200; }
+        let mut out = [OpflRegressionData::default(); 1];
+        opfl_derive_mv_8bpc(&mut out, &p0, 64, &p1, 64, 8, 8, 8, [1, -1]);
+        assert_ne!(out[0].suw, 0);
+    }
+
+    #[test]
+    fn test_opfl_derive_mv_bs4() {
+        let p0 = vec![128u8; 64 * 8];
+        let p1 = vec![128u8; 64 * 8];
+        let mut out = [OpflRegressionData::default(); 4];
+        opfl_derive_mv_8bpc(&mut out, &p0, 64, &p1, 64, 8, 8, 4, [1, -1]);
+        for r in &out {
+            assert_eq!(r.su2, 16);
+            assert_eq!(r.suv, 0);
         }
     }
 }
