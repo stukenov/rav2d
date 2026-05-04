@@ -1019,6 +1019,74 @@ pub fn fill_gap_traj(
     }
 }
 
+pub fn bank_update(
+    bank: &mut MvBank,
+    bs: crate::levels::BlockSize,
+    by4: i32,
+    bx4: i32,
+    sbsz: i32,
+    sb128: bool,
+) {
+    let bsh = 1 + sb128 as i32;
+    let bsz = 1 << bsh;
+    let b_dim = &crate::tables::BLOCK_DIMENSIONS[bs as usize];
+    if (by4 | bx4) & (sbsz - 1) == 0 {
+        let w = imax(1, (b_dim[0] as i32) >> bsh) * imax(1, (b_dim[1] as i32) >> bsh);
+        bank.hits[1] = 0;
+        bank.avail = imax(w, 4) as u8;
+    } else if (by4 | bx4) & (bsz - 1) == 0 {
+        let w = imax(1, (b_dim[0] as i32) >> bsh) * imax(1, (b_dim[1] as i32) >> bsh);
+        bank.hits[1] = 0;
+        bank.avail = (bank.avail as i32 + w) as u8;
+    }
+}
+
+pub fn splat_mv(
+    s_dst: &mut [Block],
+    s_src: &mut Block,
+    mut t_dst: Option<&mut [TemporalBlock]>,
+    t_stride: isize,
+    t_src: &TemporalBlock,
+    bw4: i32,
+    mut bh4: i32,
+) {
+    let mut s_off = 0usize;
+    let mut t_off = 0usize;
+    s_src.oy4 = 0;
+    while bh4 > 0 {
+        s_src.ox4 = 0;
+        let mut x = 0i32;
+        while x < bw4 {
+            s_dst[s_off + x as usize] = *s_src;
+            s_dst[s_off + x as usize].ox4 = s_src.ox4;
+            if bw4 > 1 {
+                s_src.ox4 += 1;
+                s_dst[s_off + x as usize + 1] = *s_src;
+                s_src.ox4 -= 1;
+            }
+            if bh4 > 1 {
+                s_src.oy4 += 1;
+                s_dst[s_off + x as usize + 128] = *s_src;
+                if bw4 > 1 {
+                    s_src.ox4 += 1;
+                    s_dst[s_off + x as usize + 129] = *s_src;
+                    s_src.ox4 -= 1;
+                }
+                s_src.oy4 -= 1;
+            }
+            if let Some(ref mut td) = t_dst.as_deref_mut() {
+                td[t_off + (x >> 1) as usize] = *t_src;
+            }
+            s_src.ox4 += 2;
+            x += 2;
+        }
+        s_off += 128 * 2;
+        t_off = (t_off as isize + t_stride) as usize;
+        s_src.oy4 += 2;
+        bh4 -= 2;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1571,5 +1639,72 @@ mod tests {
         // bottom: avg(10,30)=20, avg(20,40)=30
         assert_eq!(unsafe { rp[mid].c.x }, 20);
         assert_eq!(unsafe { rp[mid].c.y }, 30);
+    }
+
+    #[test]
+    fn test_bank_update_sb_boundary() {
+        let mut bank = MvBank {
+            mv: [[[Mv::default(); 2]; 4]; 9],
+            cwp_idx: [[0; 4]; 3],
+            r#ref: [RefPair::default(); 4],
+            size: [0; 9],
+            idx: [0; 9],
+            hits: [3, 5],
+            avail: 10,
+        };
+
+        bank_update(&mut bank, crate::levels::BlockSize::Bs16x16, 0, 0, 16, false);
+        assert_eq!(bank.hits[1], 0);
+        assert!(bank.avail >= 4);
+    }
+
+    #[test]
+    fn test_bank_update_sub_sb_boundary() {
+        let mut bank = MvBank {
+            mv: [[[Mv::default(); 2]; 4]; 9],
+            cwp_idx: [[0; 4]; 3],
+            r#ref: [RefPair::default(); 4],
+            size: [0; 9],
+            idx: [0; 9],
+            hits: [0, 0],
+            avail: 5,
+        };
+
+        bank_update(&mut bank, crate::levels::BlockSize::Bs8x8, 4, 4, 16, false);
+        assert_eq!(bank.hits[1], 0);
+        assert!(bank.avail > 5);
+    }
+
+    #[test]
+    fn test_bank_update_no_boundary() {
+        let mut bank = MvBank {
+            mv: [[[Mv::default(); 2]; 4]; 9],
+            cwp_idx: [[0; 4]; 3],
+            r#ref: [RefPair::default(); 4],
+            size: [0; 9],
+            idx: [0; 9],
+            hits: [2, 3],
+            avail: 7,
+        };
+
+        bank_update(&mut bank, crate::levels::BlockSize::Bs8x8, 3, 3, 16, false);
+        assert_eq!(bank.hits[1], 3);
+        assert_eq!(bank.avail, 7);
+    }
+
+    #[test]
+    fn test_splat_mv_1x1() {
+        let mut dst = vec![Block::default(); 256];
+        let mut src = Block::default();
+        src.bs = crate::levels::BlockSize::Bs4x4 as u8;
+        src.mf = 1;
+        let t_src = TemporalBlock::default();
+
+        splat_mv(&mut dst, &mut src, None, 0, &t_src, 2, 2);
+
+        assert_eq!(dst[0].bs, crate::levels::BlockSize::Bs4x4 as u8);
+        assert_eq!(dst[1].bs, crate::levels::BlockSize::Bs4x4 as u8);
+        assert_eq!(dst[128].bs, crate::levels::BlockSize::Bs4x4 as u8);
+        assert_eq!(dst[129].bs, crate::levels::BlockSize::Bs4x4 as u8);
     }
 }
