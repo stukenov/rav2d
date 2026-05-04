@@ -865,10 +865,8 @@ pub fn fill_gap_proj(
                     let (ry, rx) = unsafe { (rmv.c.y, rmv.c.x) };
                     sum_x += rx;
                     sum_y += ry;
-                    unsafe {
-                        rp_proj[pos + 1].mv.c.y = (sum_y + (sum_y > 0) as i32) >> 1;
-                        rp_proj[pos + 1].mv.c.x = (sum_x + (sum_x > 0) as i32) >> 1;
-                    }
+                    rp_proj[pos + 1].mv.c.y = (sum_y + (sum_y > 0) as i32) >> 1;
+                    rp_proj[pos + 1].mv.c.x = (sum_x + (sum_x > 0) as i32) >> 1;
                     rp_proj[pos + 1].r#ref = ref_off;
                     sum_n += 1;
                 } else {
@@ -886,10 +884,8 @@ pub fn fill_gap_proj(
                     sum_x += bx;
                     sum_y += by;
                     let (mx, my) = (mvx + bx, mvy + by);
-                    unsafe {
-                        rp_proj[mid].mv.c.y = (my + (my > 0) as i32) >> 1;
-                        rp_proj[mid].mv.c.x = (mx + (mx > 0) as i32) >> 1;
-                    }
+                    rp_proj[mid].mv.c.y = (my + (my > 0) as i32) >> 1;
+                    rp_proj[mid].mv.c.x = (mx + (mx > 0) as i32) >> 1;
                     rp_proj[mid].r#ref = ref_off;
                     sum_n += 1;
                 } else {
@@ -910,17 +906,17 @@ pub fn fill_gap_proj(
                 let diag = (pos as isize + 1 + stride) as usize;
                 match sum_n {
                     1 => rp_proj[diag].mv = rp_proj[pos].mv,
-                    2 => unsafe {
+                    2 => {
                         rp_proj[diag].mv.c.y = (sum_y + (sum_y > 0) as i32) >> 1;
                         rp_proj[diag].mv.c.x = (sum_x + (sum_x > 0) as i32) >> 1;
                     },
-                    3 => unsafe {
+                    3 => {
                         rp_proj[diag].mv.c.y =
                             (sum_y * 85 + 128 - (sum_y < 0) as i32) >> 8;
                         rp_proj[diag].mv.c.x =
                             (sum_x * 85 + 128 - (sum_x < 0) as i32) >> 8;
                     },
-                    4 => unsafe {
+                    4 => {
                         rp_proj[diag].mv.c.y =
                             (sum_y + 1 + (sum_y > 0) as i32) >> 2;
                         rp_proj[diag].mv.c.x =
@@ -966,10 +962,8 @@ pub fn fill_gap_traj(
                     let (by, bx) = unsafe { (rp_traj[bot].c.y, rp_traj[bot].c.x) };
                     sum_x += bx;
                     sum_y += by;
-                    unsafe {
-                        rp_traj[mid].c.y = (sum_y + (sum_y > 0) as i32) >> 1;
-                        rp_traj[mid].c.x = (sum_x + (sum_x > 0) as i32) >> 1;
-                    }
+                    rp_traj[mid].c.y = (sum_y + (sum_y > 0) as i32) >> 1;
+                    rp_traj[mid].c.x = (sum_x + (sum_x > 0) as i32) >> 1;
                     sum_n += 1;
                 } else {
                     rp_traj[mid] = rp_traj[pos];
@@ -981,10 +975,8 @@ pub fn fill_gap_traj(
                     sum_x += rx;
                     sum_y += ry;
                     let (mx, my) = (mvx + rx, mvy + ry);
-                    unsafe {
-                        rp_traj[pos + 1].c.y = (my + (my > 0) as i32) >> 1;
-                        rp_traj[pos + 1].c.x = (mx + (mx > 0) as i32) >> 1;
-                    }
+                    rp_traj[pos + 1].c.y = (my + (my > 0) as i32) >> 1;
+                    rp_traj[pos + 1].c.x = (mx + (mx > 0) as i32) >> 1;
                     sum_n += 1;
                 } else {
                     rp_traj[pos + 1] = rp_traj[pos];
@@ -1001,17 +993,17 @@ pub fn fill_gap_traj(
                 let diag = (pos as isize + 1 + stride) as usize;
                 match sum_n {
                     1 => rp_traj[diag] = rp_traj[pos],
-                    2 => unsafe {
+                    2 => {
                         rp_traj[diag].c.y = (sum_y + (sum_y > 0) as i32) >> 1;
                         rp_traj[diag].c.x = (sum_x + (sum_x > 0) as i32) >> 1;
                     },
-                    3 => unsafe {
+                    3 => {
                         rp_traj[diag].c.y =
                             (sum_y * 85 + 128 - (sum_y < 0) as i32) >> 8;
                         rp_traj[diag].c.x =
                             (sum_x * 85 + 128 - (sum_x < 0) as i32) >> 8;
                     },
-                    4 => unsafe {
+                    4 => {
                         rp_traj[diag].c.y =
                             (sum_y + 1 + (sum_y > 0) as i32) >> 2;
                         rp_traj[diag].c.x =

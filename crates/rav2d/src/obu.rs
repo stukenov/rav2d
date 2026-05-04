@@ -2109,7 +2109,7 @@ pub fn get_ref_frames(
         pocdiff: i8,
         qidx: u16,
         mlayer: u8,
-        res_ratio_log2: i8,
+        _res_ratio_log2: i8,
     }
     let mut ref_info: [Score; 8] = std::array::from_fn(|_| Score {
         score: 0,
@@ -2117,7 +2117,7 @@ pub fn get_ref_frames(
         pocdiff: 0,
         qidx: 0,
         mlayer: 0,
-        res_ratio_log2: 0,
+        _res_ratio_log2: 0,
     });
     let mut sort_idx = [0u8; 8];
     let mut n_refs = 0i32;
@@ -2197,7 +2197,7 @@ pub fn get_ref_frames(
             pocdiff,
             qidx: ref_qidx,
             mlayer: ref_mlayer,
-            res_ratio_log2: res_ratio,
+            _res_ratio_log2: res_ratio,
         };
 
         let mut m = 0usize;
@@ -2644,7 +2644,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             }
             c.frame_hdr = None;
         } else {
-            let seqhdr = c.seq_hdr.as_ref().unwrap();
+            let _seqhdr = c.seq_hdr.as_ref().unwrap();
             let total_tiles = fh.tiling.t.cols as i32 * fh.tiling.t.rows as i32;
             let frame_without_data = fh.tip.frame_mode == 2;
             if c.n_tiles == total_tiles || frame_without_data {

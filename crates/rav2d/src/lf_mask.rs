@@ -354,7 +354,7 @@ pub fn transpose_lossless_mask(
 
 use crate::headers::{FrameHeader, PixelLayout, SequenceHeader};
 use crate::levels::{
-    Av2Block, BlockSize, CompInterPredMode, CompInterType, TxfmSize, N_BS_SIZES, TIP_FRAME,
+    Av2Block, BlockSize, CompInterPredMode, CompInterType, TxfmSize, TIP_FRAME,
 };
 use crate::tables::{BLOCK_DIMENSIONS, MAX_TXFM_SIZE_FOR_BS, TXFM_DIMENSIONS, TX_PART_TBL};
 

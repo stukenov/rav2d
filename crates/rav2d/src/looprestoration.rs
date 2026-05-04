@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn test_backup_row_luma_edges() {
         let stride = 32;
-        let mut src = vec![80u8; stride * 2 + 16];
+        let src = vec![80u8; stride * 2 + 16];
         let mut dst = vec![0u8; 32];
         let o = 6;
         backup_row_luma_8bpc(
@@ -1342,7 +1342,7 @@ mod tests {
         assert_eq!(PC_WIENER_CONFIG[11], [0, 3]);
     }
 
-    fn make_wiener_multi_test_data(w: usize, h: usize, stride: usize)
+    fn make_wiener_multi_test_data(_w: usize, h: usize, stride: usize)
         -> (Vec<u8>, usize, Vec<[u8; 6]>, Vec<u8>, usize, Vec<u8>, usize, Vec<[u16; 4]>, Vec<u16>)
     {
         let p_off = stride + 4;
