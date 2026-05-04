@@ -62,6 +62,29 @@ pub fn backup_row_8bpc(
     }
 }
 
+/// Backup N pixels per row for U rows, right-aligned in a [u8; 6] buffer.
+/// Copies src[off-n..off] into dst[row][6-n..6] per row, advancing by stride.
+pub fn backup_nxu(
+    dst: &mut [[u8; 6]],
+    src: &[u8], src_off: usize,
+    stride: isize,
+    u: usize,
+    n: usize,
+) {
+    let mut off = src_off as isize;
+    for row in 0..u {
+        let s = (off - n as isize) as usize;
+        dst[row][6 - n..6].copy_from_slice(&src[s..s + n]);
+        off += stride;
+    }
+}
+
+/// Copy N contiguous rows (stride * n bytes) from src to dst.
+pub fn copy_n_lines(dst: &mut [u8], src: &[u8], stride: usize, n: usize) {
+    let len = stride * n;
+    dst[..len].copy_from_slice(&src[..len]);
+}
+
 /// Backup a row from LPF buffer with edge extension.
 pub fn backup_row_lpf_8bpc(
     dst: &mut [u8],
@@ -1565,5 +1588,43 @@ mod tests {
                 let _ = dst[y * w + x];
             }
         }
+    }
+
+    #[test]
+    fn test_backup_nxu_3_pixels() {
+        let src: Vec<u8> = (0..32).collect();
+        let stride: isize = 8;
+        let mut dst = [[0u8; 6]; 4];
+        backup_nxu(&mut dst, &src, 5, stride, 4, 3);
+        assert_eq!(dst[0][3..6], src[2..5]);
+        assert_eq!(dst[1][3..6], src[10..13]);
+        assert_eq!(dst[2][3..6], src[18..21]);
+        assert_eq!(dst[3][3..6], src[26..29]);
+    }
+
+    #[test]
+    fn test_backup_nxu_6_pixels() {
+        let src: Vec<u8> = (0..24).collect();
+        let stride: isize = 8;
+        let mut dst = [[0u8; 6]; 2];
+        backup_nxu(&mut dst, &src, 6, stride, 2, 6);
+        assert_eq!(dst[0], [0, 1, 2, 3, 4, 5]);
+        assert_eq!(dst[1], [8, 9, 10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn test_copy_n_lines() {
+        let src: Vec<u8> = (0..30).collect();
+        let mut dst = vec![0u8; 30];
+        copy_n_lines(&mut dst, &src, 10, 3);
+        assert_eq!(&dst[..30], &src[..30]);
+    }
+
+    #[test]
+    fn test_copy_n_lines_single_row() {
+        let src = [1u8, 2, 3, 4, 5];
+        let mut dst = [0u8; 5];
+        copy_n_lines(&mut dst, &src, 5, 1);
+        assert_eq!(dst, [1, 2, 3, 4, 5]);
     }
 }

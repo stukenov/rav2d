@@ -198,6 +198,46 @@ pub fn adjust_strength(strength: i32, var: u32) -> i32 {
     (strength * (4 + i) + 8) >> 4
 }
 
+pub const BACKUP_2X8_Y: u8 = 1 << 0;
+pub const BACKUP_2X8_UV: u8 = 1 << 1;
+
+/// Backup last 2 rows from a single plane for CDEF line buffer.
+/// `height` is the block height for this plane (8 for luma, 8 or 4 for chroma).
+pub fn backup2lines_plane(
+    dst: &mut [u8], dst_off: usize,
+    src: &[u8], src_off: usize,
+    stride: isize,
+    height: usize,
+) {
+    let abs_stride = stride.unsigned_abs();
+    let len = 2 * abs_stride;
+    if stride < 0 {
+        let d = (dst_off as isize + stride) as usize;
+        let s = (src_off as isize + (height as isize - 1) * stride) as usize;
+        dst[d..d + len].copy_from_slice(&src[s..s + len]);
+    } else {
+        let s = src_off + (height - 2) * abs_stride;
+        dst[dst_off..dst_off + len].copy_from_slice(&src[s..s + len]);
+    }
+}
+
+/// Backup a 2-pixel-wide column from a single plane for CDEF.
+/// Saves pixels at (x_off - 2) and (x_off - 1) for `rows` rows.
+pub fn backup2x8_plane(
+    dst: &mut [[u8; 2]],
+    src: &[u8], src_off: usize,
+    stride: isize,
+    x_off: isize,
+    rows: usize,
+) {
+    let mut off = src_off as isize;
+    for y in 0..rows {
+        let s = (off + x_off - 2) as usize;
+        dst[y].copy_from_slice(&src[s..s + 2]);
+        off += stride;
+    }
+}
+
 pub fn cdef_filter_block_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
@@ -622,5 +662,59 @@ mod tests {
                 assert_eq!(dst[dst_off + y * stride + x], 128);
             }
         }
+    }
+
+    #[test]
+    fn test_backup2lines_plane_positive_stride() {
+        let stride: isize = 16;
+        let mut src = vec![0u8; 8 * stride as usize];
+        for y in 0..8 {
+            for x in 0..16 {
+                src[y * stride as usize + x] = (y * 16 + x) as u8;
+            }
+        }
+        let mut dst = vec![0u8; 2 * stride as usize];
+        backup2lines_plane(&mut dst, 0, &src, 0, stride, 8);
+        assert_eq!(&dst[0..16], &src[6 * 16..7 * 16]);
+        assert_eq!(&dst[16..32], &src[7 * 16..8 * 16]);
+    }
+
+    #[test]
+    fn test_backup2lines_plane_i420_chroma() {
+        let stride: isize = 8;
+        let mut src = vec![0u8; 4 * stride as usize];
+        for i in 0..src.len() { src[i] = i as u8; }
+        let mut dst = vec![0u8; 2 * stride as usize];
+        backup2lines_plane(&mut dst, 0, &src, 0, stride, 4);
+        assert_eq!(&dst[0..8], &src[16..24]);
+        assert_eq!(&dst[8..16], &src[24..32]);
+    }
+
+    #[test]
+    fn test_backup2x8_plane() {
+        let stride: isize = 16;
+        let mut src = vec![0u8; 8 * stride as usize];
+        for y in 0..8 {
+            for x in 0..16 {
+                src[y * stride as usize + x] = (y * 16 + x) as u8;
+            }
+        }
+        let mut dst = [[0u8; 2]; 8];
+        backup2x8_plane(&mut dst, &src, 0, stride, 6, 8);
+        for y in 0..8 {
+            assert_eq!(dst[y][0], src[y * 16 + 4]);
+            assert_eq!(dst[y][1], src[y * 16 + 5]);
+        }
+    }
+
+    #[test]
+    fn test_backup2x8_plane_chroma_4rows() {
+        let stride: isize = 8;
+        let mut src = vec![0u8; 4 * stride as usize];
+        for i in 0..src.len() { src[i] = (i + 1) as u8; }
+        let mut dst = [[0u8; 2]; 8];
+        backup2x8_plane(&mut dst[..4], &src, 0, stride, 4, 4);
+        assert_eq!(dst[0], [3, 4]);
+        assert_eq!(dst[1], [11, 12]);
     }
 }
