@@ -1,6 +1,7 @@
 use crate::intops::{apply_sign, iclip, imax, imin, umin, ulog2};
 use crate::headers::PixelLayout;
-use crate::levels::{IntraPredMode, Mv, N_BS_SIZES};
+use crate::levels::{IntraPredMode, Mv, RefPair, N_BS_SIZES};
+use crate::refmvs::{self, TemporalBlock, INVALID_TRAJ};
 use crate::mc::OpflRegressionData;
 use crate::msac::MsacContext;
 use crate::tables::{BLOCK_DIMENSIONS, DIV_RECIP, TxfmInfo, MODE_TO_ANGLE_MAP};
@@ -482,6 +483,48 @@ pub fn scaleup_8pel_mv_for_chroma(mv: &mut [Mv; 2], layout: PixelLayout) {
     }
 }
 
+pub fn update_temporal(
+    t_dst: &mut [TemporalBlock],
+    t_stride: usize,
+    w8: usize,
+    h8: usize,
+    r: RefPair,
+    mv: &[Mv; 2],
+    swap: bool,
+) {
+    let s0 = swap as usize;
+    let s1 = (!swap) as usize;
+    let mut t_src = TemporalBlock::default();
+    unsafe {
+        t_src.r#ref.r[0] = r.r[s0];
+        t_src.r#ref.r[1] = r.r[s1];
+    }
+    t_src.mv = refmvs::TemporalBlockMv {
+        mv: [refmvs::quantize_mv(mv[s0]), refmvs::quantize_mv(mv[s1])],
+    };
+    unsafe {
+        let mv0_n = t_src.mv.mv[0].n;
+        let mv1_n = t_src.mv.mv[1].n;
+        if mv0_n == INVALID_TRAJ {
+            if mv1_n == INVALID_TRAJ {
+                t_src.r#ref.pair = -1;
+            } else {
+                t_src.mv.mv[0] = t_src.mv.mv[1];
+                t_src.r#ref.r[0] = t_src.r#ref.r[1];
+            }
+        } else if mv1_n == INVALID_TRAJ {
+            t_src.mv.mv[1] = t_src.mv.mv[0];
+            t_src.r#ref.r[1] = t_src.r#ref.r[0];
+        }
+    }
+    for y in 0..h8 {
+        let row = &mut t_dst[y * t_stride..y * t_stride + w8];
+        for x in 0..w8 {
+            row[x] = t_src;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,6 +983,57 @@ mod tests {
         unsafe {
             assert_eq!(mv[0].c.x, 10);
             assert_eq!(mv[0].c.y, 20);
+        }
+    }
+
+    #[test]
+    fn test_update_temporal_basic() {
+        let mut dst = vec![TemporalBlock::default(); 4];
+        let r = RefPair { r: [1, 2] };
+        let mv = [make_mv(10, 20), make_mv(30, 40)];
+        update_temporal(&mut dst, 2, 2, 2, r, &mv, false);
+        unsafe {
+            assert_eq!(dst[0].r#ref.r[0], 1);
+            assert_eq!(dst[0].r#ref.r[1], 2);
+            assert_eq!(dst[3].r#ref.r[0], 1);
+        }
+    }
+
+    #[test]
+    fn test_update_temporal_swap() {
+        let mut dst = vec![TemporalBlock::default(); 2];
+        let r = RefPair { r: [1, 2] };
+        let mv = [make_mv(10, 20), make_mv(30, 40)];
+        update_temporal(&mut dst, 2, 1, 1, r, &mv, true);
+        unsafe {
+            assert_eq!(dst[0].r#ref.r[0], 2);
+            assert_eq!(dst[0].r#ref.r[1], 1);
+        }
+    }
+
+    #[test]
+    fn test_update_temporal_both_invalid() {
+        let mut dst = vec![TemporalBlock::default(); 1];
+        let r = RefPair { r: [1, 2] };
+        let mv0 = Mv { n: 0x80008000 };
+        let mv = [mv0, mv0];
+        update_temporal(&mut dst, 1, 1, 1, r, &mv, false);
+        unsafe {
+            assert_eq!(dst[0].r#ref.pair, -1);
+        }
+    }
+
+    #[test]
+    fn test_update_temporal_first_invalid() {
+        let mut dst = vec![TemporalBlock::default(); 1];
+        let r = RefPair { r: [1, 2] };
+        let mv_inv = Mv { n: 0x80008000 };
+        let mv_ok = make_mv(10, 20);
+        let mv = [mv_inv, mv_ok];
+        update_temporal(&mut dst, 1, 1, 1, r, &mv, false);
+        unsafe {
+            assert_eq!(dst[0].r#ref.r[0], 2);
+            assert_eq!(dst[0].r#ref.r[1], 2);
         }
     }
 }
