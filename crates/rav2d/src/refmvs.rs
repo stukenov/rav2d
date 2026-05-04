@@ -834,6 +834,199 @@ pub fn smoothen(
     }
 }
 
+pub fn fill_gap_proj(
+    rp_proj: &mut [SnglMvBlock],
+    stride: isize,
+    col_start8: i32, col_end8: i32,
+    row_start8: i32, row_end8: i32,
+    mfmv_sbsz8: i32, sbsz8: i32,
+) {
+    let mut sx = col_start8;
+    while sx < col_end8 {
+        let xend = imin(col_end8, sx + mfmv_sbsz8);
+        let mut y = row_start8;
+        while y < row_end8 {
+            let ystart = y & !(mfmv_sbsz8 - 1);
+            let yend = imin(ystart + mfmv_sbsz8, row_end8);
+            let pos_base = ((y & (sbsz8 - 1)) as isize) * stride;
+            let mut x = sx;
+            while x < xend {
+                let pos = (pos_base + x as isize) as usize;
+                let (mvy, mvx) = unsafe { (rp_proj[pos].mv.c.y, rp_proj[pos].mv.c.x) };
+                if mvy == INVALID_MV { x += 2; continue; }
+                let (mut sum_y, mut sum_x, mut sum_n) = (mvy, mvx, 1i32);
+                let ref_off = rp_proj[pos].r#ref;
+
+                let have_right = x + 2 < xend;
+                if have_right && unsafe { rp_proj[pos + 2].mv.c.y } != INVALID_MV {
+                    let right_ref = rp_proj[pos + 2].r#ref;
+                    let rmv = mv_projection(
+                        rp_proj[pos + 2].mv, ref_off as i32, right_ref as i32, -2047, 2047);
+                    let (ry, rx) = unsafe { (rmv.c.y, rmv.c.x) };
+                    sum_x += rx;
+                    sum_y += ry;
+                    unsafe {
+                        rp_proj[pos + 1].mv.c.y = (sum_y + (sum_y > 0) as i32) >> 1;
+                        rp_proj[pos + 1].mv.c.x = (sum_x + (sum_x > 0) as i32) >> 1;
+                    }
+                    rp_proj[pos + 1].r#ref = ref_off;
+                    sum_n += 1;
+                } else {
+                    rp_proj[pos + 1] = rp_proj[pos];
+                }
+
+                let have_bottom = y + 2 < yend;
+                let bot = (pos as isize + 2 * stride) as usize;
+                let mid = (pos as isize + stride) as usize;
+                if have_bottom && unsafe { rp_proj[bot].mv.c.y } != INVALID_MV {
+                    let bot_ref = rp_proj[bot].r#ref;
+                    let bmv = mv_projection(
+                        rp_proj[bot].mv, ref_off as i32, bot_ref as i32, -2047, 2047);
+                    let (by, bx) = unsafe { (bmv.c.y, bmv.c.x) };
+                    sum_x += bx;
+                    sum_y += by;
+                    let (mx, my) = (mvx + bx, mvy + by);
+                    unsafe {
+                        rp_proj[mid].mv.c.y = (my + (my > 0) as i32) >> 1;
+                        rp_proj[mid].mv.c.x = (mx + (mx > 0) as i32) >> 1;
+                    }
+                    rp_proj[mid].r#ref = ref_off;
+                    sum_n += 1;
+                } else {
+                    rp_proj[mid] = rp_proj[pos];
+                }
+
+                if have_right && have_bottom {
+                    let br = (pos as isize + 2 * (1 + stride)) as usize;
+                    if unsafe { rp_proj[br].mv.c.y } != INVALID_MV {
+                        let br_ref = rp_proj[br].r#ref;
+                        let brmv = mv_projection(
+                            rp_proj[br].mv, ref_off as i32, br_ref as i32, -2047, 2047);
+                        sum_x += unsafe { brmv.c.x };
+                        sum_y += unsafe { brmv.c.y };
+                        sum_n += 1;
+                    }
+                }
+                let diag = (pos as isize + 1 + stride) as usize;
+                match sum_n {
+                    1 => rp_proj[diag].mv = rp_proj[pos].mv,
+                    2 => unsafe {
+                        rp_proj[diag].mv.c.y = (sum_y + (sum_y > 0) as i32) >> 1;
+                        rp_proj[diag].mv.c.x = (sum_x + (sum_x > 0) as i32) >> 1;
+                    },
+                    3 => unsafe {
+                        rp_proj[diag].mv.c.y =
+                            (sum_y * 85 + 128 - (sum_y < 0) as i32) >> 8;
+                        rp_proj[diag].mv.c.x =
+                            (sum_x * 85 + 128 - (sum_x < 0) as i32) >> 8;
+                    },
+                    4 => unsafe {
+                        rp_proj[diag].mv.c.y =
+                            (sum_y + 1 + (sum_y > 0) as i32) >> 2;
+                        rp_proj[diag].mv.c.x =
+                            (sum_x + 1 + (sum_x > 0) as i32) >> 2;
+                    },
+                    _ => unreachable!(),
+                }
+                rp_proj[diag].r#ref = ref_off;
+                x += 2;
+            }
+            y += 2;
+        }
+        sx += mfmv_sbsz8;
+    }
+}
+
+pub fn fill_gap_traj(
+    rp_traj: &mut [Mv],
+    stride: isize,
+    col_start8: i32, col_end8: i32,
+    row_start8: i32, row_end8: i32,
+    mfmv_sbsz8: i32, sbsz8: i32,
+) {
+    let mut sx = col_start8;
+    while sx < col_end8 {
+        let xend = imin(col_end8, sx + mfmv_sbsz8);
+        let mut y = row_start8;
+        while y < row_end8 {
+            let ystart = y & !(mfmv_sbsz8 - 1);
+            let yend = imin(ystart + mfmv_sbsz8, row_end8);
+            let pos_base = ((y & (sbsz8 - 1)) as isize) * stride;
+            let mut x = sx;
+            while x < xend {
+                let pos = (pos_base + x as isize) as usize;
+                let (mvy, mvx) = unsafe { (rp_traj[pos].c.y, rp_traj[pos].c.x) };
+                if mvy == INVALID_MV { x += 2; continue; }
+                let (mut sum_y, mut sum_x, mut sum_n) = (mvy, mvx, 1i32);
+
+                let have_bottom = y + 2 < yend;
+                let bot = (pos as isize + 2 * stride) as usize;
+                let mid = (pos as isize + stride) as usize;
+                if have_bottom && unsafe { rp_traj[bot].c.y } != INVALID_MV {
+                    let (by, bx) = unsafe { (rp_traj[bot].c.y, rp_traj[bot].c.x) };
+                    sum_x += bx;
+                    sum_y += by;
+                    unsafe {
+                        rp_traj[mid].c.y = (sum_y + (sum_y > 0) as i32) >> 1;
+                        rp_traj[mid].c.x = (sum_x + (sum_x > 0) as i32) >> 1;
+                    }
+                    sum_n += 1;
+                } else {
+                    rp_traj[mid] = rp_traj[pos];
+                }
+
+                let have_right = x + 2 < xend;
+                if have_right && unsafe { rp_traj[pos + 2].c.y } != INVALID_MV {
+                    let (ry, rx) = unsafe { (rp_traj[pos + 2].c.y, rp_traj[pos + 2].c.x) };
+                    sum_x += rx;
+                    sum_y += ry;
+                    let (mx, my) = (mvx + rx, mvy + ry);
+                    unsafe {
+                        rp_traj[pos + 1].c.y = (my + (my > 0) as i32) >> 1;
+                        rp_traj[pos + 1].c.x = (mx + (mx > 0) as i32) >> 1;
+                    }
+                    sum_n += 1;
+                } else {
+                    rp_traj[pos + 1] = rp_traj[pos];
+                }
+
+                if have_right && have_bottom {
+                    let br = (pos as isize + 2 * (1 + stride)) as usize;
+                    if unsafe { rp_traj[br].c.y } != INVALID_MV {
+                        sum_x += unsafe { rp_traj[br].c.x };
+                        sum_y += unsafe { rp_traj[br].c.y };
+                        sum_n += 1;
+                    }
+                }
+                let diag = (pos as isize + 1 + stride) as usize;
+                match sum_n {
+                    1 => rp_traj[diag] = rp_traj[pos],
+                    2 => unsafe {
+                        rp_traj[diag].c.y = (sum_y + (sum_y > 0) as i32) >> 1;
+                        rp_traj[diag].c.x = (sum_x + (sum_x > 0) as i32) >> 1;
+                    },
+                    3 => unsafe {
+                        rp_traj[diag].c.y =
+                            (sum_y * 85 + 128 - (sum_y < 0) as i32) >> 8;
+                        rp_traj[diag].c.x =
+                            (sum_x * 85 + 128 - (sum_x < 0) as i32) >> 8;
+                    },
+                    4 => unsafe {
+                        rp_traj[diag].c.y =
+                            (sum_y + 1 + (sum_y > 0) as i32) >> 2;
+                        rp_traj[diag].c.x =
+                            (sum_x + 1 + (sum_x > 0) as i32) >> 2;
+                    },
+                    _ => unreachable!(),
+                }
+                x += 2;
+            }
+            y += 2;
+        }
+        sx += mfmv_sbsz8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1283,5 +1476,108 @@ mod tests {
         }
         smoothen(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
         assert_ne!(unsafe { rp[0].mv.c.y }, INVALID_MV);
+    }
+
+    fn make_smb(x: i32, y: i32, r: u8) -> SnglMvBlock {
+        SnglMvBlock { mv: Mv { c: MvXY { y, x } }, r#ref: r }
+    }
+
+    fn inv_smb() -> SnglMvBlock {
+        SnglMvBlock { mv: Mv { c: MvXY { y: INVALID_MV, x: 0 } }, r#ref: 0 }
+    }
+
+    fn make_mv(x: i32, y: i32) -> Mv {
+        Mv { c: MvXY { y, x } }
+    }
+
+    fn inv_mv() -> Mv {
+        Mv { c: MvXY { y: INVALID_MV, x: 0 } }
+    }
+
+    #[test]
+    fn test_fill_gap_proj_skip_invalid() {
+        let stride: isize = 4;
+        let mut rp = vec![inv_smb(); 16];
+        fill_gap_proj(&mut rp, stride, 0, 4, 0, 4, 4, 4);
+        for i in 0..16 {
+            assert_eq!(unsafe { rp[i].mv.c.y }, INVALID_MV);
+        }
+    }
+
+    #[test]
+    fn test_fill_gap_proj_single_valid() {
+        let stride: isize = 4;
+        let mut rp = vec![inv_smb(); 16];
+        rp[0] = make_smb(10, 20, 1);
+        fill_gap_proj(&mut rp, stride, 0, 4, 0, 4, 4, 4);
+        // pos=0 valid, no right/bottom → all neighbors copy from pos=0
+        assert_eq!(unsafe { rp[1].mv.c.x }, 10);
+        assert_eq!(unsafe { rp[1].mv.c.y }, 20);
+        let mid = stride as usize;
+        assert_eq!(unsafe { rp[mid].mv.c.x }, 10);
+        assert_eq!(unsafe { rp[mid].mv.c.y }, 20);
+        let diag = (1 + stride) as usize;
+        assert_eq!(unsafe { rp[diag].mv.c.x }, 10);
+        assert_eq!(unsafe { rp[diag].mv.c.y }, 20);
+    }
+
+    #[test]
+    fn test_fill_gap_proj_two_neighbors() {
+        let stride: isize = 4;
+        let mut rp = vec![inv_smb(); 16];
+        rp[0] = make_smb(10, 20, 1);
+        rp[2] = make_smb(30, 40, 1); // same ref → projection is identity
+        fill_gap_proj(&mut rp, stride, 0, 4, 0, 4, 4, 4);
+        // right neighbor valid with same ref: avg(10,30)=20, avg(20,40)=30
+        assert_eq!(unsafe { rp[1].mv.c.x }, 20);
+        assert_eq!(unsafe { rp[1].mv.c.y }, 30);
+    }
+
+    #[test]
+    fn test_fill_gap_traj_skip_invalid() {
+        let stride: isize = 4;
+        let mut rp = vec![inv_mv(); 16];
+        fill_gap_traj(&mut rp, stride, 0, 4, 0, 4, 4, 4);
+        for i in 0..16 {
+            assert_eq!(unsafe { rp[i].c.y }, INVALID_MV);
+        }
+    }
+
+    #[test]
+    fn test_fill_gap_traj_single_valid() {
+        let stride: isize = 4;
+        let mut rp = vec![inv_mv(); 16];
+        rp[0] = make_mv(10, 20);
+        fill_gap_traj(&mut rp, stride, 0, 4, 0, 4, 4, 4);
+        assert_eq!(unsafe { rp[1].c.x }, 10);
+        assert_eq!(unsafe { rp[1].c.y }, 20);
+        let mid = stride as usize;
+        assert_eq!(unsafe { rp[mid].c.x }, 10);
+        assert_eq!(unsafe { rp[mid].c.y }, 20);
+    }
+
+    #[test]
+    fn test_fill_gap_traj_right_neighbor() {
+        let stride: isize = 4;
+        let mut rp = vec![inv_mv(); 16];
+        rp[0] = make_mv(10, 20);
+        rp[2] = make_mv(30, 40);
+        fill_gap_traj(&mut rp, stride, 0, 4, 0, 4, 4, 4);
+        // right: avg of original + right = avg(10,30)=20, avg(20,40)=30
+        assert_eq!(unsafe { rp[1].c.x }, 20);
+        assert_eq!(unsafe { rp[1].c.y }, 30);
+    }
+
+    #[test]
+    fn test_fill_gap_traj_bottom_neighbor() {
+        let stride: isize = 4;
+        let mut rp = vec![inv_mv(); 16];
+        rp[0] = make_mv(10, 20);
+        rp[(2 * stride) as usize] = make_mv(30, 40);
+        fill_gap_traj(&mut rp, stride, 0, 2, 0, 4, 4, 4);
+        let mid = stride as usize;
+        // bottom: avg(10,30)=20, avg(20,40)=30
+        assert_eq!(unsafe { rp[mid].c.x }, 20);
+        assert_eq!(unsafe { rp[mid].c.y }, 30);
     }
 }
