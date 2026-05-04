@@ -4,6 +4,7 @@ use crate::levels::INVALID_MV;
 use crate::levels::{Mv, MvXY, RefPair};
 
 pub const INVALID_TRAJ: u16 = 0x8080;
+pub const INVALID_REF2CUR: i8 = -32;
 
 static DIV_MULT: [u16; 32] = [
        0, 16384, 8192, 5461, 4096, 3276, 2730, 2340,
@@ -287,6 +288,9 @@ pub struct Frame {
     pub rp: Vec<TemporalBlock>,
     pub rp_stride: isize,
     pub rp_proj: Vec<SnglMvBlock>,
+    pub rp_traj: [Vec<Mv>; 7],
+    pub rp_map: [[Vec<TrajMap>; 7]; 3],
+    pub ra: Vec<Block>,
     pub have_threading: bool,
     pub have_frame_threading: bool,
 }
@@ -2307,6 +2311,8 @@ mod tests {
             mfmv_ref2idx: [[0; 7]; 4], mfmv_ref2sf: [[[0; 2]; 7]; 4],
             n_mfmvs: 0, n_blocks: 0,
             rp: Vec::new(), rp_stride: 0, rp_proj: Vec::new(),
+            rp_traj: Default::default(), rp_map: Default::default(),
+            ra: Vec::new(),
             have_threading: false, have_frame_threading: false,
         }
     }
