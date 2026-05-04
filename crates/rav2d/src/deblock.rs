@@ -348,6 +348,25 @@ pub fn deblock_v_sb64uv_8bpc(
     }
 }
 
+pub fn transpose_lossless_mask(
+    dst_mask: &mut [u16],
+    src_mask: &[[u16; 4]],
+    x64: usize,
+    ss_hor: u32,
+    ss_ver: u32,
+) {
+    let w = (16 >> ss_hor) as usize;
+    dst_mask[0] = dst_mask[w];
+    let h = 16u32 >> ss_ver;
+    for x in 0..w {
+        let mut col_mask: u32 = 0;
+        for y in 0..h {
+            col_mask |= ((src_mask[y as usize][x64] >> x) as u32 & 1) << y;
+        }
+        dst_mask[x + 1] = col_mask as u16;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +616,36 @@ mod tests {
             &q_thr, &side_thr, false,
         );
         assert_eq!(dst, orig);
+    }
+
+    #[test]
+    fn test_transpose_lossless_mask_basic() {
+        let src_mask = [[0xAAAAu16; 4]; 16];
+        let mut dst_mask = [0u16; 17];
+        transpose_lossless_mask(&mut dst_mask, &src_mask, 0, 0, 0);
+        for x in 0..16u32 {
+            let bit = (0xAAAAu16 >> x) & 1;
+            let expected = if bit != 0 { 0xFFFF } else { 0 };
+            assert_eq!(dst_mask[x as usize + 1], expected);
+        }
+    }
+
+    #[test]
+    fn test_transpose_lossless_mask_ss() {
+        let src_mask = [[0xFFu16; 4]; 8];
+        let mut dst_mask = [0u16; 17];
+        transpose_lossless_mask(&mut dst_mask, &src_mask, 0, 1, 1);
+        for x in 0..8 {
+            assert_eq!(dst_mask[x + 1], 0xFF);
+        }
+    }
+
+    #[test]
+    fn test_transpose_lossless_mask_prev_col() {
+        let src_mask = [[0u16; 4]; 16];
+        let mut dst_mask = [0u16; 17];
+        dst_mask[16] = 42;
+        transpose_lossless_mask(&mut dst_mask, &src_mask, 0, 0, 0);
+        assert_eq!(dst_mask[0], 42);
     }
 }
