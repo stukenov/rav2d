@@ -1814,6 +1814,51 @@ pub fn parse_tile_hdr(hdr: &FrameHeader, tile: &mut crate::internal::TileGroup, 
     }
 }
 
+pub fn parse_fgm_hdr(
+    gb: &mut GetBits,
+    seq_layout: PixelLayout,
+) -> Result<[Option<FilmGrainData>; 8]> {
+    let mask = gb.get_bits(8) as u8;
+    let layout_idx = gb.get_vlc();
+    if layout_idx > 3 {
+        return Err(Dav2dError::InvalidData);
+    }
+    let layout = LAYOUTS[layout_idx as usize];
+    if layout != seq_layout {
+        return Err(Dav2dError::InvalidData);
+    }
+
+    let mut result: [Option<FilmGrainData>; 8] = Default::default();
+    for idx in 0..8 {
+        if mask & (1 << idx) == 0 {
+            continue;
+        }
+        result[idx] = Some(parse_film_grain_data(gb, layout)?);
+    }
+
+    Ok(result)
+}
+
+pub fn parse_cll(gb: &mut GetBits) -> ContentLightLevel {
+    ContentLightLevel {
+        max_content_light_level: gb.get_bits(16) as u16,
+        max_frame_average_light_level: gb.get_bits(16) as u16,
+    }
+}
+
+pub fn parse_mdcv(gb: &mut GetBits) -> MasteringDisplay {
+    let mut md = MasteringDisplay::default();
+    for i in 0..3 {
+        md.primaries[i][0] = gb.get_bits(16) as u16;
+        md.primaries[i][1] = gb.get_bits(16) as u16;
+    }
+    md.white_point[0] = gb.get_bits(16) as u16;
+    md.white_point[1] = gb.get_bits(16) as u16;
+    md.max_luminance = gb.get_bits(32);
+    md.min_luminance = gb.get_bits(32);
+    md
+}
+
 pub fn parse_ci_hdr(ci: &mut ContentInterpretation, gb: &mut GetBits) -> Result<()> {
     ci.scan_type = match gb.get_bits(2) {
         0 => ScanType::Unknown,
@@ -2913,5 +2958,67 @@ mod tests {
         let refs = default_refs();
         let result = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_cll() {
+        // max_content=1000 (0x03E8), max_frame_avg=400 (0x0190)
+        let data = [0x03, 0xE8, 0x01, 0x90];
+        let mut gb = GetBits::new(&data);
+        let cll = parse_cll(&mut gb);
+        assert_eq!(cll.max_content_light_level, 1000);
+        assert_eq!(cll.max_frame_average_light_level, 400);
+    }
+
+    #[test]
+    fn test_parse_mdcv() {
+        let mut data = [0u8; 24];
+        // primaries[0] = (100, 200)
+        data[0] = 0; data[1] = 100;
+        data[2] = 0; data[3] = 200;
+        // primaries[1] = (300, 400)
+        data[4] = 1; data[5] = 44; // 300
+        data[6] = 1; data[7] = 144; // 400
+        // primaries[2] = (0, 0)
+        // white_point = (500, 600)
+        data[12] = 1; data[13] = 244; // 500
+        data[14] = 2; data[15] = 88;  // 600
+        // max_luminance = 1000 (4 bytes big endian from get_bits(32))
+        data[16] = 0; data[17] = 0; data[18] = 0x03; data[19] = 0xE8;
+        // min_luminance = 50
+        data[20] = 0; data[21] = 0; data[22] = 0; data[23] = 50;
+        let mut gb = GetBits::new(&data);
+        let md = parse_mdcv(&mut gb);
+        assert_eq!(md.primaries[0], [100, 200]);
+        assert_eq!(md.max_luminance, 1000);
+        assert_eq!(md.min_luminance, 50);
+    }
+
+    #[test]
+    fn test_parse_fgm_hdr_empty_mask() {
+        // mask=0x00, layout vlc=0 (bit 1) → I420
+        // 0b00000000_1_0000000 = [0x00, 0x80]
+        let data = [0x00, 0x80];
+        let mut gb = GetBits::new(&data);
+        let result = parse_fgm_hdr(&mut gb, PixelLayout::I420).unwrap();
+        assert!(result.iter().all(|x| x.is_none()));
+    }
+
+    #[test]
+    fn test_parse_fgm_hdr_layout_mismatch() {
+        // mask=0x01, layout vlc=0 (bit 1) → I420, but seq is I444
+        let data = [0x01, 0x80, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        assert!(parse_fgm_hdr(&mut gb, PixelLayout::I444).is_err());
+    }
+
+    #[test]
+    fn test_parse_fgm_hdr_invalid_layout() {
+        // mask=0x01, layout vlc > 3 → error
+        // vlc for 4: bits 0,0,1 (n_bits=2), then 2 data bits = 01 → (1<<2)-1+1 = 4
+        // 0b00000001_00101_000 = [0x01, 0x28]
+        let data = [0x01, 0x28, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        assert!(parse_fgm_hdr(&mut gb, PixelLayout::I420).is_err());
     }
 }
