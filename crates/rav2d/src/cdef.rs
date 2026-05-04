@@ -1,4 +1,5 @@
-use crate::intops::{apply_sign, imax, imin, ulog2};
+use crate::intops::{apply_sign, iclip, imax, imin, ulog2};
+use crate::tables::CDEF_DIRECTIONS;
 
 pub const CDEF_HAVE_LEFT: u8 = 1 << 0;
 pub const CDEF_HAVE_RIGHT: u8 = 1 << 1;
@@ -197,6 +198,135 @@ pub fn adjust_strength(strength: i32, var: u32) -> i32 {
     (strength * (4 + i) + 8) >> 4
 }
 
+pub fn cdef_filter_block_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    dst_off: usize,
+    left: &[[u8; 2]],
+    top: &[u8],
+    top_off: usize,
+    bottom: &[u8],
+    bottom_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: usize,
+    damping: i32,
+    w: usize,
+    h: usize,
+    edges: u8,
+) {
+    let tmp_stride: usize = 12;
+    let mut tmp_buf = [0i16; 144];
+    let o = 2 * tmp_stride + 2;
+
+    cdef_padding_8bpc(
+        &mut tmp_buf, tmp_stride,
+        &*dst, dst_stride, dst_off,
+        left, top, top_off, bottom, bottom_off,
+        w, h, edges,
+    );
+
+    let mut dp = dst_off;
+    let mut tp = o;
+
+    if pri_strength != 0 {
+        let pri_tap = 4 - (pri_strength & 1);
+        let pri_shift = imax(0, damping - ulog2(pri_strength as u32) as i32);
+        if sec_strength != 0 {
+            let sec_shift = damping - ulog2(sec_strength as u32) as i32;
+            for _y in 0..h {
+                for x in 0..w {
+                    let px = dst[dp + x] as i32;
+                    let mut sum = 0i32;
+                    let mut max_v = px;
+                    let mut min_v = px;
+                    let mut pri_tap_k = pri_tap;
+                    for k in 0..2 {
+                        let off1 = CDEF_DIRECTIONS[dir + 2][k] as isize;
+                        let p0 = tmp_buf[((tp + x) as isize + off1) as usize] as i32;
+                        let p1 = tmp_buf[((tp + x) as isize - off1) as usize] as i32;
+                        sum += pri_tap_k * constrain(p0 - px, pri_strength, pri_shift);
+                        sum += pri_tap_k * constrain(p1 - px, pri_strength, pri_shift);
+                        pri_tap_k = (pri_tap_k & 3) | 2;
+                        min_v = imin(p0, min_v);
+                        max_v = imax(p0, max_v);
+                        min_v = imin(p1, min_v);
+                        max_v = imax(p1, max_v);
+                        let off2 = CDEF_DIRECTIONS[dir + 4][k] as isize;
+                        let off3 = CDEF_DIRECTIONS[dir][k] as isize;
+                        let s0 = tmp_buf[((tp + x) as isize + off2) as usize] as i32;
+                        let s1 = tmp_buf[((tp + x) as isize - off2) as usize] as i32;
+                        let s2 = tmp_buf[((tp + x) as isize + off3) as usize] as i32;
+                        let s3 = tmp_buf[((tp + x) as isize - off3) as usize] as i32;
+                        let sec_tap = 2 - k as i32;
+                        sum += sec_tap * constrain(s0 - px, sec_strength, sec_shift);
+                        sum += sec_tap * constrain(s1 - px, sec_strength, sec_shift);
+                        sum += sec_tap * constrain(s2 - px, sec_strength, sec_shift);
+                        sum += sec_tap * constrain(s3 - px, sec_strength, sec_shift);
+                        min_v = imin(s0, min_v);
+                        max_v = imax(s0, max_v);
+                        min_v = imin(s1, min_v);
+                        max_v = imax(s1, max_v);
+                        min_v = imin(s2, min_v);
+                        max_v = imax(s2, max_v);
+                        min_v = imin(s3, min_v);
+                        max_v = imax(s3, max_v);
+                    }
+                    dst[dp + x] = iclip(
+                        px + ((sum - (sum < 0) as i32 + 8) >> 4),
+                        min_v, max_v,
+                    ) as u8;
+                }
+                dp += dst_stride;
+                tp += tmp_stride;
+            }
+        } else {
+            for _y in 0..h {
+                for x in 0..w {
+                    let px = dst[dp + x] as i32;
+                    let mut sum = 0i32;
+                    let mut pri_tap_k = pri_tap;
+                    for k in 0..2 {
+                        let off = CDEF_DIRECTIONS[dir + 2][k] as isize;
+                        let p0 = tmp_buf[((tp + x) as isize + off) as usize] as i32;
+                        let p1 = tmp_buf[((tp + x) as isize - off) as usize] as i32;
+                        sum += pri_tap_k * constrain(p0 - px, pri_strength, pri_shift);
+                        sum += pri_tap_k * constrain(p1 - px, pri_strength, pri_shift);
+                        pri_tap_k = (pri_tap_k & 3) | 2;
+                    }
+                    dst[dp + x] = (px + ((sum - (sum < 0) as i32 + 8) >> 4)) as u8;
+                }
+                dp += dst_stride;
+                tp += tmp_stride;
+            }
+        }
+    } else {
+        let sec_shift = damping - ulog2(sec_strength as u32) as i32;
+        for _y in 0..h {
+            for x in 0..w {
+                let px = dst[dp + x] as i32;
+                let mut sum = 0i32;
+                for k in 0..2 {
+                    let off1 = CDEF_DIRECTIONS[dir + 4][k] as isize;
+                    let off2 = CDEF_DIRECTIONS[dir][k] as isize;
+                    let s0 = tmp_buf[((tp + x) as isize + off1) as usize] as i32;
+                    let s1 = tmp_buf[((tp + x) as isize - off1) as usize] as i32;
+                    let s2 = tmp_buf[((tp + x) as isize + off2) as usize] as i32;
+                    let s3 = tmp_buf[((tp + x) as isize - off2) as usize] as i32;
+                    let sec_tap = 2 - k as i32;
+                    sum += sec_tap * constrain(s0 - px, sec_strength, sec_shift);
+                    sum += sec_tap * constrain(s1 - px, sec_strength, sec_shift);
+                    sum += sec_tap * constrain(s2 - px, sec_strength, sec_shift);
+                    sum += sec_tap * constrain(s3 - px, sec_strength, sec_shift);
+                }
+                dst[dp + x] = (px + ((sum - (sum < 0) as i32 + 8) >> 4)) as u8;
+            }
+            dp += dst_stride;
+            tp += tmp_stride;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +492,135 @@ mod tests {
         assert_eq!(tmp[o], 100);
         assert_eq!(tmp[o - 1], i16::MIN);
         assert_eq!(tmp[o - tmp_stride], i16::MIN);
+    }
+
+    fn make_cdef_test_bufs(val: u8, stride: usize, w: usize, h: usize)
+        -> (Vec<u8>, Vec<[u8; 2]>, Vec<u8>, Vec<u8>)
+    {
+        let dst = vec![val; stride * (h + 4)];
+        let left = vec![[val; 2]; h];
+        let top = vec![val; stride * 2 + w + 4];
+        let bottom = vec![val; stride * 2 + w + 4];
+        (dst, left, top, bottom)
+    }
+
+    #[test]
+    fn test_cdef_filter_block_uniform() {
+        let stride = 16;
+        let (mut dst, left, top, bottom) = make_cdef_test_bufs(128, stride, 8, 8);
+        let edges = CDEF_HAVE_TOP | CDEF_HAVE_BOTTOM | CDEF_HAVE_LEFT | CDEF_HAVE_RIGHT;
+        let dst_off = stride + 2;
+        let top_off = 2;
+        let bottom_off = 2;
+        cdef_filter_block_8bpc(
+            &mut dst, stride, dst_off,
+            &left, &top, top_off, &bottom, bottom_off,
+            8, 4, 0, 6, 8, 8, edges,
+        );
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(dst[dst_off + y * stride + x], 128, "pixel ({x},{y}) changed");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cdef_filter_block_pri_only() {
+        let stride = 16;
+        let dst_off = stride + 2;
+        let mut dst = vec![128u8; stride * 12];
+        dst[dst_off + 3 * stride + 3] = 120;
+        let left = vec![[128u8; 2]; 8];
+        let top = vec![128u8; stride * 2 + 12];
+        let bottom = vec![128u8; stride * 2 + 12];
+        let edges = CDEF_HAVE_TOP | CDEF_HAVE_BOTTOM | CDEF_HAVE_LEFT | CDEF_HAVE_RIGHT;
+        let orig_val = dst[dst_off + 3 * stride + 3];
+        cdef_filter_block_8bpc(
+            &mut dst, stride, dst_off,
+            &left, &top, 2, &bottom, 2,
+            8, 0, 0, 6, 8, 8, edges,
+        );
+        assert_ne!(dst[dst_off + 3 * stride + 3], orig_val,
+            "pri filter should change noisy pixel");
+    }
+
+    #[test]
+    fn test_cdef_filter_block_sec_only() {
+        let stride = 16;
+        let dst_off = stride + 2;
+        let mut dst = vec![128u8; stride * 12];
+        dst[dst_off + 3 * stride + 3] = 120;
+        let left = vec![[128u8; 2]; 8];
+        let top = vec![128u8; stride * 2 + 12];
+        let bottom = vec![128u8; stride * 2 + 12];
+        let edges = CDEF_HAVE_TOP | CDEF_HAVE_BOTTOM | CDEF_HAVE_LEFT | CDEF_HAVE_RIGHT;
+        let orig_val = dst[dst_off + 3 * stride + 3];
+        cdef_filter_block_8bpc(
+            &mut dst, stride, dst_off,
+            &left, &top, 2, &bottom, 2,
+            0, 4, 0, 6, 8, 8, edges,
+        );
+        assert_ne!(dst[dst_off + 3 * stride + 3], orig_val,
+            "sec filter should change noisy pixel");
+    }
+
+    #[test]
+    fn test_cdef_filter_block_pri_sec_combined() {
+        let stride = 16;
+        let dst_off = stride + 2;
+        let mut dst = vec![0u8; stride * 12];
+        for y in 0..8 {
+            for x in 0..8 {
+                dst[dst_off + y * stride + x] = ((y * 20 + x * 10) & 0xFF) as u8;
+            }
+        }
+        let mut left_arr: Vec<[u8; 2]> = Vec::new();
+        for y in 0..8 {
+            let v = (y * 20) as u8;
+            left_arr.push([v.wrapping_sub(20), v.wrapping_sub(10)]);
+        }
+        let mut top = vec![0u8; stride * 2 + 12];
+        for x in 0..12 {
+            top[x] = (x * 10) as u8;
+            top[stride + x] = (x * 10) as u8;
+        }
+        let mut bottom = vec![0u8; stride * 2 + 12];
+        for x in 0..12 {
+            bottom[x] = ((8 * 20 + x * 10) & 0xFF) as u8;
+            bottom[stride + x] = ((9 * 20 + x * 10) & 0xFF) as u8;
+        }
+        let edges = CDEF_HAVE_TOP | CDEF_HAVE_BOTTOM | CDEF_HAVE_LEFT | CDEF_HAVE_RIGHT;
+        let orig = dst.clone();
+        cdef_filter_block_8bpc(
+            &mut dst, stride, dst_off,
+            &left_arr, &top, 2, &bottom, 2,
+            8, 4, 3, 6, 8, 8, edges,
+        );
+        let mut changed = false;
+        for y in 0..8 {
+            for x in 0..8 {
+                if dst[dst_off + y * stride + x] != orig[dst_off + y * stride + x] {
+                    changed = true;
+                }
+            }
+        }
+        assert!(changed, "pri+sec combined should modify gradient image");
+    }
+
+    #[test]
+    fn test_cdef_filter_block_no_edges() {
+        let stride = 16;
+        let dst_off = stride + 2;
+        let (mut dst, left, top, bottom) = make_cdef_test_bufs(128, stride, 8, 8);
+        cdef_filter_block_8bpc(
+            &mut dst, stride, dst_off,
+            &left, &top, 2, &bottom, 2,
+            8, 4, 0, 6, 8, 8, 0,
+        );
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(dst[dst_off + y * stride + x], 128);
+            }
+        }
     }
 }
