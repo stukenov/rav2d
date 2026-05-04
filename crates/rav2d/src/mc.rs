@@ -130,6 +130,61 @@ pub fn morph_8bpc(
     }
 }
 
+pub fn emu_edge_8bpc(
+    bw: usize,
+    bh: usize,
+    iw: usize,
+    ih: usize,
+    x: isize,
+    y: isize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    r: &[u8],
+    ref_stride: usize,
+) {
+    let ref_y = iclip(y as i32, 0, ih as i32 - 1) as usize;
+    let ref_x = iclip(x as i32, 0, iw as i32 - 1) as usize;
+    let ref_off = ref_y * ref_stride + ref_x;
+
+    let left_ext = iclip(-x as i32, 0, bw as i32 - 1) as usize;
+    let right_ext = iclip((x + bw as isize - iw as isize) as i32, 0, bw as i32 - 1) as usize;
+    let top_ext = iclip(-y as i32, 0, bh as i32 - 1) as usize;
+    let bottom_ext = iclip((y + bh as isize - ih as isize) as i32, 0, bh as i32 - 1) as usize;
+
+    let center_w = bw - left_ext - right_ext;
+    let center_h = bh - top_ext - bottom_ext;
+
+    let mut roff = ref_off;
+    for cy in 0..center_h {
+        let blk_y = top_ext + cy;
+        let blk_off = blk_y * dst_stride;
+        dst[blk_off + left_ext..blk_off + left_ext + center_w]
+            .copy_from_slice(&r[roff..roff + center_w]);
+        if left_ext > 0 {
+            let fill = dst[blk_off + left_ext];
+            dst[blk_off..blk_off + left_ext].fill(fill);
+        }
+        if right_ext > 0 {
+            let fill = dst[blk_off + left_ext + center_w - 1];
+            dst[blk_off + left_ext + center_w..blk_off + bw].fill(fill);
+        }
+        roff += ref_stride;
+    }
+
+    let first_row_off = top_ext * dst_stride;
+    for ty in 0..top_ext {
+        dst.copy_within(first_row_off..first_row_off + bw, ty * dst_stride);
+    }
+
+    if bottom_ext > 0 {
+        let last_row_start = (top_ext + center_h - 1) * dst_stride;
+        for by in 0..bottom_ext {
+            let dst_start = (top_ext + center_h + by) * dst_stride;
+            dst.copy_within(last_row_start..last_row_start + bw, dst_start);
+        }
+    }
+}
+
 pub fn sad_nxn_8bpc(
     p0: &[u8],
     p0_stride: usize,
@@ -325,5 +380,53 @@ mod tests {
         for &v in &dst {
             assert_eq!(v, 255);
         }
+    }
+
+    #[test]
+    fn test_emu_edge_inside() {
+        let r = vec![42u8; 64];
+        let mut dst = vec![0u8; 16];
+        emu_edge_8bpc(4, 4, 8, 8, 2, 2, &mut dst, 4, &r, 8);
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 4 + x], 42);
+            }
+        }
+    }
+
+    #[test]
+    fn test_emu_edge_left_extend() {
+        let mut r = vec![0u8; 64];
+        for y in 0..8 {
+            r[y * 8] = 99;
+        }
+        let mut dst = vec![0u8; 16];
+        emu_edge_8bpc(4, 4, 8, 8, -2, 0, &mut dst, 4, &r, 8);
+        for y in 0..4 {
+            assert_eq!(dst[y * 4], 99);
+            assert_eq!(dst[y * 4 + 1], 99);
+        }
+    }
+
+    #[test]
+    fn test_emu_edge_top_extend() {
+        let r = vec![77u8; 64];
+        let mut dst = vec![0u8; 16];
+        emu_edge_8bpc(4, 4, 8, 8, 0, -2, &mut dst, 4, &r, 8);
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 4 + x], 77);
+            }
+        }
+    }
+
+    #[test]
+    fn test_emu_edge_corner() {
+        let mut r = vec![50u8; 64];
+        r[0] = 200;
+        let mut dst = vec![0u8; 16];
+        emu_edge_8bpc(4, 4, 8, 8, -2, -2, &mut dst, 4, &r, 8);
+        assert_eq!(dst[0], 200);
+        assert_eq!(dst[1], 200);
     }
 }
