@@ -1611,6 +1611,277 @@ impl CdfContext {
             dmv: DEFAULT_CDF.mv.clone(),
         }
     }
+
+    pub fn shift(&mut self, src: &CdfContext, n_tiles_log2: u32) {
+        let s = n_tiles_log2;
+        visit_mode_kf_entries(|o, n| entry_shift(&mut self.m.data, &src.m.data, o, n, s));
+        visit_coef_entries(|o, n| entry_shift(&mut self.coef.data, &src.coef.data, o, n, s));
+        visit_mv_entries(|o, n| entry_shift(&mut self.dmv.data, &src.dmv.data, o, n, s));
+        visit_mode_nonkf_entries(|o, n| entry_shift(&mut self.m.data, &src.m.data, o, n, s));
+        visit_mv_entries(|o, n| entry_shift(&mut self.mv.data, &src.mv.data, o, n, s));
+    }
+
+    pub fn shift_accumulate(&mut self, src: &CdfContext, n_tiles_log2: u32) {
+        let s = n_tiles_log2;
+        visit_mode_kf_entries(|o, n| entry_shift_acc(&mut self.m.data, &src.m.data, o, n, s));
+        visit_coef_entries(|o, n| entry_shift_acc(&mut self.coef.data, &src.coef.data, o, n, s));
+        visit_mv_entries(|o, n| entry_shift_acc(&mut self.dmv.data, &src.dmv.data, o, n, s));
+        visit_mode_nonkf_entries(|o, n| entry_shift_acc(&mut self.m.data, &src.m.data, o, n, s));
+        visit_mv_entries(|o, n| entry_shift_acc(&mut self.mv.data, &src.mv.data, o, n, s));
+    }
+
+    pub fn reset_count(&mut self, is_key_or_intra: bool) {
+        visit_mode_kf_entries(|o, n| entry_reset_count(&mut self.m.data, o, n));
+        visit_coef_entries(|o, n| entry_reset_count(&mut self.coef.data, o, n));
+        visit_mv_entries(|o, n| entry_reset_count(&mut self.dmv.data, o, n));
+        if !is_key_or_intra {
+            visit_mode_nonkf_entries(|o, n| entry_reset_count(&mut self.m.data, o, n));
+            visit_mv_entries(|o, n| entry_reset_count(&mut self.mv.data, o, n));
+        }
+    }
+
+    pub fn pri_sec_average(
+        &mut self,
+        src1_m: &CdfModeContext, src1_coef: &CdfCoefContext,
+        src1_mv: &CdfMvContext, src1_dmv: &CdfMvContext,
+        src2_m: &CdfModeContext, src2_coef: &CdfCoefContext,
+        src2_mv: &CdfMvContext, src2_dmv: &CdfMvContext,
+    ) {
+        fn avg(dst: &mut [u16], s1: &[u16], s2: &[u16]) {
+            for i in 0..dst.len() {
+                dst[i] = ((s1[i] as u32 * 7 + s2[i] as u32 + 4) >> 3) as u16;
+            }
+        }
+        avg(&mut self.m.data, &src1_m.data, &src2_m.data);
+        avg(&mut self.coef.data, &src1_coef.data, &src2_coef.data);
+        avg(&mut self.mv.data, &src1_mv.data, &src2_mv.data);
+        avg(&mut self.dmv.data, &src1_dmv.data, &src2_dmv.data);
+    }
+}
+
+#[inline(always)]
+fn entry_shift(dst: &mut [u16], src: &[u16], off: usize, n1d: usize, shift: u32) {
+    for n in 0..n1d {
+        dst[off + n] = src[off + n] >> shift;
+    }
+    let cp = off + n1d;
+    let [count, para] = src[cp].to_ne_bytes();
+    dst[cp] = u16::from_ne_bytes([count >> shift, para]);
+}
+
+#[inline(always)]
+fn entry_shift_acc(dst: &mut [u16], src: &[u16], off: usize, n1d: usize, shift: u32) {
+    for n in 0..n1d {
+        dst[off + n] += src[off + n] >> shift;
+    }
+    let cp = off + n1d;
+    let src_count = src[cp].to_ne_bytes()[0];
+    let mut bytes = dst[cp].to_ne_bytes();
+    bytes[0] = bytes[0].wrapping_add(src_count >> shift);
+    dst[cp] = u16::from_ne_bytes(bytes);
+}
+
+#[inline(always)]
+fn entry_reset_count(data: &mut [u16], off: usize, n1d: usize) {
+    let cp = off + n1d;
+    let mut bytes = data[cp].to_ne_bytes();
+    bytes[0] = ((bytes[0] as u16 * 3) >> 2) as u8;
+    data[cp] = u16::from_ne_bytes(bytes);
+}
+
+fn visit_mv_entries(mut f: impl FnMut(usize, usize)) {
+    for j in 0..7usize { f(j * 8, (9 + j) >> 1); }           // shell_lower (variable n1d)
+    for j in 0..7usize { f(56 + j * 8, (10 + j).min(14) >> 1); } // shell_upper (variable n1d)
+    f(112, 1);                                                  // shell_set
+    f(114, 1);                                                  // shell_tip
+    for j in 0..2 { f(116 + j * 2, 1); }                      // shell_offset_low
+    f(120, 1);                                                  // shell_offset_cl2
+    for j in 0..16 { f(122 + j * 2, 1); }                     // shell_offset_hi
+    for j in 0..2 { f(154 + j * 2, 1); }                      // col_component
+    for j in 0..4 { f(158 + j * 2, 1); }                      // col_index
+}
+
+fn visit_mode_kf_entries(mut f: impl FnMut(usize, usize)) {
+    // restoration
+    for j in 0..2 { f(j * 2, 1); }                            // rst_switchable
+    f(6, 1);                                                    // rst_ns_wiener
+    f(4, 1);                                                    // rst_pc_wiener
+    for j in 0..2 { f(8 + j * 2, 1); }                        // wiener_ns_len
+    f(12, 1);                                                   // wiener_ns_sym
+    f(16, 3);                                                   // wiener_ns_cf
+    // partitioning
+    for i in 0..2 { for j in 0..64 { f(20 + i * 128 + j * 2, 1); } }  // part_split
+    for j in 0..8 { f(276 + j * 2, 1); }                               // part_square
+    for i in 0..2 { for j in 0..64 { f(292 + i * 128 + j * 2, 1); } } // part_dir
+    for i in 0..2 { for j in 0..64 { f(548 + i * 128 + j * 2, 1); } } // part_ext
+    for i in 0..2 { for j in 0..64 { f(804 + i * 128 + j * 2, 1); } } // part_4way
+    // intra
+    for j in 0..3 { f(1068 + j * 2, 1); }                    // intrabc
+    f(1074, 1);                                                 // gdf
+    for j in 0..4 { f(1076 + j * 2, 1); }                     // cdef_idx0
+    for j in 0..6 { f(1088 + j * 8, 1 + j); }                 // cdef_idx (variable n1d)
+    for i in 0..3 { for j in 0..4 { f(1136 + i * 8 + j * 2, 1); } } // ccso
+    for j in 0..6 { f(1160 + j * 2, 1); }                     // skip_txfm
+    for j in 0..2 { f(1172 + j * 2, 1); }                     // dpcm
+    for j in 0..2 { f(1176 + j * 2, 1); }                     // dpcm_dir
+    f(1180, 3);                                                 // intra_y_set
+    for j in 0..3 { f(1184 + j * 8, 7); }                     // intra_y_idx0
+    for j in 0..3 { f(1208 + j * 8, 5); }                     // intra_y_idx1
+    for i in 0..4 { for j in 0..6 { f(1232 + i * 12 + j * 2, 1); } } // fsc
+    for j in 0..3 { f(1280 + j * 4, 3); }                     // mrl_index
+    for j in 0..3 { f(1292 + j * 2, 1); }                     // multi_mrl
+    f(1298, 1);                                                 // pal_y
+    f(1304, 6);                                                 // pal_sz
+    for j in 0..3 { f(1312 + j * 2, 1); }                     // dip
+    f(1320, 5);                                                 // dip_mode
+    for j in 0..3 { f(1328 + j * 2, 1); }                     // cfl
+    for j in 0..2 { f(1336 + j * 8, 7); }                     // intra_uv_mode
+    f(1352, 1);                                                 // mhccp
+    for j in 0..4 { f(1356 + j * 4, 2); }                     // mhccp_filter_dir
+    f(1372, 1);                                                 // cfl_type
+    f(1376, 7);                                                 // cfl_sign
+    for j in 0..6 { f(1384 + j * 8, 7); }                     // cfl_alpha
+    for j in 0..4 { f(1432 + j * 4, 2); }                     // pal_idx_identity
+    for k in 0..7 { for j in 0..5 { f(1448 + k * 40 + j * 8, k + 1); } } // pal_idx (variable n1d)
+    f(1728, 1);                                                 // intrabc_mode
+    f(1730, 1);                                                 // intrabc_precision
+    for j in 0..3 { f(1732 + j * 2, 1); }                     // morph_pred
+    // tx
+    for i in 0..4 { for j in 0..2 { f(1738 + i * 4 + j * 2, 1); } } // txsz_lossless
+    for i in 0..2 { for j in 0..2 { for k in 0..9 {
+        f(1754 + i * 36 + j * 18 + k * 2, 1);
+    } } }                                                       // tx_split
+    for i in 0..2 { for j in 0..2 { for k in 0..14 {
+        f(1832 + i * 224 + j * 112 + k * 8, 6);
+    } } }                                                       // tx_part_2d
+    for i in 0..2 { for j in 0..2 { for k in 0..2 {
+        f(2280 + i * 8 + j * 4 + k * 2, 1);
+    } } }                                                       // tx_part_1d
+    f(2296, 1);                                                 // txtp_lossless
+    for j in 0..2 { f(2298 + j * 2, 1); }                     // txtp_long32_dct
+    for j in 0..4 { f(2304 + j * 4, 3); }                     // txtp_intra_short_1d
+    for i in 0..3 { for j in 0..4 { f(2320 + i * 16 + j * 4, 3); } } // txtp_inter_short_1d
+    for j in 0..4 { f(2368 + j * 8, 6); }                     // txtp_ext
+    for j in 0..4 { f(2400 + j * 2, 1); }                     // txtp_ext_reduced
+    for i in 0..2 { for j in 0..3 { for k in 0..4 {
+        f(2408 + i * 24 + j * 8 + k * 2, 1);
+    } } }                                                       // txtp_inter_tx_set
+    for i in 0..2 { for j in 0..3 { f(2456 + i * 24 + j * 8, 7); } } // txtp_inter_set0
+    for j in 0..3 { f(2504 + j * 8, 7); }                     // txtp_inter_set1
+    for j in 0..3 { f(2528 + j * 4, 3); }                     // txtp_inter_set2
+    for i in 0..3 { for j in 0..4 { f(2540 + i * 8 + j * 2, 1); } }  // txtp_inter_dct_idtx
+    for i in 0..3 { for j in 0..4 { f(2564 + i * 16 + j * 4, 3); } } // txtp_inter_dct_idtx_iddct
+    for i in 0..2 { for j in 0..5 { f(2612 + i * 20 + j * 4, 3); } } // stx
+    f(2652, 3);                                                 // stx_set_adst
+    f(2656, 6);                                                 // stx_set
+    f(2664, 6);                                                 // cctx
+    // seg (all-frames)
+    for j in 0..3 { f(2672 + j * 2, 1); }                     // seg_id_ext
+    for i in 0..2 { for j in 0..3 { f(2680 + i * 24 + j * 8, 7); } } // seg_id
+    f(2728, 7);                                                 // delta_q
+}
+
+fn visit_mode_nonkf_entries(mut f: impl FnMut(usize, usize)) {
+    for j in 0..4 { f(1060 + j * 2, 1); }                     // region_type
+    for j in 0..3 { f(2736 + j * 2, 1); }                     // skip_mode
+    for j in 0..3 { f(2742 + j * 2, 1); }                     // skip_mode_drl_idx
+    for j in 0..4 { f(2748 + j * 2, 1); }                     // intra
+    for j in 0..3 { f(2756 + j * 2, 1); }                     // tip
+    for j in 0..5 { f(2762 + j * 2, 1); }                     // comp
+    for i in 0..3 { for j in 0..6 { f(2772 + i * 12 + j * 2, 1); } } // single_ref
+    for i in 0..3 { for j in 0..6 { f(2808 + i * 12 + j * 2, 1); } } // comp0_ref
+    for i in 0..3 { for j in 0..2 { for k in 0..6 {
+        f(2844 + i * 24 + j * 12 + k * 2, 1);
+    } } }                                                       // comp1_ref
+    f(2916, 1);                                                 // tip_mode
+    for j in 0..5 { f(2918 + j * 2, 1); }                     // warp
+    f(2928, 1);                                                 // warp_newmv
+    for j in 0..5 { f(2932 + j * 4, 2); }                     // inter_mode
+    for i in 0..9 { for j in 0..3 { f(2952 + i * 6 + j * 2, 1); } } // amvd
+    for j in 0..2 { f(3006 + j * 2, 1); }                     // bawp
+    for j in 0..3 { f(3010 + j * 2, 1); }                     // bawp_explicit
+    f(3016, 1);                                                 // bawp_explicit_scale
+    for j in 0..3 { f(3018 + j * 2, 1); }                     // warp_extend
+    for j in 0..4 { f(3024 + j * 2, 1); }                     // warp_causal
+    for j in 0..4 { f(3032 + j * 2, 1); }                     // interintra
+    for j in 0..4 { f(3040 + j * 4, 3); }                     // interintra_mode
+    f(3056, 1);                                                 // interintra_wedge
+    f(3060, 3);                                                 // wedge_quad
+    for j in 0..4 { f(3064 + j * 8, 4); }                     // wedge_angle
+    f(3096, 2);                                                 // wedge_dist2
+    f(3100, 3);                                                 // wedge_dist
+    for j in 0..3 { f(3104 + j * 2, 1); }                     // tip_drl_idx
+    f(3112, 2);                                                 // jmvd_amvd_scale_mode
+    f(3120, 4);                                                 // jmvd_scale_mode
+    for i in 0..3 { for j in 0..5 { f(3128 + i * 10 + j * 2, 1); } } // drl_idx
+    for j in 0..3 { f(3158 + j * 2, 1); }                     // mvprec_def
+    for i in 0..2 { for j in 0..3 { f(3164 + i * 12 + j * 4, 2); } } // mvprec_rem
+    for j in 0..3 { f(3188 + j * 2, 1); }                     // warp_ref_idx
+    f(3196, 3);                                                 // amvd_joint
+    for j in 0..2 { f(3200 + j * 8, 7); }                     // amvd_index
+    f(3216, 1);                                                 // warpmv_with_mvd
+    // warp_delta_prec: 23 entries (matches Rust CDF layout, not N_BS_SIZES=31)
+    for j in 0..23 { f(3218 + j * 2, 1); }
+    for i in 0..2 { for j in 0..2 { f(3264 + i * 16 + j * 8, 7); } } // warp_delta_param
+    f(3296, 1);                                                 // warp_delta_sign
+    for j in 0..4 { f(3298 + j * 2, 1); }                     // warp_interintra
+    for j in 0..5 { f(3308 + j * 4, 3); }                     // comp_mode_sameref
+    for j in 0..2 { f(3328 + j * 2, 1); }                     // comp_mode_joint
+    for j in 0..5 { f(3336 + j * 8, 4); }                     // comp_mode
+    for j in 0..2 { f(3376 + j * 2, 1); }                     // opfl
+    for j in 0..11 { f(3380 + j * 2, 1); }                    // refine_mv
+    for j in 0..12 { f(3402 + j * 2, 1); }                    // comp_type_masked
+    f(3426, 1);                                                 // comp_type_weighted
+    for j in 0..4 { f(3428 + j * 2, 1); }                     // cwp_idx
+    for j in 0..8 { f(3436 + j * 4, 2); }                     // filter
+    for j in 0..3 { f(3468 + j * 2, 1); }                     // seg_pred
+}
+
+fn visit_coef_entries(mut f: impl FnMut(usize, usize)) {
+    // skip: [2][5][10][2]
+    for i in 0..2 { for j in 0..5 { for k in 0..10 {
+        f(i * 100 + j * 20 + k * 2, 1);
+    } } }
+    for j in 0..3 { f(200 + j * 8, 4); }                      // eob_bin_16
+    for j in 0..3 { f(224 + j * 8, 5); }                      // eob_bin_32
+    for j in 0..3 { f(248 + j * 8, 6); }                      // eob_bin_64
+    for j in 0..3 { f(272 + j * 8, 7); }                      // eob_bin_128
+    for j in 0..3 { f(296 + j * 8, 7); }                      // eob_bin_256
+    for j in 0..3 { f(320 + j * 8, 7); }                      // eob_bin_512
+    for j in 0..3 { f(344 + j * 8, 7); }                      // eob_bin_1024
+    f(368, 1);                                                  // eob_hi_bit
+    // eob_base_y_tok_hf: [5][4][4]
+    for i in 0..5 { for j in 0..4 { f(372 + i * 16 + j * 4, 2); } }
+    // base_y_tok_hf: [5][20][2][4]
+    for i in 0..5 { for j in 0..20 { for k in 0..2 {
+        f(452 + i * 160 + j * 8 + k * 4, 3);
+    } } }
+    for j in 0..7 { f(1252 + j * 4, 3); }                     // br_y_tok_hf
+    // eob_base_y_tok_lf: [5][4][8]
+    for i in 0..5 { for j in 0..4 { f(1280 + i * 32 + j * 8, 4); } }
+    // base_y_tok_lf: [5][33][2][8]
+    for i in 0..5 { for j in 0..33 { for k in 0..2 {
+        f(1440 + i * 528 + j * 16 + k * 8, 5);
+    } } }
+    for j in 0..14 { f(4080 + j * 4, 3); }                    // br_y_tok_lf
+    // dc_sign: [2][2][3][2]
+    for i in 0..2 { for j in 0..2 { for k in 0..3 {
+        f(4136 + i * 12 + j * 6 + k * 2, 1);
+    } } }
+    // bob_base_y_tok: [3][3][4]
+    for i in 0..3 { for j in 0..3 { f(4160 + i * 12 + j * 4, 2); } }
+    // br_y_tok_idtx: [3][7][4]
+    for i in 0..3 { for j in 0..7 { f(4196 + i * 28 + j * 4, 3); } }
+    // base_y_tok_idtx: [3][7][4]
+    for i in 0..3 { for j in 0..7 { f(4280 + i * 28 + j * 4, 3); } }
+    // sign_idtx: [3][9][2]
+    for i in 0..3 { for j in 0..9 { f(4364 + i * 18 + j * 2, 1); } }
+    for j in 0..12 { f(4418 + j * 2, 1); }                    // skip_v
+    for j in 0..4 { f(4444 + j * 4, 2); }                     // eob_base_uv_tok_hf
+    for j in 0..12 { f(4460 + j * 4, 3); }                    // base_uv_tok_hf
+    for j in 0..4 { f(4508 + j * 4, 3); }                     // br_uv_tok_hf
+    for j in 0..4 { f(4528 + j * 8, 4); }                     // eob_base_uv_tok_lf
+    for j in 0..12 { f(4560 + j * 8, 5); }                    // base_uv_tok_lf
 }
 
 #[cfg(test)]
@@ -1645,5 +1916,164 @@ mod tests {
         let ctx = CdfContext::init_from_defaults(0);
         assert_eq!(ctx.m.data[0], 7226);
         assert_eq!(ctx.coef.data[0], 7009);
+    }
+
+    fn make_count_para(count: u8, para: u8) -> u16 {
+        u16::from_ne_bytes([count, para])
+    }
+
+    #[test]
+    fn test_entry_shift_probs_and_count() {
+        let mut dst = [0u16; 4];
+        let src = [1000, 2000, 3000, make_count_para(80, 5)];
+        entry_shift(&mut dst, &src, 0, 3, 2);
+        assert_eq!(dst[0], 250);
+        assert_eq!(dst[1], 500);
+        assert_eq!(dst[2], 750);
+        let [count, para] = dst[3].to_ne_bytes();
+        assert_eq!(count, 20);
+        assert_eq!(para, 5);
+    }
+
+    #[test]
+    fn test_entry_shift_acc_accumulates() {
+        let mut dst = [100u16, 200, make_count_para(10, 7)];
+        let src = [400u16, 800, make_count_para(40, 7)];
+        entry_shift_acc(&mut dst, &src, 0, 2, 1);
+        assert_eq!(dst[0], 300);
+        assert_eq!(dst[1], 600);
+        let [count, para] = dst[2].to_ne_bytes();
+        assert_eq!(count, 30);
+        assert_eq!(para, 7);
+    }
+
+    #[test]
+    fn test_entry_reset_count() {
+        let mut data = [1000u16, make_count_para(100, 12)];
+        entry_reset_count(&mut data, 0, 1);
+        assert_eq!(data[0], 1000);
+        let [count, para] = data[1].to_ne_bytes();
+        assert_eq!(count, 75);
+        assert_eq!(para, 12);
+    }
+
+    #[test]
+    fn test_visit_mv_entry_count() {
+        let mut count = 0usize;
+        visit_mv_entries(|_off, _n1d| count += 1);
+        assert_eq!(count, 7 + 7 + 1 + 1 + 2 + 1 + 16 + 2 + 4);
+    }
+
+    #[test]
+    fn test_visit_mv_shell_lower_n1d() {
+        let mut entries = Vec::new();
+        visit_mv_entries(|off, n1d| entries.push((off, n1d)));
+        assert_eq!(entries[0], (0, 4));   // shell_lower[0]: (9+0)>>1=4
+        assert_eq!(entries[1], (8, 5));   // shell_lower[1]: (9+1)>>1=5
+        assert_eq!(entries[6], (48, 7));  // shell_lower[6]: (9+6)>>1=7
+    }
+
+    #[test]
+    fn test_visit_mv_no_out_of_bounds() {
+        visit_mv_entries(|off, n1d| {
+            assert!(off + n1d < 168, "MV entry off={off} n1d={n1d} exceeds array size 168");
+        });
+    }
+
+    #[test]
+    fn test_visit_mode_kf_no_out_of_bounds() {
+        visit_mode_kf_entries(|off, n1d| {
+            assert!(off + n1d < 3496, "Mode kf entry off={off} n1d={n1d} exceeds 3496");
+        });
+    }
+
+    #[test]
+    fn test_visit_mode_nonkf_no_out_of_bounds() {
+        visit_mode_nonkf_entries(|off, n1d| {
+            assert!(off + n1d < 3496, "Mode nonkf entry off={off} n1d={n1d} exceeds 3496");
+        });
+    }
+
+    #[test]
+    fn test_visit_coef_no_out_of_bounds() {
+        visit_coef_entries(|off, n1d| {
+            assert!(off + n1d < 4656, "Coef entry off={off} n1d={n1d} exceeds 4656");
+        });
+    }
+
+    #[test]
+    fn test_cdf_shift_from_defaults() {
+        let src = CdfContext::init_from_defaults(0);
+        let mut dst = CdfContext::init_from_defaults(0);
+        dst.shift(&src, 1);
+        assert_eq!(dst.m.data[0], src.m.data[0] >> 1);
+        assert_eq!(dst.coef.data[0], src.coef.data[0] >> 1);
+    }
+
+    #[test]
+    fn test_cdf_shift_accumulate_from_defaults() {
+        let src = CdfContext::init_from_defaults(0);
+        let mut dst = CdfContext::init_from_defaults(0);
+        let orig_m0 = dst.m.data[0];
+        let orig_c0 = dst.coef.data[0];
+        dst.shift_accumulate(&src, 1);
+        assert_eq!(dst.m.data[0], orig_m0 + (src.m.data[0] >> 1));
+        assert_eq!(dst.coef.data[0], orig_c0 + (src.coef.data[0] >> 1));
+    }
+
+    #[test]
+    fn test_cdf_reset_count_keyframe() {
+        let mut ctx = CdfContext::init_from_defaults(0);
+        let cp_before_mv = ctx.mv.data[113]; // shell_set count_para
+        ctx.reset_count(true);
+        assert_eq!(ctx.mv.data[113], cp_before_mv); // mv not touched for kf
+    }
+
+    #[test]
+    fn test_cdf_reset_count_nonkeyframe() {
+        let mut ctx = CdfContext::init_from_defaults(0);
+        ctx.reset_count(false);
+        // both dmv and mv should be processed
+    }
+
+    #[test]
+    fn test_cdf_pri_sec_average() {
+        let s1 = CdfContext::init_from_defaults(0);
+        let s2 = CdfContext::init_from_defaults(1);
+        let mut dst = CdfContext::init_from_defaults(0);
+        dst.pri_sec_average(
+            &s1.m, &s1.coef, &s1.mv, &s1.dmv,
+            &s2.m, &s2.coef, &s2.mv, &s2.dmv,
+        );
+        let expected = ((s1.m.data[0] as u32 * 7 + s2.m.data[0] as u32 + 4) >> 3) as u16;
+        assert_eq!(dst.m.data[0], expected);
+    }
+
+    #[test]
+    fn test_visit_mode_pal_idx_variable_n1d() {
+        let mut pal_entries = Vec::new();
+        visit_mode_kf_entries(|off, n1d| {
+            if off >= 1448 && off < 1448 + 7 * 40 {
+                pal_entries.push((off, n1d));
+            }
+        });
+        assert_eq!(pal_entries.len(), 35); // 7 * 5
+        assert_eq!(pal_entries[0].1, 1);   // k=0: n1d=1
+        assert_eq!(pal_entries[5].1, 2);   // k=1: n1d=2
+        assert_eq!(pal_entries[30].1, 7);  // k=6: n1d=7
+    }
+
+    #[test]
+    fn test_visit_mode_cdef_idx_variable_n1d() {
+        let mut cdef_entries = Vec::new();
+        visit_mode_kf_entries(|off, n1d| {
+            if off >= 1088 && off < 1088 + 6 * 8 {
+                cdef_entries.push((off, n1d));
+            }
+        });
+        assert_eq!(cdef_entries.len(), 6);
+        for j in 0..6 {
+            assert_eq!(cdef_entries[j], (1088 + j * 8, 1 + j));
+        }
     }
 }
