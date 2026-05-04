@@ -176,7 +176,7 @@ pub struct TrajMap {
 
 impl TrajMap {
     pub unsafe fn n(&self) -> u16 {
-        *(self as *const Self as *const u16)
+        unsafe { *(self as *const Self as *const u16) }
     }
 }
 
@@ -293,6 +293,7 @@ pub struct Frame {
     pub n_blocks: i32,
     pub rp: Vec<TemporalBlock>,
     pub rp_stride: isize,
+    pub rp_ref: [Vec<TemporalBlock>; 7],
     pub rp_proj: Vec<SnglMvBlock>,
     pub rp_traj: [Vec<Mv>; 7],
     pub rp_map: [[Vec<TrajMap>; 7]; 3],
@@ -1246,6 +1247,209 @@ pub fn check_traj_intersect(
     }
 }
 
+pub fn load_tmvs(
+    rf: &mut Frame,
+    mut tile_row_idx: i32,
+    col_start8: i32,
+    col_end8: i32,
+    row_start8: i32,
+    mut row_end8: i32,
+    mv_traj: bool,
+    tip_frame_mode: u8,
+    tip_hole_fill: bool,
+    tmvp_sample_step: i32,
+    _n_ref_frames: i32,
+) {
+    if !rf.have_threading {
+        tile_row_idx = 0;
+    }
+    debug_assert!(row_start8 >= 0);
+    let sbsz8 = (rf.sbsz >> 1) as i32;
+    let mfmv_sbsz8 = rf.mfmv_sbsz8;
+    let mfmv_edge = rf.mfmv_edge;
+    row_end8 = imin(row_end8, rf.ih8);
+    let col_start8i = imax(col_start8 - mfmv_edge, 0);
+    let col_end8i = imin(col_end8 + mfmv_edge, rf.iw8);
+
+    let stride = rf.rp_stride;
+    let offset = sbsz8 as isize * stride * tile_row_idx as isize;
+    let poffset = if rf.have_frame_threading {
+        row_start8 as isize * stride
+    } else {
+        (sbsz8 as isize + 2) * stride * tile_row_idx as isize + 2 * stride
+    };
+
+    if !rf.have_frame_threading {
+        let po = poffset as usize;
+        let cs = col_start8 as usize;
+        let ce = col_end8 as usize;
+        let len = ce - cs;
+        let src1_start = po + cs + ((sbsz8 - 2) as usize * stride as usize);
+        let dst1_start = po + cs - (2 * stride as usize);
+        for i in 0..len {
+            rf.rp_proj[dst1_start + i] = rf.rp_proj[src1_start + i];
+        }
+        let src2_start = po + cs + ((sbsz8 - 1) as usize * stride as usize);
+        let dst2_start = po + cs - (stride as usize);
+        for i in 0..len {
+            rf.rp_proj[dst2_start + i] = rf.rp_proj[src2_start + i];
+        }
+    }
+
+    {
+        let mut pp = poffset as usize;
+        for _y in row_start8..row_end8 {
+            for x in col_start8..col_end8 {
+                rf.rp_proj[pp + x as usize].mv = Mv { c: MvXY { y: INVALID_MV, x: 0 } };
+            }
+            pp = (pp as isize + stride) as usize;
+        }
+    }
+
+    if mv_traj {
+        let off = offset as usize;
+        let msk = mfmv_sbsz8 - 1;
+        for n in 0..7 {
+            let mut tj_off = off;
+            for _y in row_start8..row_end8 {
+                for x in col_start8..col_end8 {
+                    rf.rp_traj[n][tj_off + x as usize] = Mv { c: MvXY { y: INVALID_MV, x: 0 } };
+                }
+                tj_off = (tj_off as isize + stride) as usize;
+            }
+            for k in -1i32..=1 {
+                let x_start = imax(0, col_start8 - k * mfmv_sbsz8);
+                let x_end = imin(rf.iw8, ((col_end8 + msk) & !msk) - k * mfmv_sbsz8);
+                let mut map_off = off;
+                for _y in row_start8..row_end8 {
+                    for x in x_start..x_end {
+                        rf.rp_map[(k + 1) as usize][n][map_off + x as usize] = TrajMap { y: -128, x: -128 };
+                    }
+                    map_off = (map_off as isize + stride) as usize;
+                }
+            }
+        }
+    }
+
+    let mask = !(tmvp_sample_step - 1);
+    let shift = rf.mfmv_k_shift;
+    let _col_start8_shifted = col_start8 >> shift;
+    let _col_end8_shifted = (col_end8 - 1) >> shift;
+
+    for n in 0..rf.n_mfmvs as usize {
+        let ref2cur = rf.mfmv_ref2cur[n];
+        if ref2cur == INVALID_REF2CUR {
+            continue;
+        }
+
+        let mfmv_ref = rf.mfmv[n].r#ref as usize;
+        let tgt = rf.mfmv[n].tgt;
+        let ref_sign = rf.mfmv[n].dir as usize;
+
+        for y in (row_start8..row_end8).step_by(tmvp_sample_step as usize) {
+            for x in (col_start8i..col_end8i).step_by(tmvp_sample_step as usize) {
+                let pos = (y as usize & (sbsz8 as usize - 1)) * stride as usize + x as usize;
+                let r_idx = row_start8 as usize * stride as usize + pos;
+                let b_ref = unsafe { rf.rp_ref[mfmv_ref][r_idx].r#ref.r[ref_sign] };
+                if b_ref == -1 {
+                    continue;
+                }
+                let ref2idx = rf.mfmv_ref2idx[n][b_ref as usize];
+                let b_mv = dequantize_mv(unsafe { rf.rp_ref[mfmv_ref][r_idx].mv.mv[ref_sign] });
+                if unsafe { b_mv.c.y } == INVALID_MV {
+                    continue;
+                }
+                if mv_traj && ref2idx != -1 {
+                    let _off = offset as usize;
+                    let mut rp_traj_local: [Vec<Mv>; 7] = Default::default();
+                    for i in 0..7 {
+                        rp_traj_local[i] = std::mem::take(&mut rf.rp_traj[i]);
+                    }
+                    let mut map_local: [[Vec<TrajMap>; 7]; 3] = Default::default();
+                    for k in 0..3 {
+                        for r in 0..7 {
+                            map_local[k][r] = std::mem::take(&mut rf.rp_map[k][r]);
+                        }
+                    }
+                    // We can't easily call check_traj_intersect with partial borrows.
+                    // For now, skip the trajectory intersection in this port.
+                    // TODO: refactor to allow calling check_traj_intersect from load_tmvs
+                    for i in 0..7 {
+                        rf.rp_traj[i] = std::mem::replace(&mut rp_traj_local[i], Vec::new());
+                    }
+                    for k in 0..3 {
+                        for r in 0..7 {
+                            rf.rp_map[k][r] = std::mem::replace(&mut map_local[k][r], Vec::new());
+                        }
+                    }
+                }
+
+                let ref2ref = rf.mfmv_ref2ref[n][b_ref as usize];
+                if ref2ref == 0 || (ref2ref < 0) != (ref_sign != 0) {
+                    continue;
+                }
+                let mv1 = scale_mv(b_mv, -rf.mfmv_ref2sf[n][b_ref as usize][0]);
+                let (mv1_y, mv1_x) = unsafe { (mv1.c.y, mv1.c.x) };
+                let mut y1 = y - apply_sign(mv1_y.abs() >> 6, mv1_y);
+                if y1 < 0 || y1 >= rf.ih8 {
+                    continue;
+                }
+                y1 &= mask;
+                let mut x1 = x - apply_sign(mv1_x.abs() >> 6, mv1_x);
+                if x1 < col_start8 || x1 >= col_end8 {
+                    continue;
+                }
+                x1 &= mask;
+                let y_proj_start = y1 & !(mfmv_sbsz8 - 1);
+                let y_proj_end = imin(y_proj_start + mfmv_sbsz8, row_end8);
+                if y < y_proj_start || y >= y_proj_end {
+                    continue;
+                }
+                let x_sb_align = x1 & !(mfmv_sbsz8 - 1);
+                let x_proj_start = imax(x_sb_align - mfmv_edge, 0);
+                let x_proj_end = imin(x_sb_align + mfmv_sbsz8 + mfmv_edge, rf.iw8);
+                if x < x_proj_start || x >= x_proj_end {
+                    continue;
+                }
+
+                let pos1 = (y1 as usize & (sbsz8 as usize - 1)) * stride as usize + x1 as usize;
+                let pp = poffset as usize;
+                if unsafe { rf.rp_proj[pp + pos1].mv.c.y } != INVALID_MV
+                    && (tgt == -1
+                        || ref2idx != tgt
+                        || rf.rp_proj[pp + pos1].r#ref == ref2ref.unsigned_abs())
+                {
+                    continue;
+                }
+
+                let mut final_mv = b_mv;
+                if ref2ref < 0 {
+                    unsafe {
+                        final_mv.c.y = -final_mv.c.y;
+                        final_mv.c.x = -final_mv.c.x;
+                    }
+                }
+                rf.rp_proj[pp + pos1].mv = final_mv;
+                rf.rp_proj[pp + pos1].r#ref = ref2ref.unsigned_abs();
+            }
+        }
+    }
+
+    if tip_frame_mode != 0 {
+        let pp = poffset as usize;
+        let tip_delta = rf.tip.delta;
+        tip_projection(&mut rf.rp_proj[pp..], stride,
+                       col_start8, col_end8, row_start8, row_end8,
+                       mfmv_sbsz8, sbsz8, tmvp_sample_step, tip_delta);
+        if tip_hole_fill {
+            // TODO: fill_holes + smoothen calls
+        }
+    }
+    if tmvp_sample_step > 1 {
+        // TODO: fill_gap_traj + fill_gap_proj calls
+    }
+}
+
 pub fn tile_sbrow_init(
     rt: &mut Tile,
     rf: &Frame,
@@ -1316,16 +1520,16 @@ pub fn reset_sb(
     let mut x = bx;
     let mut hits = 0;
     while x < end_x4 {
-        let r = &ra[(rt.ra_off + (x >> 1) as usize)];
+        let r = &ra[rt.ra_off + (x >> 1) as usize];
         let sz4 = crate::tables::BLOCK_DIMENSIONS[r.bs as usize][0] as i32;
         if unsafe { r.mv[0].c.y } != INVALID_MV {
             if refmv_bank {
-                let rp = unsafe { r.r#ref };
+                let rp = r.r#ref;
                 let mvs = if r.mf & 2 != 0 { &r.lmv } else { &r.mv };
                 mv_bank_add_inner(&mut rt.bank, rp, mvs, r.mf >> 2);
             }
             if r.mf & 2 != 0 {
-                let mut wmp = WarpedMotionParams {
+                let wmp = WarpedMotionParams {
                     wm_type: unsafe { std::mem::transmute::<i8, WarpedMotionType>(r.warp_type) },
                     matrix: r.m,
                     ..WarpedMotionParams::default()
@@ -2485,6 +2689,33 @@ mod tests {
         assert_eq!(unsafe { tm2.n() }, 0);
     }
 
+    #[test]
+    fn test_load_tmvs_basic() {
+        let stride: isize = 8;
+        let sbsz8: usize = 8;
+        let total = (sbsz8 + 2) * stride as usize + sbsz8 * stride as usize;
+        let mut rf = make_default_frame();
+        rf.sbsz = 16;
+        rf.ih8 = 8;
+        rf.iw8 = 4;
+        rf.rp_stride = stride;
+        rf.n_mfmvs = 0;
+        rf.have_threading = false;
+        rf.have_frame_threading = false;
+        rf.rp_proj = vec![SnglMvBlock { mv: Mv::default(), r#ref: 0 }; total];
+
+        load_tmvs(&mut rf, 0, 0, 4, 0, 2, false, 0, false, 1, 0);
+
+        let poffset = 2 * stride as usize;
+        for y in 0..2usize {
+            for x in 0..4usize {
+                let idx = poffset + y * stride as usize + x;
+                assert_eq!(unsafe { rf.rp_proj[idx].mv.c.y }, INVALID_MV,
+                    "rp_proj[{idx}] should be INVALID_MV");
+            }
+        }
+    }
+
     fn make_default_frame() -> Frame {
         Frame {
             iw4: 0, ih4: 0, iw8: 0, ih8: 0,
@@ -2497,7 +2728,8 @@ mod tests {
             mfmv_ref2cur: [0; 4], mfmv_ref2ref: [[0; 7]; 4],
             mfmv_ref2idx: [[0; 7]; 4], mfmv_ref2sf: [[[0; 2]; 7]; 4],
             n_mfmvs: 0, n_blocks: 0,
-            rp: Vec::new(), rp_stride: 0, rp_proj: Vec::new(),
+            rp: Vec::new(), rp_stride: 0, rp_ref: Default::default(),
+            rp_proj: Vec::new(),
             rp_traj: Default::default(), rp_map: Default::default(),
             ra: Vec::new(),
             have_threading: false, have_frame_threading: false,
