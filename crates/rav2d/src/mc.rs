@@ -1,4 +1,4 @@
-use crate::intops::iclip;
+use crate::intops::{iclip, imin};
 use crate::tables::{EXT_WARP_FILTER, MC_SUBPEL_FILTERS, MC_WARP_FILTER};
 
 pub const INTERMEDIATE_BITS_8BPC: i32 = 4;
@@ -396,6 +396,68 @@ pub fn prep_8tap_8bpc(
         }
         (None, None) => {
             prep_8bpc(tmp, &src[src_off..], src_stride, w, h);
+        }
+    }
+}
+
+pub fn w_mask_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
+    mask: &mut [u8],
+    mask_stride: usize,
+    sign: i32,
+    ss_hor: bool,
+    ss_ver: bool,
+) {
+    let sh = INTERMEDIATE_BITS_8BPC + 6;
+    let rnd = 32 << INTERMEDIATE_BITS_8BPC;
+    let mask_sh = 8; // bitdepth(8) + intermediate_bits(4) - 4
+    let mask_rnd = 1i32 << (mask_sh - 5);
+
+    let mut t1off = 0usize;
+    let mut t2off = 0usize;
+    let mut doff = 0usize;
+    let mut moff = 0usize;
+
+    for row in 0..h {
+        let mut x = 0usize;
+        while x < w {
+            let m = imin(38 + (((tmp1[t1off + x] as i32 - tmp2[t2off + x] as i32).abs() + mask_rnd) >> mask_sh), 64);
+            dst[doff + x] = iclip(
+                (tmp1[t1off + x] as i32 * m + tmp2[t2off + x] as i32 * (64 - m) + rnd) >> sh,
+                0, 255,
+            ) as u8;
+
+            if ss_hor {
+                x += 1;
+                let n = imin(38 + (((tmp1[t1off + x] as i32 - tmp2[t2off + x] as i32).abs() + mask_rnd) >> mask_sh), 64);
+                dst[doff + x] = iclip(
+                    (tmp1[t1off + x] as i32 * n + tmp2[t2off + x] as i32 * (64 - n) + rnd) >> sh,
+                    0, 255,
+                ) as u8;
+
+                if row & 1 != 0 && ss_ver {
+                    mask[moff + (x >> 1)] = ((m + n + mask[moff + (x >> 1)] as i32 + 2 - sign) >> 2) as u8;
+                } else if ss_ver {
+                    mask[moff + (x >> 1)] = (m + n) as u8;
+                } else {
+                    mask[moff + (x >> 1)] = ((m + n + 1 - sign) >> 1) as u8;
+                }
+            } else {
+                mask[moff + x] = m as u8;
+            }
+            x += 1;
+        }
+
+        t1off += w;
+        t2off += w;
+        doff += dst_stride;
+        if !ss_ver || (row & 1 != 0) {
+            moff += mask_stride;
         }
     }
 }
@@ -903,6 +965,36 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_w_mask_444() {
+        let tmp1 = vec![(200i16) << 4; 16];
+        let tmp2 = vec![(100i16) << 4; 16];
+        let mut dst = vec![0u8; 16];
+        let mut mask = vec![0u8; 16];
+        w_mask_8bpc(&mut dst, 4, &tmp1, &tmp2, 4, 4, &mut mask, 4, 0, false, false);
+        for &v in &dst {
+            assert!(v > 0);
+        }
+        for &m in &mask[..16] {
+            assert!(m >= 38 && m <= 64);
+        }
+    }
+
+    #[test]
+    fn test_w_mask_420() {
+        let tmp1 = vec![(150i16) << 4; 64];
+        let tmp2 = vec![(150i16) << 4; 64];
+        let mut dst = vec![0u8; 64];
+        let mut mask = vec![0u8; 16];
+        w_mask_8bpc(&mut dst, 8, &tmp1, &tmp2, 8, 8, &mut mask, 4, 0, true, true);
+        for &v in &dst {
+            assert_eq!(v, 150);
+        }
+        for &m in &mask[..16] {
+            assert_eq!(m, 38);
+        }
+    }
+
     #[test]
     fn test_put_8tap_no_filter() {
         let src = vec![42u8; 64];
