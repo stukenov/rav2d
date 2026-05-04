@@ -1,7 +1,7 @@
 use crate::cdf::{CdfModeContext, CdfMvContext};
 use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::env::BlockContext;
-use crate::headers::{FrameHeader, RestorationType, MAX_SEGMENTS};
+use crate::headers::{AdaptiveBoolean, FrameHeader, RestorationType, MAX_SEGMENTS};
 use crate::internal::{LoopFilterState, NsWienerBank, ScalableMotionParams};
 use crate::intops::{apply_sign64, imax, imin, inv_recenter};
 use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES};
@@ -40,6 +40,30 @@ pub fn init_wiener(frame_hdr: &FrameHeader, lf: &mut LoopFilterState) {
     } else {
         lf.ns_subclass_class_idx = None;
     }
+}
+
+pub fn compute_restore_planes(frame_hdr: &FrameHeader) -> i32 {
+    let has_y = frame_hdr.restoration.p[0].restoration_type != RestorationType::None as u8
+        || frame_hdr.gdf.enabled != AdaptiveBoolean::Off;
+    let has_u = frame_hdr.restoration.p[1].restoration_type != RestorationType::None as u8;
+    let has_v = frame_hdr.restoration.p[2].restoration_type != RestorationType::None as u8;
+    (has_y as i32) | ((has_u as i32) << 1) | ((has_v as i32) << 2)
+}
+
+pub fn compute_gdf_ref_dst_idx(frame_hdr: &FrameHeader, absrefdist: &[u8; 7]) -> i32 {
+    if frame_hdr.gdf.enabled == AdaptiveBoolean::Off {
+        return 0;
+    }
+    let is_inter_or_switch = (frame_hdr.frame_type as u8) & 1 != 0;
+    if !is_inter_or_switch {
+        return 0;
+    }
+    let mut max_dist = 0i32;
+    for i in 0..imin(frame_hdr.n_ref_frames as i32, 2) as usize {
+        max_dist = imax(max_dist, absrefdist[i] as i32);
+    }
+    const REF_DST_IDX_TBL: [i32; 12] = [5, 1, 2, 3, 3, 3, 4, 4, 4, 4, 4, 5];
+    REF_DST_IDX_TBL[imin(max_dist, 11) as usize]
 }
 
 pub fn init_ns_wiener_bank(bank: &mut NsWienerBank, pl: usize, n_classes: usize) {
@@ -1431,6 +1455,46 @@ mod tests {
             let sz = [8, 4, 8, 4];
             let _ = read_pal_indices(&mut msac, &mut cdf_m, &mut pal_out, &mut scratch, 4, &sz);
         }
+    }
+
+    #[test]
+    fn test_compute_restore_planes_none() {
+        let fh = FrameHeader::default();
+        assert_eq!(compute_restore_planes(&fh), 0);
+    }
+
+    #[test]
+    fn test_compute_restore_planes_all() {
+        let mut fh = FrameHeader::default();
+        fh.restoration.p[0].restoration_type = RestorationType::NsWiener as u8;
+        fh.restoration.p[1].restoration_type = RestorationType::NsWiener as u8;
+        fh.restoration.p[2].restoration_type = RestorationType::PcWiener as u8;
+        assert_eq!(compute_restore_planes(&fh), 7);
+    }
+
+    #[test]
+    fn test_compute_restore_planes_gdf_only() {
+        let mut fh = FrameHeader::default();
+        fh.gdf.enabled = AdaptiveBoolean::On;
+        assert_eq!(compute_restore_planes(&fh), 1);
+    }
+
+    #[test]
+    fn test_compute_gdf_ref_dst_idx_disabled() {
+        let fh = FrameHeader::default();
+        let absrefdist = [0u8; 7];
+        assert_eq!(compute_gdf_ref_dst_idx(&fh, &absrefdist), 0);
+    }
+
+    #[test]
+    fn test_compute_gdf_ref_dst_idx_inter() {
+        use crate::headers::FrameType;
+        let mut fh = FrameHeader::default();
+        fh.gdf.enabled = AdaptiveBoolean::On;
+        fh.frame_type = FrameType::Inter;
+        fh.n_ref_frames = 7;
+        let absrefdist = [3, 5, 2, 1, 1, 1, 1];
+        assert_eq!(compute_gdf_ref_dst_idx(&fh, &absrefdist), 3);
     }
 
     #[test]
