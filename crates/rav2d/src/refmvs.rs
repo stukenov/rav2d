@@ -1,5 +1,5 @@
 use crate::headers::WarpedMotionParams;
-use crate::intops::{apply_sign, iclip, iclip64to32, imax, imin, ulog2};
+use crate::intops::{apply_sign, apply_sign64, iclip, iclip64to32, imax, imin, ulog2};
 use crate::levels::INVALID_MV;
 use crate::levels::{Mv, MvXY, RefPair};
 
@@ -1087,6 +1087,278 @@ pub fn splat_mv(
     }
 }
 
+pub fn save_tmvs(
+    r: &[Block],
+    ra: &mut [Block],
+    ra_tl: &mut Block,
+    col_start8: i32,
+    mut col_end8: i32,
+    _row_start8: i32,
+    mut row_end8: i32,
+    ih8: i32,
+    iw8: i32,
+) {
+    debug_assert!(_row_start8 >= 0);
+    row_end8 = imin(row_end8, ih8);
+    col_end8 = imin(col_end8, iw8);
+
+    let b_off = (((row_end8 - 1) & 31) * 2 + 1) as usize * 128;
+    *ra_tl = ra[(col_end8 - 1) as usize];
+    for x in col_start8..col_end8 {
+        ra[x as usize] = r[b_off + ((x * 2) & 127) as usize];
+    }
+}
+
+pub fn splat_warpmv(
+    s_dst: &mut [Block],
+    s_src: &mut Block,
+    mut t_dst: Option<&mut [TemporalBlock]>,
+    t_stride: isize,
+    t_src: &mut TemporalBlock,
+    mut mvy: i64,
+    mut mvx: i64,
+    mat: &WarpedMotionParams,
+    bw4: i32,
+    mut bh4: i32,
+) {
+    debug_assert!(bw4 > 1 && bh4 > 1);
+    let mut s_off = 0usize;
+    let mut t_off = 0usize;
+    s_src.oy4 = 0;
+    while bh4 > 0 {
+        let mut mvxi = mvx;
+        let mut mvyi = mvy;
+        s_src.ox4 = 0;
+        let mut x = 0i32;
+        while x < bw4 {
+            let warpmv = Mv {
+                c: MvXY {
+                    y: iclip(apply_sign64((mvyi.abs() + 4096) >> 13, mvyi), -0xffff, 0xffff),
+                    x: iclip(apply_sign64((mvxi.abs() + 4096) >> 13, mvxi), -0xffff, 0xffff),
+                },
+            };
+            if s_src.mf & 2 != 0 {
+                s_src.mv[0] = warpmv;
+            }
+            let qmv = quantize_mv(warpmv);
+            unsafe {
+                t_src.mv.mv[0] = qmv;
+                t_src.mv.mv[1] = qmv;
+            }
+            s_dst[s_off + x as usize] = *s_src;
+            s_src.ox4 += 1;
+            s_dst[s_off + x as usize + 1] = *s_src;
+            s_src.oy4 += 1;
+            s_dst[s_off + x as usize + 129] = *s_src;
+            s_src.ox4 -= 1;
+            s_dst[s_off + x as usize + 128] = *s_src;
+            s_src.oy4 -= 1;
+            if let Some(ref mut td) = t_dst.as_deref_mut() {
+                let ti = t_off + (x >> 1) as usize;
+                unsafe {
+                    let n = t_src.mv.n;
+                    td[ti].mv.n = n;
+                    td[ti].r#ref.pair = if n == INVALID_TRAJ as u32 * 0x10001 {
+                        -1
+                    } else {
+                        t_src.r#ref.pair
+                    };
+                }
+            }
+            mvxi += (mat.matrix[2] as i64 - 0x10000) * 8;
+            mvyi += mat.matrix[4] as i64 * 8;
+            s_src.ox4 += 2;
+            x += 2;
+        }
+        mvx += mat.matrix[3] as i64 * 8;
+        mvy += (mat.matrix[5] as i64 - 0x10000) * 8;
+        s_off += 2 * 128;
+        t_off = (t_off as isize + t_stride) as usize;
+        s_src.oy4 += 2;
+        bh4 -= 2;
+    }
+}
+
+pub fn splat_comp_warpmv(
+    s_dst: &mut [Block],
+    s_src: &mut Block,
+    mut t_dst: Option<&mut [TemporalBlock]>,
+    t_stride: isize,
+    t_src: &mut TemporalBlock,
+    mut mvy1: i64,
+    mut mvx1: i64,
+    mut mvy2: i64,
+    mut mvx2: i64,
+    wm1: &WarpedMotionParams,
+    wm2: &WarpedMotionParams,
+    bw4: i32,
+    mut bh4: i32,
+    t_swap: usize,
+    mask: Option<&[u8]>,
+    w_swap: i32,
+) {
+    debug_assert!(bw4 > 1 && bh4 > 1);
+    let mut s_off = 0usize;
+    let mut t_off = 0usize;
+    let mut mask_off = 0usize;
+    s_src.oy4 = 0;
+    while bh4 > 0 {
+        let mut mvxi1 = mvx1;
+        let mut mvyi1 = mvy1;
+        let mut mvxi2 = mvx2;
+        let mut mvyi2 = mvy2;
+        s_src.ox4 = 0;
+        let mut x = 0i32;
+        while x < bw4 {
+            let warpmv1 = Mv {
+                c: MvXY {
+                    y: iclip(apply_sign64((mvyi1.abs() + 4096) >> 13, mvyi1), -0xffff, 0xffff),
+                    x: iclip(apply_sign64((mvxi1.abs() + 4096) >> 13, mvxi1), -0xffff, 0xffff),
+                },
+            };
+            if s_src.mf & 2 != 0 {
+                s_src.mv[0] = warpmv1;
+            }
+            unsafe { t_src.mv.mv[t_swap] = quantize_mv(warpmv1); }
+            let warpmv2 = Mv {
+                c: MvXY {
+                    y: iclip(apply_sign64((mvyi2.abs() + 4096) >> 13, mvyi2), -0xffff, 0xffff),
+                    x: iclip(apply_sign64((mvxi2.abs() + 4096) >> 13, mvxi2), -0xffff, 0xffff),
+                },
+            };
+            if s_src.mf & 2 != 0 {
+                s_src.mv[1] = warpmv2;
+            }
+            unsafe { t_src.mv.mv[1 - t_swap] = quantize_mv(warpmv2); }
+            if let Some(m) = mask {
+                let d = m[mask_off + (x >> 1) as usize] as i32;
+                if d != 2 {
+                    unsafe {
+                        t_src.mv.mv[(d ^ w_swap) as usize].n = INVALID_TRAJ;
+                    }
+                }
+            }
+            s_dst[s_off + x as usize] = *s_src;
+            s_src.ox4 += 1;
+            s_dst[s_off + x as usize + 1] = *s_src;
+            s_src.oy4 += 1;
+            s_dst[s_off + x as usize + 129] = *s_src;
+            s_src.ox4 -= 1;
+            s_dst[s_off + x as usize + 128] = *s_src;
+            s_src.oy4 -= 1;
+            if let Some(ref mut td) = t_dst.as_deref_mut() {
+                let ti = t_off + (x >> 1) as usize;
+                unsafe {
+                    let mv0n = t_src.mv.mv[0].n;
+                    let mv1n = t_src.mv.mv[1].n;
+                    if mv0n == INVALID_TRAJ {
+                        if mv1n == INVALID_TRAJ {
+                            td[ti].r#ref.pair = -1;
+                        } else {
+                            td[ti].mv.n = mv1n as u32 * 0x10001;
+                            td[ti].r#ref.pair = (t_src.r#ref.r[1] as u8 as i16) * 0x101;
+                        }
+                    } else if mv1n == INVALID_TRAJ {
+                        td[ti].mv.n = mv0n as u32 * 0x10001;
+                        td[ti].r#ref.pair = (t_src.r#ref.r[0] as u8 as i16) * 0x101;
+                    } else {
+                        td[ti] = *t_src;
+                    }
+                }
+            }
+            mvxi1 += (wm1.matrix[2] as i64 - 0x10000) * 8;
+            mvyi1 += wm1.matrix[4] as i64 * 8;
+            mvxi2 += (wm2.matrix[2] as i64 - 0x10000) * 8;
+            mvyi2 += wm2.matrix[4] as i64 * 8;
+            s_src.ox4 += 2;
+            x += 2;
+        }
+        mvx1 += wm1.matrix[3] as i64 * 8;
+        mvy1 += (wm1.matrix[5] as i64 - 0x10000) * 8;
+        mvx2 += wm2.matrix[3] as i64 * 8;
+        mvy2 += (wm2.matrix[5] as i64 - 0x10000) * 8;
+        if mask.is_some() {
+            mask_off += (bw4 >> 1) as usize;
+        }
+        s_off += 2 * 128;
+        t_off = (t_off as isize + t_stride) as usize;
+        s_src.oy4 += 2;
+        bh4 -= 2;
+    }
+}
+
+pub fn splat_comp_wedgemv(
+    s_dst: &mut [Block],
+    s_src: &mut Block,
+    mut t_dst: Option<&mut [TemporalBlock]>,
+    t_stride: isize,
+    t_src: &TemporalBlock,
+    bw4: i32,
+    mut bh4: i32,
+    mask: &[u8],
+    w_swap: i32,
+) {
+    debug_assert!(bw4 > 1 && bh4 > 1);
+    let mut s_off = 0usize;
+    let mut t_off = 0usize;
+    let mut mask_off = 0usize;
+    s_src.oy4 = 0;
+    while bh4 > 0 {
+        s_src.ox4 = 0;
+        let mut x = 0i32;
+        while x < bw4 {
+            s_dst[s_off + x as usize] = *s_src;
+            s_src.ox4 += 1;
+            s_dst[s_off + x as usize + 1] = *s_src;
+            s_src.oy4 += 1;
+            s_dst[s_off + x as usize + 129] = *s_src;
+            s_src.ox4 -= 1;
+            s_dst[s_off + x as usize + 128] = *s_src;
+            s_src.oy4 -= 1;
+            let d = mask[mask_off + (x >> 1) as usize] as i32;
+            if let Some(ref mut td) = t_dst.as_deref_mut() {
+                let ti = t_off + (x >> 1) as usize;
+                unsafe {
+                    if d != 2 {
+                        let idx = ((d ^ w_swap) == 0) as usize;
+                        let m = t_src.mv.mv[idx].n;
+                        td[ti].mv.n = m as u32 * 0x10001;
+                        td[ti].r#ref.pair = if m == INVALID_TRAJ {
+                            -1
+                        } else {
+                            (t_src.r#ref.r[idx] as u8 as i16) * 0x101
+                        };
+                    } else {
+                        let mv0n = t_src.mv.mv[0].n;
+                        let mv1n = t_src.mv.mv[1].n;
+                        if mv0n == INVALID_TRAJ {
+                            if mv1n == INVALID_TRAJ {
+                                td[ti].mv.n = INVALID_TRAJ as u32 * 0x10001;
+                                td[ti].r#ref.pair = -1;
+                            } else {
+                                td[ti].mv.n = mv1n as u32 * 0x10001;
+                                td[ti].r#ref.pair = (t_src.r#ref.r[1] as u8 as i16) * 0x101;
+                            }
+                        } else if mv1n == INVALID_TRAJ {
+                            td[ti].mv.n = mv0n as u32 * 0x10001;
+                            td[ti].r#ref.pair = (t_src.r#ref.r[0] as u8 as i16) * 0x101;
+                        } else {
+                            td[ti] = *t_src;
+                        }
+                    }
+                }
+            }
+            s_src.ox4 += 2;
+            x += 2;
+        }
+        s_off += 128 * 2;
+        t_off = (t_off as isize + t_stride) as usize;
+        mask_off += (bw4 >> 1) as usize;
+        s_src.oy4 += 2;
+        bh4 -= 2;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1706,5 +1978,112 @@ mod tests {
         assert_eq!(dst[1].bs, crate::levels::BlockSize::Bs4x4 as u8);
         assert_eq!(dst[128].bs, crate::levels::BlockSize::Bs4x4 as u8);
         assert_eq!(dst[129].bs, crate::levels::BlockSize::Bs4x4 as u8);
+    }
+
+    #[test]
+    fn test_save_tmvs_basic() {
+        let mut r = vec![Block::default(); 128 * 64];
+        let mut ra = vec![Block::default(); 32];
+        let mut ra_tl = Block::default();
+
+        r[((3 & 31) * 2 + 1) as usize * 128 + 4] = {
+            let mut b = Block::default();
+            b.bs = 5;
+            b
+        };
+        r[((3 & 31) * 2 + 1) as usize * 128 + 6] = {
+            let mut b = Block::default();
+            b.bs = 7;
+            b
+        };
+
+        save_tmvs(&r, &mut ra, &mut ra_tl, 2, 4, 0, 4, 8, 8);
+
+        assert_eq!(ra[2].bs, 5);
+        assert_eq!(ra[3].bs, 7);
+        assert_eq!(ra_tl.bs, 0);
+    }
+
+    #[test]
+    fn test_save_tmvs_clamps() {
+        let r = vec![Block::default(); 128 * 64];
+        let mut ra = vec![Block::default(); 8];
+        let mut ra_tl = Block::default();
+
+        save_tmvs(&r, &mut ra, &mut ra_tl, 0, 10, 0, 10, 4, 4);
+        assert_eq!(ra_tl.bs, 0);
+    }
+
+    #[test]
+    fn test_splat_warpmv_basic() {
+        let mut dst = vec![Block::default(); 512];
+        let mut src = Block::default();
+        src.mf = 2;
+        src.bs = 10;
+        let mut t_src = TemporalBlock::default();
+        let mat = WarpedMotionParams {
+            matrix: [0, 0, 0x10000, 0, 0, 0x10000],
+            ..WarpedMotionParams::default()
+        };
+
+        splat_warpmv(&mut dst, &mut src, None, 0, &mut t_src, 0, 0, &mat, 4, 4);
+
+        assert_eq!(dst[0].bs, 10);
+        assert_eq!(dst[1].bs, 10);
+        assert_eq!(dst[128].bs, 10);
+        assert_eq!(dst[129].bs, 10);
+        assert_eq!(dst[256].bs, 10);
+    }
+
+    #[test]
+    fn test_splat_warpmv_sets_mv() {
+        let mut dst = vec![Block::default(); 512];
+        let mut src = Block::default();
+        src.mf = 3;
+        let mut t_src = TemporalBlock::default();
+        let mat = WarpedMotionParams {
+            matrix: [0, 0, 0x10000, 0, 0, 0x10000],
+            ..WarpedMotionParams::default()
+        };
+
+        splat_warpmv(&mut dst, &mut src, None, 0, &mut t_src, 8192 * 13, 0, &mat, 2, 2);
+
+        let y = unsafe { dst[0].mv[0].c.y };
+        assert_eq!(y, 13);
+    }
+
+    #[test]
+    fn test_splat_comp_wedgemv_basic() {
+        let mut dst = vec![Block::default(); 512];
+        let mut src = Block::default();
+        src.bs = 12;
+        let t_src = TemporalBlock::default();
+        let mask = vec![2u8; 4];
+
+        splat_comp_wedgemv(&mut dst, &mut src, None, 0, &t_src, 4, 4, &mask, 0);
+
+        assert_eq!(dst[0].bs, 12);
+        assert_eq!(dst[256].bs, 12);
+    }
+
+    #[test]
+    fn test_splat_comp_warpmv_basic() {
+        let mut dst = vec![Block::default(); 512];
+        let mut src = Block::default();
+        src.mf = 2;
+        src.bs = 8;
+        let mut t_src = TemporalBlock::default();
+        let mat = WarpedMotionParams {
+            matrix: [0, 0, 0x10000, 0, 0, 0x10000],
+            ..WarpedMotionParams::default()
+        };
+
+        splat_comp_warpmv(
+            &mut dst, &mut src, None, 0, &mut t_src,
+            0, 0, 0, 0, &mat, &mat, 4, 4, 0, None, 0,
+        );
+
+        assert_eq!(dst[0].bs, 8);
+        assert_eq!(dst[256].bs, 8);
     }
 }
