@@ -367,6 +367,123 @@ pub fn transpose_lossless_mask(
     }
 }
 
+pub fn setup_thr_cols_sb64(
+    q_thr_dst: &mut [u8],
+    side_thr_dst: &mut [u8],
+    dst_stride: usize,
+    segmap: &[u8],
+    seg_off: usize,
+    seg_stride: isize,
+    mask: &[[[u16; 4]; 5]],
+    thr_lut: &[[u8; 16]; 2],
+    left_q_thr: &mut [u8],
+    left_side_thr: &mut [u8],
+    y64: i32,
+    _ss_hor: i32,
+    ss_ver: i32,
+    w4: i32,
+    h4: i32,
+) {
+    let mask_idx = (y64 >> ss_ver) as usize;
+    let mask_shift: u32 = if y64 & ss_ver != 0 { 8 } else { 0 };
+
+    for y4 in 0..h4 as usize {
+        let mut prev_q_thr = left_q_thr[y4] as i32;
+        let mut prev_side_thr = left_side_thr[y4] as i32;
+
+        for x4 in 0..w4 as usize {
+            let seg_id = segmap[(seg_off as isize + x4 as isize +
+                y4 as isize * seg_stride) as usize] as usize;
+            let cur_q_thr = thr_lut[0][seg_id] as i32;
+            let cur_side_thr = thr_lut[1][seg_id] as i32;
+            let subpu = 3 * (((mask[x4][4][mask_idx] >>
+                (mask_shift + y4 as u32)) & 1) as i32);
+
+            let edge_q_thr = if cur_q_thr != 0 && prev_q_thr != 0 {
+                (cur_q_thr + prev_q_thr + 1) >> 1
+            } else {
+                cur_q_thr | prev_q_thr
+            };
+            let edge_side_thr = if cur_side_thr != 0 && prev_side_thr != 0 {
+                (cur_side_thr + prev_side_thr + 1) >> 1
+            } else {
+                cur_side_thr | prev_side_thr
+            };
+
+            q_thr_dst[x4 * dst_stride + y4] = (edge_q_thr >> subpu) as u8;
+            side_thr_dst[x4 * dst_stride + y4] = (edge_side_thr >> subpu) as u8;
+
+            prev_q_thr = cur_q_thr;
+            prev_side_thr = cur_side_thr;
+        }
+
+        left_q_thr[y4] = prev_q_thr as u8;
+        left_side_thr[y4] = prev_side_thr as u8;
+    }
+}
+
+pub fn setup_thr_rows_sb64(
+    q_thr_dst: &mut [u8],
+    side_thr_dst: &mut [u8],
+    dst_stride: usize,
+    segmap: &[u8],
+    seg_off: usize,
+    seg_stride: isize,
+    mask: &[[[u16; 4]; 5]],
+    thr_lut: &[[u8; 16]; 2],
+    above_thr_lut: Option<&[[u8; 16]; 2]>,
+    sb64x: i32,
+    ss_hor: i32,
+    _ss_ver: i32,
+    w4: i32,
+    h4: i32,
+) {
+    let mask_idx = (sb64x >> ss_hor) as usize;
+    let mask_shift: u32 = if sb64x & ss_hor != 0 { 8 } else { 0 };
+
+    let mut above_q_thr = [0u8; 16];
+    let mut above_side_thr = [0u8; 16];
+    if let Some(above_lut) = above_thr_lut {
+        for x4 in 0..w4 as usize {
+            let seg_id = segmap[(seg_off as isize + x4 as isize -
+                seg_stride) as usize] as usize;
+            above_q_thr[x4] = above_lut[0][seg_id];
+            above_side_thr[x4] = above_lut[1][seg_id];
+        }
+    }
+
+    for x4 in 0..w4 as usize {
+        let mut prev_q_thr = above_q_thr[x4] as i32;
+        let mut prev_side_thr = above_side_thr[x4] as i32;
+
+        for y4 in 0..h4 as usize {
+            let seg_id = segmap[(seg_off as isize + x4 as isize +
+                y4 as isize * seg_stride) as usize] as usize;
+            let cur_q_thr = thr_lut[0][seg_id] as i32;
+            let cur_side_thr = thr_lut[1][seg_id] as i32;
+            let subpu = 3 * (((mask[y4][4][mask_idx] >>
+                (mask_shift + x4 as u32)) & 1) as i32);
+
+            let edge_q_thr = if cur_q_thr != 0 && prev_q_thr != 0 {
+                (cur_q_thr + prev_q_thr + 1) >> 1
+            } else {
+                cur_q_thr | prev_q_thr
+            };
+            let edge_side_thr = if cur_side_thr != 0 && prev_side_thr != 0 {
+                (cur_side_thr + prev_side_thr + 1) >> 1
+            } else {
+                cur_side_thr | prev_side_thr
+            };
+
+            q_thr_dst[x4 + y4 * dst_stride] = (edge_q_thr >> subpu) as u8;
+            side_thr_dst[x4 + y4 * dst_stride] = (edge_side_thr >> subpu) as u8;
+
+            prev_q_thr = cur_q_thr;
+            prev_side_thr = cur_side_thr;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +764,159 @@ mod tests {
         dst_mask[16] = 42;
         transpose_lossless_mask(&mut dst_mask, &src_mask, 0, 0, 0);
         assert_eq!(dst_mask[0], 42);
+    }
+
+    #[test]
+    fn test_setup_thr_cols_uniform_segmap() {
+        let dst_stride = 16;
+        let mut q_thr = vec![0u8; dst_stride * 4];
+        let mut side_thr = vec![0u8; dst_stride * 4];
+        let segmap = vec![0u8; 4 * 4];
+        let mask = vec![[[0u16; 4]; 5]; 4];
+        let thr_lut = [[20u8; 16], [10u8; 16]];
+        let mut left_q = [0u8; 16];
+        let mut left_side = [0u8; 16];
+        setup_thr_cols_sb64(
+            &mut q_thr, &mut side_thr, dst_stride,
+            &segmap, 0, 4, &mask, &thr_lut,
+            &mut left_q, &mut left_side, 0, 0, 0, 4, 4,
+        );
+        // x4=0: prev=0, cur=20 → edge=0|20=20
+        assert_eq!(q_thr[0 * dst_stride + 0], 20);
+        // x4=1: prev=20, cur=20 → edge=(20+20+1)>>1=20
+        assert_eq!(q_thr[1 * dst_stride + 0], 20);
+        assert_eq!(side_thr[0 * dst_stride + 0], 10);
+        assert_eq!(side_thr[1 * dst_stride + 0], 10);
+    }
+
+    #[test]
+    fn test_setup_thr_cols_left_state_update() {
+        let dst_stride = 16;
+        let mut q_thr = vec![0u8; dst_stride * 4];
+        let mut side_thr = vec![0u8; dst_stride * 4];
+        let segmap = vec![2u8; 4 * 4];
+        let mask = vec![[[0u16; 4]; 5]; 4];
+        let thr_lut = [[0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let mut left_q = [0u8; 16];
+        let mut left_side = [0u8; 16];
+        setup_thr_cols_sb64(
+            &mut q_thr, &mut side_thr, dst_stride,
+            &segmap, 0, 4, &mask, &thr_lut,
+            &mut left_q, &mut left_side, 0, 0, 0, 4, 4,
+        );
+        // left should be updated to last column's threshold
+        assert_eq!(left_q[0], 30);
+        assert_eq!(left_side[0], 15);
+    }
+
+    #[test]
+    fn test_setup_thr_cols_subpu_mask() {
+        let dst_stride = 16;
+        let mut q_thr = vec![0u8; dst_stride * 2];
+        let mut side_thr = vec![0u8; dst_stride * 2];
+        let segmap = vec![0u8; 2 * 2];
+        // Set subpu bit for x4=1, mask_idx=0, y4=0 → mask[1][4][0] bit 0 = 1
+        let mut mask = vec![[[0u16; 4]; 5]; 2];
+        mask[1][4][0] = 1;
+        let thr_lut = [[40u8; 16], [20u8; 16]];
+        let mut left_q = [40u8; 16];
+        let mut left_side = [20u8; 16];
+        setup_thr_cols_sb64(
+            &mut q_thr, &mut side_thr, dst_stride,
+            &segmap, 0, 2, &mask, &thr_lut,
+            &mut left_q, &mut left_side, 0, 0, 0, 2, 2,
+        );
+        // x4=1, y4=0: subpu=3, edge_q=40, result=40>>3=5
+        assert_eq!(q_thr[1 * dst_stride + 0], 5);
+        assert_eq!(side_thr[1 * dst_stride + 0], 2); // 20>>3=2
+    }
+
+    #[test]
+    fn test_setup_thr_cols_mixed_thresholds() {
+        let dst_stride = 16;
+        let mut q_thr = vec![0u8; dst_stride * 2];
+        let mut side_thr = vec![0u8; dst_stride * 2];
+        // seg_id 0 maps to thr 0, seg_id 1 maps to thr 30
+        let segmap = vec![0, 1, 0, 1];
+        let mask = vec![[[0u16; 4]; 5]; 2];
+        let thr_lut = [[0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let mut left_q = [0u8; 16];
+        let mut left_side = [0u8; 16];
+        setup_thr_cols_sb64(
+            &mut q_thr, &mut side_thr, dst_stride,
+            &segmap, 0, 2, &mask, &thr_lut,
+            &mut left_q, &mut left_side, 0, 0, 0, 2, 2,
+        );
+        // y4=0: x4=0 seg=0 cur=0 prev=0 → edge=0; x4=1 seg=1 cur=30 prev=0 → edge=0|30=30
+        assert_eq!(q_thr[0 * dst_stride + 0], 0);
+        assert_eq!(q_thr[1 * dst_stride + 0], 30);
+    }
+
+    #[test]
+    fn test_setup_thr_rows_no_above() {
+        let dst_stride = 4;
+        let mut q_thr = vec![0u8; dst_stride * 4];
+        let mut side_thr = vec![0u8; dst_stride * 4];
+        let segmap = vec![0u8; 4 * 4];
+        let mask = vec![[[0u16; 4]; 5]; 4];
+        let thr_lut = [[20u8; 16], [10u8; 16]];
+        setup_thr_rows_sb64(
+            &mut q_thr, &mut side_thr, dst_stride,
+            &segmap, 0, 4, &mask, &thr_lut, None,
+            0, 0, 0, 4, 4,
+        );
+        // y4=0: prev=0(no above), cur=20 → edge=0|20=20
+        assert_eq!(q_thr[0 + 0 * dst_stride], 20);
+        // y4=1: prev=20, cur=20 → edge=(20+20+1)>>1=20
+        assert_eq!(q_thr[0 + 1 * dst_stride], 20);
+        assert_eq!(side_thr[0 + 0 * dst_stride], 10);
+    }
+
+    #[test]
+    fn test_setup_thr_rows_with_above() {
+        let dst_stride = 4;
+        let mut q_thr = vec![0u8; dst_stride * 4];
+        let mut side_thr = vec![0u8; dst_stride * 4];
+        // segmap: row -1 (above) = seg_id 1, current rows = seg_id 0
+        let seg_stride: isize = 4;
+        let mut segmap = vec![0u8; 5 * 4];
+        // above row (offset 0)
+        for i in 0..4 { segmap[i] = 1; }
+        // current rows start at offset 4 (seg_off=4)
+        let mask = vec![[[0u16; 4]; 5]; 4];
+        let thr_lut = [[10u8; 16], [5u8; 16]];
+        let above_lut = [[0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                         [0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        setup_thr_rows_sb64(
+            &mut q_thr, &mut side_thr, dst_stride,
+            &segmap, 4, seg_stride, &mask, &thr_lut, Some(&above_lut),
+            0, 0, 0, 4, 4,
+        );
+        // y4=0, x4=0: above seg_id=1→above_q=30, cur=10 → (30+10+1)>>1=20
+        assert_eq!(q_thr[0 + 0 * dst_stride], 20);
+        // above_side=15, cur_side=5 → (15+5+1)>>1=10
+        assert_eq!(side_thr[0 + 0 * dst_stride], 10);
+    }
+
+    #[test]
+    fn test_setup_thr_rows_subpu_mask() {
+        let dst_stride = 2;
+        let mut q_thr = vec![0u8; dst_stride * 2];
+        let mut side_thr = vec![0u8; dst_stride * 2];
+        let segmap = vec![0u8; 2 * 2];
+        // Set subpu bit for y4=1, mask_idx=0, x4=0 → mask[1][4][0] bit 0 = 1
+        let mut mask = vec![[[0u16; 4]; 5]; 2];
+        mask[1][4][0] = 1;
+        let thr_lut = [[40u8; 16], [20u8; 16]];
+        setup_thr_rows_sb64(
+            &mut q_thr, &mut side_thr, dst_stride,
+            &segmap, 0, 2, &mask, &thr_lut, None,
+            0, 0, 0, 2, 2,
+        );
+        // y4=1, x4=0: subpu=3, edge_q=40, result=40>>3=5
+        assert_eq!(q_thr[0 + 1 * dst_stride], 5);
+        assert_eq!(side_thr[0 + 1 * dst_stride], 2);
     }
 }

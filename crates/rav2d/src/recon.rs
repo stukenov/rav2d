@@ -1,7 +1,10 @@
-use crate::intops::{apply_sign, iclip, imin, umin, ulog2};
-use crate::levels::{IntraPredMode, N_BS_SIZES};
+use crate::intops::{apply_sign, iclip, imax, imin, umin, ulog2};
+use crate::headers::PixelLayout;
+use crate::levels::{IntraPredMode, Mv, N_BS_SIZES};
+use crate::mc::OpflRegressionData;
 use crate::msac::MsacContext;
 use crate::tables::{BLOCK_DIMENSIONS, DIV_RECIP, TxfmInfo, MODE_TO_ANGLE_MAP};
+use crate::warpmv::resolve_divisor_32;
 
 pub fn adjust_strength(strength: i32, var: u32) -> i32 {
     if var == 0 {
@@ -331,6 +334,154 @@ pub fn get_sign_ctx_idtx(
     }
 }
 
+pub fn get_mask(
+    mask: &mut [u8],
+    stride: usize,
+    bx4: i32, x4: i32,
+    by4: i32, y4: i32,
+    mv: &[Mv; 2],
+    h_subpel_bits: i32, v_subpel_bits: i32,
+    bw4: i32, bh4: i32,
+    iw: i32, ih: i32,
+) -> bool {
+    let (mv0, mv1) = unsafe { (mv[0].c, mv[1].c) };
+    let x0 = (bx4 + x4) * 4 + (mv0.x >> h_subpel_bits);
+    let y0 = (by4 + y4) * 4 + (mv0.y >> v_subpel_bits);
+    let x1 = (bx4 + x4) * 4 + (mv1.x >> h_subpel_bits);
+    let y1 = (by4 + y4) * 4 + (mv1.y >> v_subpel_bits);
+    if x0 < 0 || x1 < 0 || y0 < 0 || y1 < 0 ||
+       x0 + bw4 * 4 >= iw || x1 + bw4 * 4 >= iw ||
+       y0 + bh4 * 4 >= ih || y1 + bh4 * 4 >= ih
+    {
+        let off = (y4 as usize * stride + x4 as usize) * 4;
+        gen_mask(&mut mask[off..], stride,
+                 bw4 * 4, bh4 * 4, x0, y0, x1, y1, iw as u32, ih as u32);
+        return true;
+    }
+    false
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct OpflMvDelta {
+    pub x: i8,
+    pub y: i8,
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct OpflMvDeltaBlock {
+    pub d: [OpflMvDelta; 2],
+}
+
+pub fn opfl_mv_adj(
+    r: &OpflRegressionData,
+    dd: &mut OpflMvDeltaBlock,
+    d: [i8; 2],
+) {
+    let mut su2 = r.su2;
+    let mut suv = r.suv;
+    let mut sv2 = r.sv2;
+    let mut suw = r.suw;
+    let mut svw = r.svw;
+    let nbits_su2 = 1 + ulog2((su2 + (su2 == 0) as i32) as u32);
+    let nbits_sv2 = 1 + ulog2((sv2 + (sv2 == 0) as i32) as u32);
+    let nbits_suv = 1 + ulog2((suv.abs() + (suv == 0) as i32) as u32);
+    let nbits_suw = 1 + ulog2((suw.abs() + (suw == 0) as i32) as u32);
+    let nbits_svw = 1 + ulog2((svw.abs() + (svw == 0) as i32) as u32);
+    let nbits_max = imax(
+        nbits_su2 + nbits_sv2,
+        imax(
+            imax(nbits_sv2 + nbits_suw, nbits_suv + nbits_svw),
+            imax(nbits_su2 + nbits_svw, nbits_suv + nbits_suw),
+        ),
+    );
+    let rbits = imax(0, nbits_max - 23) >> 1;
+    if rbits != 0 {
+        let rnd = (1 << rbits) >> 1;
+        su2 = (su2 + rnd) >> rbits;
+        sv2 = (sv2 + rnd) >> rbits;
+        suv = (suv + rnd - (suv < 0) as i32) >> rbits;
+        suw = (suw + rnd - (suw < 0) as i32) >> rbits;
+        svw = (svw + rnd - (svw < 0) as i32) >> rbits;
+    }
+    let det = su2 * sv2 - suv * suv;
+    if det > 0 {
+        let mut s = [sv2 * suw - suv * svw, su2 * svw - suv * suw];
+        let mut shift = 0i32;
+        let idet = resolve_divisor_32(det as u32, &mut shift);
+        let idet_bits = ulog2(idet as u32);
+        for i in 0..2 {
+            if s[i] == 0 { continue; }
+            let mut abss = s[i].abs();
+            let rb = imax(0, ulog2(abss as u32) + idet_bits - 22);
+            if rb > 0 {
+                abss = (abss + ((1 << rb) >> 1)) >> rb;
+            }
+            let ibits = 3 + rb - shift;
+            if ibits >= 0 {
+                abss = abss * idet * (1 << ibits);
+            } else {
+                abss = (abss * idet + ((1 << -ibits) >> 1)) >> -ibits;
+            }
+            s[i] = apply_sign(abss, s[i]);
+        }
+        dd.d[0].x = -iclip(d[0] as i32 * s[0], -16, 16) as i8;
+        dd.d[0].y = -iclip(d[0] as i32 * s[1], -16, 16) as i8;
+        dd.d[1].x = iclip(d[1] as i32 * s[0], -16, 16) as i8;
+        dd.d[1].y = iclip(d[1] as i32 * s[1], -16, 16) as i8;
+    } else {
+        *dd = OpflMvDeltaBlock::default();
+    }
+}
+
+pub fn scaledown_16pel_mv_for_chroma(mv: &mut [Mv; 2], layout: PixelLayout) {
+    match layout {
+        PixelLayout::I420 => {
+            for i in 0..2 {
+                unsafe {
+                    let y = mv[i].c.y;
+                    mv[i].c.y = (y + (y > 0) as i32) >> 1;
+                }
+            }
+            for i in 0..2 {
+                unsafe {
+                    let x = mv[i].c.x;
+                    mv[i].c.x = (x + (x > 0) as i32) >> 1;
+                }
+            }
+        }
+        PixelLayout::I422 => {
+            for i in 0..2 {
+                unsafe {
+                    let x = mv[i].c.x;
+                    mv[i].c.x = (x + (x > 0) as i32) >> 1;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn scaleup_8pel_mv_for_chroma(mv: &mut [Mv; 2], layout: PixelLayout) {
+    match layout {
+        PixelLayout::I444 => {
+            for i in 0..2 {
+                unsafe { mv[i].c.x <<= 1; }
+            }
+            for i in 0..2 {
+                unsafe { mv[i].c.y <<= 1; }
+            }
+        }
+        PixelLayout::I422 => {
+            for i in 0..2 {
+                unsafe { mv[i].c.y <<= 1; }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +783,163 @@ mod tests {
         let l = [0x00u8; 16];
         let r = get_skip_ctx(&t_dim, 30, &a, &l, 1, 0, false, false);
         assert_eq!(r, 6 + 1 + 1);
+    }
+
+    use crate::levels::MvXY;
+
+    fn make_mv(x: i32, y: i32) -> Mv {
+        Mv { c: MvXY { y, x } }
+    }
+
+    #[test]
+    fn test_get_mask_inside_frame() {
+        let mut mask = vec![0u8; 256];
+        let mv = [make_mv(0, 0), make_mv(0, 0)];
+        let r = get_mask(&mut mask, 8, 0, 0, 0, 0, &mv, 0, 0, 2, 2, 1000, 1000);
+        assert!(!r);
+    }
+
+    #[test]
+    fn test_get_mask_outside_frame() {
+        let mut mask = vec![0u8; 256];
+        let mv = [make_mv(-100, 0), make_mv(0, 0)];
+        let r = get_mask(&mut mask, 8, 0, 0, 0, 0, &mv, 0, 0, 2, 2, 100, 100);
+        assert!(r);
+        assert_eq!(mask[0], 0);
+    }
+
+    #[test]
+    fn test_get_mask_both_outside() {
+        let mut mask = vec![0u8; 256];
+        let mv = [make_mv(-1000, -1000), make_mv(-1000, -1000)];
+        let r = get_mask(&mut mask, 8, 0, 0, 0, 0, &mv, 0, 0, 1, 1, 100, 100);
+        assert!(r);
+        for i in 0..4 { assert_eq!(mask[i], 32); }
+    }
+
+    #[test]
+    fn test_get_mask_mv0_only_visible() {
+        let mut mask = vec![0u8; 256];
+        let mv = [make_mv(0, 0), make_mv(-1000, -1000)];
+        let r = get_mask(&mut mask, 4, 0, 0, 0, 0, &mv, 0, 0, 1, 1, 100, 100);
+        assert!(r);
+        for i in 0..4 { assert_eq!(mask[i], 64); }
+    }
+
+    #[test]
+    fn test_opfl_mv_adj_zero_det() {
+        let r = OpflRegressionData { su2: 0, suv: 0, sv2: 0, suw: 10, svw: 10 };
+        let mut dd = OpflMvDeltaBlock::default();
+        dd.d[0].x = 99;
+        opfl_mv_adj(&r, &mut dd, [1, 1]);
+        assert_eq!(dd.d[0].x, 0);
+        assert_eq!(dd.d[0].y, 0);
+        assert_eq!(dd.d[1].x, 0);
+        assert_eq!(dd.d[1].y, 0);
+    }
+
+    #[test]
+    fn test_opfl_mv_adj_identity_like() {
+        let r = OpflRegressionData { su2: 100, suv: 0, sv2: 100, suw: 0, svw: 0 };
+        let mut dd = OpflMvDeltaBlock::default();
+        opfl_mv_adj(&r, &mut dd, [0, 0]);
+        assert_eq!(dd.d[0].x, 0);
+        assert_eq!(dd.d[0].y, 0);
+    }
+
+    #[test]
+    fn test_opfl_mv_adj_clamps() {
+        let r = OpflRegressionData {
+            su2: 1000, suv: 0, sv2: 1000,
+            suw: 1000000, svw: 1000000,
+        };
+        let mut dd = OpflMvDeltaBlock::default();
+        opfl_mv_adj(&r, &mut dd, [127, 127]);
+        assert!(dd.d[0].x >= -16 && dd.d[0].x <= 16);
+        assert!(dd.d[0].y >= -16 && dd.d[0].y <= 16);
+        assert!(dd.d[1].x >= -16 && dd.d[1].x <= 16);
+        assert!(dd.d[1].y >= -16 && dd.d[1].y <= 16);
+    }
+
+    #[test]
+    fn test_scaledown_16pel_i420() {
+        let mut mv = [make_mv(100, 200), make_mv(-100, -200)];
+        scaledown_16pel_mv_for_chroma(&mut mv, PixelLayout::I420);
+        unsafe {
+            assert_eq!(mv[0].c.x, 50);
+            assert_eq!(mv[0].c.y, 100);
+            assert_eq!(mv[1].c.x, -50);
+            assert_eq!(mv[1].c.y, -100);
+        }
+    }
+
+    #[test]
+    fn test_scaledown_16pel_i422() {
+        let mut mv = [make_mv(100, 200), make_mv(-100, -200)];
+        scaledown_16pel_mv_for_chroma(&mut mv, PixelLayout::I422);
+        unsafe {
+            assert_eq!(mv[0].c.x, 50);
+            assert_eq!(mv[0].c.y, 200); // y unchanged
+            assert_eq!(mv[1].c.x, -50);
+            assert_eq!(mv[1].c.y, -200);
+        }
+    }
+
+    #[test]
+    fn test_scaledown_16pel_i444_noop() {
+        let mut mv = [make_mv(100, 200), make_mv(-100, -200)];
+        scaledown_16pel_mv_for_chroma(&mut mv, PixelLayout::I444);
+        unsafe {
+            assert_eq!(mv[0].c.x, 100);
+            assert_eq!(mv[0].c.y, 200);
+        }
+    }
+
+    #[test]
+    fn test_scaledown_rounding() {
+        let mut mv = [make_mv(3, 5), make_mv(-3, -5)];
+        scaledown_16pel_mv_for_chroma(&mut mv, PixelLayout::I420);
+        unsafe {
+            // positive: (3+1)>>1=2, (5+1)>>1=3
+            assert_eq!(mv[0].c.x, 2);
+            assert_eq!(mv[0].c.y, 3);
+            // negative: (-3+0)>>1=-2, (-5+0)>>1=-3
+            assert_eq!(mv[1].c.x, -2);
+            assert_eq!(mv[1].c.y, -3);
+        }
+    }
+
+    #[test]
+    fn test_scaleup_8pel_i444() {
+        let mut mv = [make_mv(10, 20), make_mv(-5, -10)];
+        scaleup_8pel_mv_for_chroma(&mut mv, PixelLayout::I444);
+        unsafe {
+            assert_eq!(mv[0].c.x, 20);
+            assert_eq!(mv[0].c.y, 40);
+            assert_eq!(mv[1].c.x, -10);
+            assert_eq!(mv[1].c.y, -20);
+        }
+    }
+
+    #[test]
+    fn test_scaleup_8pel_i422() {
+        let mut mv = [make_mv(10, 20), make_mv(-5, -10)];
+        scaleup_8pel_mv_for_chroma(&mut mv, PixelLayout::I422);
+        unsafe {
+            assert_eq!(mv[0].c.x, 10); // x unchanged
+            assert_eq!(mv[0].c.y, 40);
+            assert_eq!(mv[1].c.x, -5);
+            assert_eq!(mv[1].c.y, -20);
+        }
+    }
+
+    #[test]
+    fn test_scaleup_8pel_i420_noop() {
+        let mut mv = [make_mv(10, 20), make_mv(-5, -10)];
+        scaleup_8pel_mv_for_chroma(&mut mv, PixelLayout::I420);
+        unsafe {
+            assert_eq!(mv[0].c.x, 10);
+            assert_eq!(mv[0].c.y, 20);
+        }
     }
 }
