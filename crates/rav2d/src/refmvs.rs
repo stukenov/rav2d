@@ -1196,7 +1196,7 @@ pub fn add_spatial_candidate(
     if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
         let b_dim = &crate::tables::BLOCK_DIMENSIONS[b.bs as usize];
         let tip16 = if frm_hdr.tip.frame_mode == 2 {
-            !seq_hdr.tip_refine_mv || frm_hdr.tip.subpel_filter != 4
+            !seq_hdr.tip_refine_mv || frm_hdr.tip.subpel_filter != 2
         } else {
             (!seq_hdr.tip_refine_mv && imin(b_dim[0] as i32, b_dim[1] as i32) >= 4)
                 || b.bs == crate::levels::BlockSize::Bs256x256 as u8
@@ -1396,6 +1396,502 @@ pub fn add_spatial_candidate(
         add_candidate_c2s(&mut st.sngl, &mut st.sngl_cnt, 4,
                           (unsafe { b.r#ref.r[nc] }) as u8, cand_mv,
                           &mut st.sngl_iter_cntr, 2);
+    }
+}
+
+pub fn refmvs_find(
+    rt: &Tile,
+    rf: &Frame,
+    rp_proj: &[SnglMvBlock],
+    rp_traj: &[Vec<Mv>; 7],
+    mvstack: &mut [Candidate; 6],
+    warp: Option<&mut [[i32; 7]]>,
+    cnt: &mut i32,
+    warp_cnt: &mut i32,
+    r#ref: RefPair,
+    bs: u8,
+    skip_mode: bool,
+    by4: i32,
+    bx4: i32,
+    seq_hdr: &crate::headers::SequenceHeader,
+    frm_hdr: &crate::headers::FrameHeader,
+) {
+    use crate::env::get_gmv_2d;
+    use crate::levels::TIP_FRAME;
+    use crate::tables::BLOCK_DIMENSIONS;
+
+    let b_dim = &BLOCK_DIMENSIONS[bs as usize];
+    let bw4 = b_dim[0] as i32;
+    let bh4 = b_dim[1] as i32;
+    let w4 = imin(bw4, rt.tile_col.end - bx4);
+    let h4 = imin(bh4, rt.tile_row.end - by4);
+    let (ref0, ref1) = unsafe { (r#ref.r[0], r#ref.r[1]) };
+    let comp = ref1 >= 0;
+
+    *cnt = 0;
+    if warp.is_some() { *warp_cnt = 0; }
+
+    let gmv0 = if (ref0 as usize) >= TIP_FRAME {
+        Mv { c: MvXY { y: 0, x: 0 } }
+    } else {
+        Mv { c: get_gmv_2d(&frm_hdr.gmv.m[ref0 as usize], bx4, by4, bw4, bh4,
+                            rf.iw4, rf.ih4, frm_hdr) }
+    };
+    let gmv1 = if comp {
+        Mv { c: get_gmv_2d(&frm_hdr.gmv.m[ref1 as usize], bx4, by4, bw4, bh4,
+                            rf.iw4, rf.ih4, frm_hdr) }
+    } else {
+        Mv { c: MvXY { y: 0, x: 0 } }
+    };
+    let gmv = [gmv0, gmv1];
+
+    let minx = -(bx4 + bw4 + 4) * 32;
+    let miny = -(by4 + bh4 + 4) * 32;
+    let maxx = (rf.iw4 - bx4 + 4) * 32;
+    let maxy = (rf.ih4 - by4 + 4) * 32;
+    let is_sb_boundary = (by4 & (rf.sbsz - 1)) == 0;
+    let have_left = bx4 > rt.tile_col.start;
+    let bml: Option<&Block> = if have_left && bh4 == h4 {
+        Some(&rt.r[((by4 + bh4 - 1) & 63) as usize * 128 + ((bx4 - 1) & 127) as usize])
+    } else {
+        None
+    };
+    let have_top = by4 > rt.tile_row.start;
+    let (x_off, abw4): (i32, i32);
+    let mut tl: Option<&Block> = None;
+    let mut lmt: Option<&Block> = None;
+    let mut rmt: Option<&Block> = None;
+    let mut tr: Option<&Block> = None;
+    if have_top {
+        if is_sb_boundary {
+            let xo = bx4 & 1;
+            let aw = (bw4 + 1) & !1;
+            x_off = xo;
+            abw4 = aw;
+            if bx4 - xo - 2 >= rt.tile_col.start {
+                tl = Some(if bx4 & (rf.sbsz - 2) != 0 {
+                    &rt.ra[rt.ra_off + (bx4 >> 1) as usize - 1]
+                } else {
+                    &rt.ra_tl
+                });
+            }
+            if bw4 > 2 { lmt = Some(&rt.ra[rt.ra_off + (bx4 >> 1) as usize]); }
+            if bw4 == w4 { rmt = Some(&rt.ra[rt.ra_off + (bx4 >> 1) as usize + (aw >> 1) as usize - 1]); }
+            if bx4 - xo + aw < rt.tile_col.end && bw4 <= 16 {
+                tr = Some(&rt.ra[rt.ra_off + (bx4 >> 1) as usize + (aw >> 1) as usize]);
+            }
+        } else {
+            x_off = 0;
+            abw4 = bw4;
+            if have_left {
+                tl = Some(&rt.r[((by4 - 1) & 63) as usize * 128 + ((bx4 - 1) & 127) as usize]);
+            }
+            if bw4 > 1 {
+                lmt = Some(&rt.r[((by4 - 1) & 63) as usize * 128 + (bx4 & 127) as usize]);
+            }
+            if bw4 == w4 {
+                rmt = Some(&rt.r[((by4 - 1) & 63) as usize * 128 + ((bx4 + bw4 - 1) & 127) as usize]);
+            }
+            if (bx4 + bw4) & (rf.sbsz - 1) != 0 && bx4 + bw4 < rt.tile_col.end && bw4 <= 16 {
+                let candidate = &rt.r[((by4 - 1) & 63) as usize * 128 + ((bx4 + bw4) & 127) as usize];
+                if unsafe { candidate.mv[0].c.y } != INVALID_MV {
+                    tr = Some(candidate);
+                }
+            }
+        }
+    } else {
+        x_off = 0;
+        abw4 = bw4;
+    }
+
+    // warp from corners
+    if let Some(_warp_out) = &warp {
+        if let Some(bml_b) = bml {
+            if bml_b.mf & 2 != 0 && unsafe { bml_b.r#ref.r[0] } == ref0
+                && bml_b.warp_type != WarpedMotionType::Invalid as i8
+            {
+                if let Some(tl_b) = tl {
+                    if let Some(rmt_b) = rmt {
+                        let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
+                        let tl_ref_idx = (unsafe { tl_b.r#ref.r[0] } != ref0) as usize;
+                        let tr_ref_idx = (unsafe { rmt_b.r#ref.r[0] } != ref0) as usize;
+                        let cond_tl = tl_ref_idx == 0 || (unsafe { tl_b.r#ref.r[1] } == ref0 && tl_b.mf & 2 == 0);
+                        let cond_tr = tr_ref_idx == 0 || (unsafe { rmt_b.r#ref.r[1] } == ref0 && rmt_b.mf & 2 == 0);
+                        if cond_tl && cond_tr {
+                            let bl_mv = if bml_b.mf & 2 == 0 { bml_b.mv[bl_ref_idx] }
+                                else { get_warpmv_proj(bml_b.warp_type, &bml_b.m, bx4 * 4, (by4 + bh4) * 4, minx, maxx, miny, maxy) };
+                            let tl_mv = if tl_b.mf & 2 == 0 { tl_b.mv[tl_ref_idx] }
+                                else { get_warpmv_proj(tl_b.warp_type, &tl_b.m, bx4 * 4, by4 * 4, minx, maxx, miny, maxy) };
+                            let tr_mv = if rmt_b.mf & 2 == 0 { rmt_b.mv[tr_ref_idx] }
+                                else { get_warpmv_proj(rmt_b.warp_type, &rmt_b.m, (bx4 + bw4) * 4, by4 * 4, minx, maxx, miny, maxy) };
+                            let mut mat = [0i32; 7];
+                            if model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim) {
+                                // TODO: write mat to warp output, increment warp_cnt
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let stride = rf.rp_stride;
+    let tms_8x8y = ((by4 & (rf.sbsz - 1)) >> 1) as isize;
+    let lms_8x8x = (bx4 >> 1) as isize;
+    let mut st = MvSearchState {
+        b8x8: lms_8x8x + tms_8x8y * stride,
+        ..Default::default()
+    };
+
+    let bms_8x8y = (((by4 + bh4 - 1) & (rf.sbsz - 1)) >> 1) as isize;
+    let left_8x8x = ((bx4 - 1) >> 1) as isize;
+
+    // bottom-most left
+    if let Some(bml_b) = bml {
+        // TODO: add_matrix for warp
+        add_spatial_candidate(bh4 - 1, -1, rf, rp_proj, rp_traj,
+                              &mut st, mvstack, cnt, 1, bml_b,
+                              bms_8x8y, left_8x8x, r#ref, &gmv, seq_hdr, frm_hdr);
+    }
+
+    // right-most top
+    let top_8x8y: isize = if by4 & (rf.sbsz - 1) != 0 {
+        (((by4 - 1) & (rf.sbsz - 1)) >> 1) as isize
+    } else {
+        -1
+    };
+    if let Some(rmt_b) = rmt {
+        let xpos = abw4 - (1 << is_sb_boundary as i32) - x_off;
+        add_spatial_candidate(-1, xpos, rf, rp_proj, rp_traj,
+                              &mut st, mvstack, cnt, (xpos >= 0) as u16, rmt_b,
+                              top_8x8y, ((bx4 + xpos) >> 1) as isize, r#ref, &gmv, seq_hdr, frm_hdr);
+    }
+
+    // top-most left
+    let tml: Option<&Block> = if have_left && bh4 > 1 {
+        Some(&rt.r[(by4 & 63) as usize * 128 + ((bx4 - 1) & 127) as usize])
+    } else {
+        None
+    };
+    if let Some(tml_b) = tml {
+        add_spatial_candidate(0, -1, rf, rp_proj, rp_traj,
+                              &mut st, mvstack, cnt, 1, tml_b,
+                              tms_8x8y, left_8x8x, r#ref, &gmv, seq_hdr, frm_hdr);
+    }
+
+    // left-most top
+    if let Some(lmt_b) = lmt {
+        let xpos = -x_off;
+        add_spatial_candidate(-1, xpos, rf, rp_proj, rp_traj,
+                              &mut st, mvstack, cnt, (!is_sb_boundary || x_off == 0) as u16,
+                              lmt_b, top_8x8y, ((bx4 + xpos) >> 1) as isize, r#ref, &gmv, seq_hdr, frm_hdr);
+    }
+
+    // bottom-left
+    if have_left && bh4 <= 16 && (by4 + bh4) & (rf.sbsz - 1) != 0
+        && by4 + bh4 < rt.tile_row.end
+    {
+        let bl = &rt.r[((by4 + bh4) & 63) as usize * 128 + ((bx4 - 1) & 127) as usize];
+        add_spatial_candidate(bh4, -1, rf, rp_proj, rp_traj,
+                              &mut st, mvstack, cnt, 1, bl,
+                              (((by4 + bh4) & (rf.sbsz - 1)) >> 1) as isize,
+                              left_8x8x, r#ref, &gmv, seq_hdr, frm_hdr);
+    }
+
+    // top-right
+    if let Some(tr_b) = tr {
+        let xpos = abw4 - x_off;
+        add_spatial_candidate(-1, xpos, rf, rp_proj, rp_traj,
+                              &mut st, mvstack, cnt, 1, tr_b,
+                              top_8x8y, ((bx4 + xpos) >> 1) as isize, r#ref, &gmv, seq_hdr, frm_hdr);
+    }
+
+    // temporal MV projection
+    if rf.use_ref_frame_mvs != 0 && (ref0 != ref1 || skip_mode) && *cnt < 6 {
+        let bw8 = imin(bw4 >> 1, 8);
+        let bh8 = imin(bh4 >> 1, 8);
+        let step_h = if bw4 >= 16 { 2 } else { 1 };
+        let step_v = if bh4 >= 16 { 2 } else { 1 };
+        let tx_off = 2 * bw8 - 2 * step_h;
+        let ty_off = 2 * bh8 - 2 * step_v;
+        let first = (tx_off as u32) < w4 as u32
+            && (ty_off as u32) < h4 as u32
+            && add_temporal_candidate(
+                rf, rp_proj, rp_traj, &mut st, mvstack, cnt,
+                ((((by4 + ty_off) & (rf.sbsz - 1)) >> 1) as isize) * stride
+                    + ((bx4 + tx_off) >> 1) as isize,
+                r#ref, seq_hdr.mv_traj,
+            );
+        if !first && (bw4 > 4 || bh4 > 4) {
+            add_temporal_candidate(
+                rf, rp_proj, rp_traj, &mut st, mvstack, cnt,
+                ((((by4 + bh8) & (rf.sbsz - 1)) >> 1) as isize) * stride
+                    + ((bx4 + bw8) >> 1) as isize,
+                r#ref, seq_hdr.mv_traj,
+            );
+        }
+    }
+
+    // top-left
+    if let Some(tl_b) = tl {
+        let xpos = -(1 << is_sb_boundary as i32) - x_off;
+        add_spatial_candidate(-1, xpos, rf, rp_proj, rp_traj,
+                              &mut st, mvstack, cnt, 0, tl_b,
+                              top_8x8y, ((bx4 + xpos) >> 1) as isize, r#ref, &gmv, seq_hdr, frm_hdr);
+    }
+
+    let nearest_refmv_count = *cnt;
+
+    // extended left spatial candidates
+    if have_left {
+        let adj = 3 - (bx4 & (bw4 == 1) as i32);
+        if bx4 - adj >= rt.tile_col.start {
+            if bh4 == h4 {
+                let pos = ((by4 + bh4 - 1) & 63) as usize * 128 + ((bx4 - adj) & 127) as usize;
+                let ext_bml = &rt.r[pos];
+                if let Some(bml_b) = bml {
+                    if BLOCK_DIMENSIONS[ext_bml.bs as usize][0] < adj as u8
+                        || ext_bml.bs != bml_b.bs
+                    {
+                        add_spatial_candidate(bh4 - 1, -adj, rf, rp_proj, rp_traj,
+                                              &mut st, mvstack, cnt, 0, ext_bml,
+                                              bms_8x8y, ((bx4 - adj) >> 1) as isize,
+                                              r#ref, &gmv, seq_hdr, frm_hdr);
+                    }
+                }
+            }
+            if bh4 > 1 {
+                let pos = (by4 & 63) as usize * 128 + ((bx4 - adj) & 127) as usize;
+                let ext_tml = &rt.r[pos];
+                if let Some(tml_b) = tml {
+                    if BLOCK_DIMENSIONS[ext_tml.bs as usize][0] < adj as u8
+                        || ext_tml.bs != tml_b.bs
+                    {
+                        add_spatial_candidate(0, -adj, rf, rp_proj, rp_traj,
+                                              &mut st, mvstack, cnt, 0, ext_tml,
+                                              tms_8x8y, ((bx4 - adj) >> 1) as isize,
+                                              r#ref, &gmv, seq_hdr, frm_hdr);
+                    }
+                }
+            }
+        }
+    }
+
+    // sort by weight
+    if seq_hdr.drl_reorder && nearest_refmv_count >= 2 {
+        let mut maxwidx = 0;
+        let mut maxw = mvstack[0].weight;
+        for n in 1..nearest_refmv_count as usize {
+            if mvstack[n].weight > maxw {
+                maxw = mvstack[n].weight;
+                maxwidx = n;
+            }
+        }
+        if maxwidx != 0 {
+            mvstack.swap(0, maxwidx);
+        }
+    }
+
+    // derived + refmv bank
+    let lim = 1 + if ref0 >= 0 { frm_hdr.max_drl_bits } else { frm_hdr.max_bvp_drl_bits } as i32;
+    if ref1 != -1 && *cnt < lim {
+        add_derived(&mut st, mvstack, cnt, lim, true);
+    }
+    if seq_hdr.refmv_bank {
+        let c = if ref1 == -1 {
+            if (ref0 as u32) <= 5 { ref0 as usize } else { 8 }
+        } else {
+            if ref0 == 0 && ref1 < 2 { 6 + ref1 as usize } else { 8 }
+        };
+        let sz = rt.bank.size[c] as usize;
+        let idx = rt.bank.idx[c] as usize;
+        let start = sz + idx - 1;
+        let comp_idx = if comp { 1 } else { 0 };
+        'bank: for n in 0..sz {
+            if *cnt >= lim { break; }
+            let bank_idx = (start - n) & 3;
+            if c == 8 && unsafe { rt.bank.r#ref[bank_idx].pair != r#ref.pair } { continue; }
+            let mv = &rt.bank.mv[c][bank_idx];
+            let last = *cnt as usize;
+            if st.iter_cntr < 16 {
+                for m in 0..last {
+                    if unsafe { mvstack[m].mv[0].n == mv[0].n
+                        && mvstack[m].mv[comp_idx].n == mv[comp_idx].n }
+                    {
+                        st.iter_cntr += m as i32 + 1;
+                        continue 'bank;
+                    }
+                }
+                st.iter_cntr += last as i32;
+            }
+            let mut oob = false;
+            for i in 0..=comp_idx {
+                let rx = bx4 * 4 + apply_sign(unsafe { mv[i].c.x }.abs() >> 3, unsafe { mv[i].c.x });
+                let ry = by4 * 4 + apply_sign(unsafe { mv[i].c.y }.abs() >> 3, unsafe { mv[i].c.y });
+                if rx <= -bw4 * 4 || ry <= -bh4 * 4
+                    || rx >= rf.iw8 * 8 || ry >= rf.ih8 * 8
+                {
+                    oob = true;
+                    break;
+                }
+            }
+            if oob { continue; }
+            mvstack[last].mv = *mv;
+            mvstack[last].weight = 0;
+            if ref1 >= 0 {
+                mvstack[last].cwp_idx = rt.bank.cwp_idx[c.saturating_sub(6)][bank_idx];
+            }
+            mvstack[last].y_off = 0;
+            mvstack[last].x_off = 0;
+            *cnt = last as i32 + 1;
+        }
+    }
+    if ref1 == -1 && *cnt < lim {
+        add_derived(&mut st, mvstack, cnt, lim, false);
+    }
+
+    // clamp MVs
+    for n in 0..*cnt as usize {
+        unsafe {
+            mvstack[n].mv[0].c.y = iclip(mvstack[n].mv[0].c.y, miny, maxy);
+            mvstack[n].mv[0].c.x = iclip(mvstack[n].mv[0].c.x, minx, maxx);
+            if ref1 >= 0 {
+                mvstack[n].mv[1].c.y = iclip(mvstack[n].mv[1].c.y, miny, maxy);
+                mvstack[n].mv[1].c.x = iclip(mvstack[n].mv[1].c.x, minx, maxx);
+            }
+        }
+    }
+
+    // GMV candidate
+    if *cnt < 6 && ref0 >= 0 {
+        let last = *cnt as usize;
+        let comp_idx = if comp { 1 } else { 0 };
+        let mut found = false;
+        if st.iter_cntr < 16 {
+            for n in 0..last {
+                if unsafe { mvstack[n].mv[0].n == gmv[0].n
+                    && mvstack[n].mv[comp_idx].n == gmv[comp_idx].n }
+                {
+                    st.iter_cntr += n as i32 + 1;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                st.iter_cntr += last as i32;
+            }
+        }
+        if !found {
+            mvstack[last].mv = gmv;
+            mvstack[last].weight = 0;
+            mvstack[last].cwp_idx = 8;
+            mvstack[last].y_off = 0;
+            mvstack[last].x_off = 0;
+            *cnt = last as i32 + 1;
+        }
+
+        // extended MV candidates for large blocks
+        if imin(bw4, bh4) > 8 && *cnt >= 2 && *cnt < 6 {
+            static EXT_MVP: [(u8, u8); 6] = [
+                (0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1),
+            ];
+            let c_end: usize = if *cnt == 2 { 1 } else { 2 };
+            for c in 0..c_end {
+                let n_start = c * 2;
+                let n_end = imin((c * 4 + 2) as i32, 6) as usize;
+                for n in n_start..n_end {
+                    let yidx = EXT_MVP[n].0 as usize;
+                    let xidx = EXT_MVP[n].1 as usize;
+                    unsafe {
+                        st.dr[n].mv[0].c.y = mvstack[yidx].mv[0].c.y;
+                        st.dr[n].mv[0].c.x = mvstack[xidx].mv[0].c.x;
+                        if ref1 >= 0 {
+                            st.dr[n].mv[1].c.y = mvstack[yidx].mv[1].c.y;
+                            st.dr[n].mv[1].c.x = mvstack[xidx].mv[1].c.x;
+                        }
+                    }
+                }
+                st.drvd_cnt = n_end as i32;
+                if *cnt == 2 { break; }
+            }
+            add_derived(&mut st, mvstack, cnt, 6, ref1 >= 0);
+        }
+    }
+
+    // warp bank + gmv + defaults
+    if let Some(warp_out) = warp {
+        if *warp_cnt < 4 {
+            debug_assert!((ref0 as usize) < TIP_FRAME && ref1 == -1);
+            let sz = rt.warp.size[ref0 as usize] as usize;
+            let idx = rt.warp.idx[ref0 as usize] as usize;
+            let start = sz + idx - 1;
+            for n in 0..sz {
+                if *warp_cnt >= 4 { break; }
+                let widx = (start - n) & 3;
+                let mat = &rt.warp.mat[ref0 as usize][widx];
+                let wc = *warp_cnt as usize;
+                warp_out[wc][..6].copy_from_slice(mat);
+                warp_out[wc][6] = rt.warp.warp_type[ref0 as usize][widx] as i32;
+                *warp_cnt += 1;
+            }
+            if *warp_cnt < 4 {
+                let wc = *warp_cnt as usize;
+                let mat = &frm_hdr.gmv.m[ref0 as usize].matrix;
+                warp_out[wc][..6].copy_from_slice(mat);
+                warp_out[wc][6] = frm_hdr.gmv.m[ref0 as usize].wm_type as i32;
+                *warp_cnt += 1;
+            }
+            let def = &crate::tables::DEFAULT_WM_PARAMS;
+            for _ in 0..2 {
+                if *warp_cnt >= 4 { break; }
+                let wc = *warp_cnt as usize;
+                warp_out[wc][..6].copy_from_slice(&def.matrix);
+                warp_out[wc][6] = def.wm_type as i32;
+                *warp_cnt += 1;
+            }
+        }
+    }
+
+    debug_assert!(*cnt <= 6);
+
+    // default intrabc refs
+    let mut n_refmvs = *cnt;
+    if ref0 == -1 {
+        let max_bvp = frm_hdr.max_bvp_drl_bits as i32 + 1;
+        if n_refmvs < max_bvp {
+            let sbsz = (64 << frm_hdr.sb128) as i32;
+            mvstack[n_refmvs as usize].mv[0] = Mv { c: MvXY { y: -(sbsz * 8), x: 0 } };
+            mvstack[n_refmvs as usize].weight = 0;
+            n_refmvs += 1;
+            *cnt = n_refmvs;
+            if n_refmvs < max_bvp {
+                mvstack[n_refmvs as usize].mv[0] = Mv { c: MvXY { y: 0, x: -(8 * (sbsz + 256)) } };
+                mvstack[n_refmvs as usize].weight = 0;
+                n_refmvs += 1;
+                *cnt = n_refmvs;
+                if n_refmvs < max_bvp {
+                    mvstack[n_refmvs as usize].mv[0] = Mv { c: MvXY { y: -(bh4 * 32), x: 0 } };
+                    mvstack[n_refmvs as usize].weight = 0;
+                    n_refmvs += 1;
+                    *cnt = n_refmvs;
+                    if n_refmvs < max_bvp {
+                        mvstack[n_refmvs as usize].mv[0] = Mv { c: MvXY { y: 0, x: -(bw4 * 32) } };
+                        mvstack[n_refmvs as usize].weight = 0;
+                        n_refmvs += 1;
+                        *cnt = n_refmvs;
+                    }
+                }
+            }
+        }
+    }
+
+    // zero-fill remaining slots
+    for n in *cnt as usize..6 {
+        mvstack[n].mv = [Mv { c: MvXY { y: 0, x: 0 } }; 2];
+        mvstack[n].weight = 0;
+        mvstack[n].cwp_idx = 8;
+        mvstack[n].x_off = 0;
+        mvstack[n].y_off = 0;
     }
 }
 
