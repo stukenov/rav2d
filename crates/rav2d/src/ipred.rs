@@ -622,6 +622,142 @@ pub fn ipred_z3(
     }
 }
 
+pub fn ipred_z2(
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    width: usize,
+    height: usize,
+    mut angle: i32,
+    max_width: i32,
+    max_height: i32,
+) {
+    let mrl_mul = angle & ANGLE_MULTI_MRL_FLAG != 0;
+    let is_luma = angle & ANGLE_IS_LUMA != 0;
+    let is_sm_l = angle & ANGLE_SMOOTH_LEFT_EDGE_FLAG != 0;
+    let is_sm_t = angle & ANGLE_SMOOTH_TOP_EDGE_FLAG != 0;
+    let enable_intra_edge_filter = angle & ANGLE_USE_EDGE_FILTER_FLAG != 0;
+    let mrl_idx = ((angle & ANGLE_MRL_IDX_MASK) >> ANGLE_MRL_IDX_SHIFT) as usize;
+    let have_top = angle & ANGLE_HAS_TOP_FLAG != 0;
+    let have_left = angle & ANGLE_HAS_LEFT_FLAG != 0;
+    angle &= 511;
+
+    if mrl_mul {
+        let e_stride = (width + height) * 2 + mrl_idx * 3 + 1;
+        let mut tmp = vec![0u8; 64 * 64];
+        ipred_z2(
+            &mut tmp, 64, tl, o, width, height,
+            angle | ((mrl_idx as i32) << ANGLE_MRL_IDX_SHIFT) | ANGLE_IS_LUMA,
+            max_width, max_height,
+        );
+        ipred_z2(
+            dst, stride, tl, o + e_stride, width, height,
+            angle | ANGLE_IS_LUMA,
+            max_width, max_height,
+        );
+        for y in 0..height {
+            for x in 0..width {
+                dst[y * stride + x] = ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
+            }
+        }
+        return;
+    }
+
+    let dy = DR_INTRA_DERIVATIVE[(angle - 90) as usize] as i32;
+    let dx = DR_INTRA_DERIVATIVE[(180 - angle) as usize] as i32;
+
+    // Top filter buffer
+    let mut filt = vec![0u8; 72];
+    let top_off = mrl_idx;
+    let sz_t = 1 + width + mrl_idx;
+    let str_t = if enable_intra_edge_filter && have_top && mrl_idx == 0 {
+        get_filter_strength((width + height) as i32, angle - 90, is_sm_t)
+    } else {
+        0
+    };
+    if str_t > 0 {
+        filter_edge(
+            &mut filt[1..], sz_t, 1, sz_t + max_width as usize - width,
+            &tl[o..], 0, sz_t as i32, str_t as usize,
+        );
+    } else {
+        filt[1..1 + sz_t].copy_from_slice(&tl[o..o + sz_t]);
+    }
+    filt[0] = filt[1];
+    filt[sz_t + 1] = filt[sz_t];
+
+    // Left filter buffer
+    let mut filt2 = vec![0u8; 72];
+    let left_off: usize = height + 2;
+    let sz_l = 1 + height + mrl_idx;
+    let str_l = if enable_intra_edge_filter && have_left && mrl_idx == 0 {
+        get_filter_strength((width + height) as i32, 180 - angle, is_sm_l)
+    } else {
+        0
+    };
+    if str_l > 0 {
+        filter_edge(
+            &mut filt2[1..], sz_l, height - max_height as usize, sz_l - 1,
+            &tl[o - (height + mrl_idx)..], 0, sz_l as i32, str_l as usize,
+        );
+    } else {
+        filt2[1..1 + sz_l].copy_from_slice(&tl[o - (height + mrl_idx)..o + 1]);
+    }
+    filt2[1 + sz_l] = filt2[sz_l];
+    filt2[0] = filt2[1];
+
+    for y in 0..height {
+        let ypos = (y + 1) as i32;
+        let mut xpos = -(ypos + mrl_idx as i32) * dx;
+        let mut x = 0usize;
+
+        // Left reference loop
+        while x < width && xpos < -(64 * (1 + mrl_idx as i32)) {
+            let xpos_l = (x + 1) as i32;
+            let ypos_l = ((y as i32) << 6) - (xpos_l + mrl_idx as i32) * dy;
+            let base_y = ypos_l >> 6;
+            let shift = ((ypos_l & 0x3F) >> 1) as usize;
+            let bi = (left_off as i32 - base_y) as usize;
+            if is_luma {
+                let f = &DR_INTERP_FILTER[shift];
+                let v = f.a as i32 * filt2[bi - 1] as i32
+                    + f.b as i32 * filt2[bi - 2] as i32
+                    + f.c as i32 * filt2[bi - 3] as i32
+                    + f.d as i32 * filt2[bi - 4] as i32;
+                dst[y * stride + x] = iclip((v + 64) >> 7, 0, 255) as u8;
+            } else {
+                let v = (32 - shift as i32) * filt2[bi - 2] as i32
+                    + shift as i32 * filt2[bi - 3] as i32;
+                dst[y * stride + x] = iclip((v + 16) >> 5, 0, 255) as u8;
+            }
+            x += 1;
+            xpos += 64;
+        }
+
+        // Top reference loop
+        while x < width {
+            let base_x = xpos >> 6;
+            let shift = ((xpos & 0x3F) >> 1) as usize;
+            let ti = top_off as i32 + base_x;
+            if is_luma {
+                let f = &DR_INTERP_FILTER[shift];
+                let v = f.a as i32 * filt[(ti + 1) as usize] as i32
+                    + f.b as i32 * filt[(ti + 2) as usize] as i32
+                    + f.c as i32 * filt[(ti + 3) as usize] as i32
+                    + f.d as i32 * filt[(ti + 4) as usize] as i32;
+                dst[y * stride + x] = iclip((v + 64) >> 7, 0, 255) as u8;
+            } else {
+                let v = (32 - shift as i32) * filt[(ti + 2) as usize] as i32
+                    + shift as i32 * filt[(ti + 3) as usize] as i32;
+                dst[y * stride + x] = iclip((v + 16) >> 5, 0, 255) as u8;
+            }
+            x += 1;
+            xpos += 64;
+        }
+    }
+}
+
 pub fn ibp_blend_8bpc(
     dst: &mut [u8],
     stride: usize,
@@ -1007,6 +1143,78 @@ mod tests {
         let w = make_ibp_weights();
         ipred_z3(&mut dst, 4, &tl, o, 4, 4,
                  225 | ANGLE_HAS_LEFT_FLAG, 4, 4, &w);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_z2_basic_luma() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..32 { tl[o + i] = 200; }
+        for i in 1..=32 { tl[o - i] = 100; }
+        let mut dst = [0u8; 16];
+        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
+                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 4, 4);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_z2_basic_chroma() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..32 { tl[o + i] = 200; }
+        for i in 1..=32 { tl[o - i] = 100; }
+        let mut dst = [0u8; 16];
+        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
+                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG, 4, 4);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_z2_uniform_input() {
+        let tl = [128u8; 256];
+        let o = 128;
+        let mut dst = [0u8; 64];
+        ipred_z2(&mut dst, 8, &tl, o, 8, 8,
+                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 8, 8);
+        for &v in &dst[..64] {
+            assert_eq!(v, 128);
+        }
+    }
+
+    #[test]
+    fn test_z2_steep_angle() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..32 { tl[o + i] = 250; }
+        for i in 1..=32 { tl[o - i] = 50; }
+        let mut dst = [0u8; 16];
+        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
+                 170 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 4, 4);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_z2_shallow_angle() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..32 { tl[o + i] = 250; }
+        for i in 1..=32 { tl[o - i] = 50; }
+        let mut dst = [0u8; 16];
+        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
+                 100 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 4, 4);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_z2_no_panic_8x8() {
+        let mut tl = [128u8; 256];
+        let o = 128;
+        for i in 0..64 { tl[o + i] = 200; }
+        for i in 1..=64 { tl[o - i] = 100; }
+        let mut dst = [0u8; 64];
+        ipred_z2(&mut dst, 8, &tl, o, 8, 8,
+                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 8, 8);
         assert!(dst.iter().any(|&v| v > 0));
     }
 }
