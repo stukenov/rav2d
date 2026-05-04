@@ -850,7 +850,7 @@ pub fn parse_frame_hdr(
 
     // refresh_frame_flags
     if obu_type == ObuType::ClosedLoopKf && seqhdr.max_mlayer_id == 0 {
-        hdr.refresh_frame_flags = (1u8 << seqhdr.ref_frames) - 1;
+        hdr.refresh_frame_flags = ((1u32 << seqhdr.ref_frames) - 1) as u8;
     } else if obu_type == ObuType::OpenLoopKf || seqhdr.max_mlayer_id > 0 {
         if seqhdr.short_refresh_frame_flags {
             hdr.refresh_frame_flags = 1 << gb.get_bits(seqhdr.ref_frames_log2 as i32);
@@ -3373,6 +3373,34 @@ mod tests {
         let data = [0x64, 0xFF];
         let mut c = make_decoder_ctx();
         assert!(parse_obus(&mut c, &data).is_err());
+    }
+
+    #[test]
+    fn test_parse_obus_real_file() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media/avm-v14.1.0-bus.352x288.l5.seg1.obu");
+        let data = std::fs::read(path).expect("Failed to read test OBU file");
+        let mut c = make_decoder_ctx();
+        c.frame_size_limit = 352 * 288;
+        c.all_layers = true;
+
+        let mut offset = 0;
+        let mut parsed_seq = false;
+        while offset < data.len() {
+            match parse_obus(&mut c, &data[offset..]) {
+                Ok(consumed) => {
+                    assert!(consumed > 0);
+                    if c.seq_hdr.is_some() {
+                        parsed_seq = true;
+                    }
+                    offset += consumed;
+                }
+                Err(_) => break,
+            }
+        }
+        assert!(parsed_seq, "Should have parsed a sequence header");
+        let seq = c.seq_hdr.unwrap();
+        assert_eq!(seq.max_width, 352);
+        assert_eq!(seq.max_height, 288);
     }
 
     #[test]
