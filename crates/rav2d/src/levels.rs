@@ -109,6 +109,7 @@ pub const ANGLE_MRL_IDX_MASK: i32 = 3 << 13;
 pub const ANGLE_MULTI_MRL_FLAG: i32 = 1 << 15;
 pub const ANGLE_HAS_LEFT_FLAG: i32 = 1 << 16;
 pub const ANGLE_HAS_TOP_FLAG: i32 = 1 << 17;
+pub const ANGLE_DIP_FLAG: i32 = 1 << 18;
 pub const ANGLE_IS_LUMA: i32 = 1 << 19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
