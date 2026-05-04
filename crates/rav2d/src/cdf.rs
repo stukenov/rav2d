@@ -2,13 +2,25 @@
 #[repr(C)]
 pub struct CdfModeContext { pub data: [u16; 3496] }
 
+impl Default for CdfModeContext {
+    fn default() -> Self { Self { data: [0; 3496] } }
+}
+
 #[derive(Clone)]
 #[repr(C)]
 pub struct CdfCoefContext { pub data: [u16; 4656] }
 
+impl Default for CdfCoefContext {
+    fn default() -> Self { Self { data: [0; 4656] } }
+}
+
 #[derive(Clone)]
 #[repr(C)]
 pub struct CdfMvContext { pub data: [u16; 168] }
+
+impl Default for CdfMvContext {
+    fn default() -> Self { Self { data: [0; 168] } }
+}
 
 macro_rules! cdf_acc {
     ($name:ident, $off:expr, $len:expr) => {
@@ -178,6 +190,17 @@ pub struct CdfContext {
     pub m: CdfModeContext,
     pub mv: CdfMvContext,
     pub dmv: CdfMvContext,
+}
+
+impl Default for CdfContext {
+    fn default() -> Self {
+        Self {
+            coef: Default::default(),
+            m: Default::default(),
+            mv: Default::default(),
+            dmv: Default::default(),
+        }
+    }
 }
 
 #[repr(C)]

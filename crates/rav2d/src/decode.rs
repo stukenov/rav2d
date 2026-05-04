@@ -187,6 +187,83 @@ pub fn reset_context(ctx: &mut BlockContext, keyframe: bool, is_tip_frame: bool)
     ctx.pal_sz.fill(0);
 }
 
+pub fn decode_frame_init(
+    frame_hdr: &FrameHeader,
+    _seq_hdr: &crate::headers::SequenceHeader,
+    lf: &mut LoopFilterState,
+    frame_thread: &mut crate::internal::FrameThread,
+    ts: &mut Vec<crate::internal::TileState>,
+    n_ts: &mut i32,
+    a: &mut Vec<BlockContext>,
+    a_sz: &mut i32,
+    dq: &mut [[[u32; 2]; 3]; MAX_SEGMENTS],
+    qm: &mut [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES],
+    absrefdist: &[u8; 7],
+    sbh: i32,
+    sb256w: i32,
+    sb256h: i32,
+    _bw: i32,
+    _bh: i32,
+    n_tc: i32,
+    n_passes: i32,
+) {
+    init_start_of_tile_row(
+        &mut lf.start_of_tile_row,
+        sbh,
+        frame_hdr.tiling.t.rows,
+        frame_hdr.tiling.t.row_start_sb.as_ref(),
+    );
+
+    let new_n_ts = frame_hdr.tiling.t.cols as i32 * frame_hdr.tiling.t.rows as i32;
+    if new_n_ts != *n_ts {
+        if n_passes > 1 {
+            frame_thread.tile_start_off.resize(new_n_ts as usize, 0);
+        }
+        *n_ts = new_n_ts;
+    }
+    ts.resize_with(new_n_ts as usize, Default::default);
+
+    let new_a_sz = sb256w * frame_hdr.tiling.t.rows as i32;
+    if new_a_sz != *a_sz {
+        a.resize_with(new_a_sz as usize, Default::default);
+        *a_sz = new_a_sz;
+    }
+
+    let num_sb256 = (sb256w * sb256h) as usize;
+    lf.mask.resize_with(num_sb256, Default::default);
+    for m in lf.mask.iter_mut() {
+        *m = Default::default();
+    }
+    lf.lr_mask.resize_with(num_sb256, Default::default);
+    for m in lf.lr_mask.iter_mut() {
+        *m = Default::default();
+    }
+
+    init_wiener(frame_hdr, lf);
+    lf.restore_planes = compute_restore_planes(frame_hdr);
+
+    if frame_hdr.gdf.enabled != AdaptiveBoolean::Off {
+        lf.gdf_ref_dst_idx = compute_gdf_ref_dst_idx(frame_hdr, absrefdist);
+    }
+
+    let re_sz = sb256h * frame_hdr.tiling.t.cols as i32;
+    lf.re_sz = re_sz;
+
+    init_quant_tables(frame_hdr, frame_hdr.quant.yac as i32, dq);
+
+    if frame_hdr.quant.qm.enabled == 0 {
+        *qm = Default::default();
+    }
+
+    if n_tc > 1 {
+        let keyframe = frame_hdr.is_key_or_intra();
+        let is_tip = frame_hdr.tip.frame_mode == 2;
+        for ctx in a.iter_mut().take(new_a_sz as usize) {
+            reset_context(ctx, keyframe, is_tip);
+        }
+    }
+}
+
 // size_group_lookup[BlockSize] -> size group (0-3)
 pub static SIZE_GROUP: [u8; N_BS_SIZES] = {
     let mut t = [0u8; N_BS_SIZES];
@@ -1840,5 +1917,138 @@ mod tests {
             lr.restoration_type == RestorationType::None as u8
                 || lr.restoration_type == RestorationType::NsWiener as u8
         );
+    }
+
+    fn make_frame_hdr_for_init(cols: u8, rows: u8) -> FrameHeader {
+        let mut hdr = FrameHeader::default();
+        hdr.tiling.t.cols = cols;
+        hdr.tiling.t.rows = rows;
+        hdr.quant.yac = 100;
+        hdr
+    }
+
+    #[test]
+    fn test_decode_frame_init_single_tile() {
+        let hdr = make_frame_hdr_for_init(1, 1);
+        let seq = crate::headers::SequenceHeader::default();
+        let mut lf = LoopFilterState::default();
+        let mut ft = crate::internal::FrameThread::default();
+        let mut ts = Vec::new();
+        let mut n_ts = 0i32;
+        let mut a = Vec::new();
+        let mut a_sz = 0i32;
+        let mut dq = [[[0u32; 2]; 3]; MAX_SEGMENTS];
+        let mut qm: [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES] = Default::default();
+        let absrefdist = [0u8; 7];
+
+        decode_frame_init(
+            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
+            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
+            4, 2, 2, 32, 32, 1, 1,
+        );
+
+        assert_eq!(n_ts, 1);
+        assert_eq!(ts.len(), 1);
+        assert_eq!(lf.re_sz, 2);
+        assert!(dq[0][0][0] > 0);
+    }
+
+    #[test]
+    fn test_decode_frame_init_multi_tile() {
+        let hdr = make_frame_hdr_for_init(2, 3);
+        let seq = crate::headers::SequenceHeader::default();
+        let mut lf = LoopFilterState::default();
+        let mut ft = crate::internal::FrameThread::default();
+        let mut ts = Vec::new();
+        let mut n_ts = 0i32;
+        let mut a = Vec::new();
+        let mut a_sz = 0i32;
+        let mut dq = [[[0u32; 2]; 3]; MAX_SEGMENTS];
+        let mut qm: [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES] = Default::default();
+        let absrefdist = [0u8; 7];
+
+        decode_frame_init(
+            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
+            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
+            8, 4, 4, 64, 64, 1, 1,
+        );
+
+        assert_eq!(n_ts, 6);
+        assert_eq!(ts.len(), 6);
+        assert_eq!(a_sz, 4 * 3);
+        assert_eq!(a.len(), 12);
+    }
+
+    #[test]
+    fn test_decode_frame_init_multithread_resets_ctx() {
+        let mut hdr = make_frame_hdr_for_init(1, 1);
+        hdr.tip.frame_mode = 0;
+        let seq = crate::headers::SequenceHeader::default();
+        let mut lf = LoopFilterState::default();
+        let mut ft = crate::internal::FrameThread::default();
+        let mut ts = Vec::new();
+        let mut n_ts = 0i32;
+        let mut a = Vec::new();
+        let mut a_sz = 0i32;
+        let mut dq = [[[0u32; 2]; 3]; MAX_SEGMENTS];
+        let mut qm: [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES] = Default::default();
+        let absrefdist = [0u8; 7];
+
+        decode_frame_init(
+            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
+            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
+            4, 2, 2, 32, 32, 4, 1,
+        );
+
+        assert_eq!(n_ts, 1);
+        assert_eq!(a.len(), 2);
+    }
+
+    #[test]
+    fn test_decode_frame_init_multipass_allocs_tile_start_off() {
+        let hdr = make_frame_hdr_for_init(2, 2);
+        let seq = crate::headers::SequenceHeader::default();
+        let mut lf = LoopFilterState::default();
+        let mut ft = crate::internal::FrameThread::default();
+        let mut ts = Vec::new();
+        let mut n_ts = 0i32;
+        let mut a = Vec::new();
+        let mut a_sz = 0i32;
+        let mut dq = [[[0u32; 2]; 3]; MAX_SEGMENTS];
+        let mut qm: [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES] = Default::default();
+        let absrefdist = [0u8; 7];
+
+        decode_frame_init(
+            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
+            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
+            4, 2, 2, 32, 32, 1, 2,
+        );
+
+        assert_eq!(n_ts, 4);
+        assert_eq!(ft.tile_start_off.len(), 4);
+    }
+
+    #[test]
+    fn test_decode_frame_init_mask_alloc() {
+        let hdr = make_frame_hdr_for_init(1, 1);
+        let seq = crate::headers::SequenceHeader::default();
+        let mut lf = LoopFilterState::default();
+        let mut ft = crate::internal::FrameThread::default();
+        let mut ts = Vec::new();
+        let mut n_ts = 0i32;
+        let mut a = Vec::new();
+        let mut a_sz = 0i32;
+        let mut dq = [[[0u32; 2]; 3]; MAX_SEGMENTS];
+        let mut qm: [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES] = Default::default();
+        let absrefdist = [0u8; 7];
+
+        decode_frame_init(
+            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
+            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
+            4, 3, 2, 32, 32, 1, 1,
+        );
+
+        assert_eq!(lf.mask.len(), 6);
+        assert_eq!(lf.lr_mask.len(), 6);
     }
 }

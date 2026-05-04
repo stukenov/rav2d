@@ -87,6 +87,23 @@ pub struct TileState {
     pub ns_wiener_bank: [NsWienerBank; 3],
 }
 
+impl Default for TileState {
+    fn default() -> Self {
+        Self {
+            cdf: Default::default(),
+            msac_buf: Vec::new(),
+            tiling: Default::default(),
+            progress: [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)],
+            frame_thread: Default::default(),
+            lowest_pixel: Vec::new(),
+            dqmem: [[[0; 2]; 3]; MAX_SEGMENTS],
+            last_qidx: 0,
+            lr_ref: Default::default(),
+            ns_wiener_bank: Default::default(),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TileBounds {
     pub col_start: i32,
@@ -119,6 +136,24 @@ pub struct FrameThread {
     pub scheduled: i32,
 }
 
+impl Default for FrameThread {
+    fn default() -> Self {
+        Self {
+            next_tile_row: [0; 2],
+            entropy_progress: AtomicI32::new(0),
+            deblock_progress: AtomicI32::new(0),
+            b: Vec::new(),
+            cbi: Vec::new(),
+            pal_idx: Vec::new(),
+            cf: Vec::new(),
+            partition: Vec::new(),
+            prog_sz: 0,
+            tile_start_off: Vec::new(),
+            scheduled: 0,
+        }
+    }
+}
+
 pub struct LoopFilterState {
     pub mask: Vec<Av2Filter>,
     pub lr_mask: Vec<Av2Restoration>,
@@ -134,6 +169,27 @@ pub struct LoopFilterState {
     pub restore_planes: i32,
     pub wiener_idx: usize,
     pub ns_subclass_class_idx: Option<usize>,
+}
+
+impl Default for LoopFilterState {
+    fn default() -> Self {
+        Self {
+            mask: Vec::new(),
+            lr_mask: Vec::new(),
+            segmap_uv: Vec::new(),
+            uv_segmap_stride: 0,
+            cdef_buf_plane_sz: [0; 2],
+            cdef_buf_sbh: 0,
+            lr_buf_plane_sz: [0; 4],
+            re_sz: 0,
+            base_q: 0,
+            gdf_ref_dst_idx: 0,
+            start_of_tile_row: Vec::new(),
+            restore_planes: 0,
+            wiener_idx: 0,
+            ns_subclass_class_idx: None,
+        }
+    }
 }
 
 pub struct FrameContext {
