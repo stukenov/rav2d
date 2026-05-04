@@ -1,4 +1,4 @@
-use crate::headers::WarpedMotionParams;
+use crate::headers::{WarpedMotionParams, WarpedMotionType};
 use crate::intops::{apply_sign, apply_sign64, iclip, iclip64to32, imax, imin, ulog2};
 use crate::levels::INVALID_MV;
 use crate::levels::{Mv, MvXY, RefPair};
@@ -1125,6 +1125,67 @@ pub fn tile_sbrow_init(
     rt.warp.idx = [0; 7];
 }
 
+pub fn reset_sb(
+    rt: &mut Tile,
+    ra: &[Block],
+    sbsz: i32,
+    refmv_bank: bool,
+    is_key_or_intra: bool,
+    tip_frame_mode: u8,
+    by: i32,
+    bx: i32,
+) {
+    let y_start = (by & 63) as usize;
+    let x_start = (bx & 127) as usize;
+    for y in y_start..y_start + sbsz as usize {
+        for x in x_start..x_start + sbsz as usize {
+            let idx = y * 128 + x;
+            rt.r[idx].mv[0] = Mv { c: MvXY { y: INVALID_MV, x: 0 } };
+            rt.r[idx].r#ref.pair = -1;
+        }
+    }
+
+    if refmv_bank {
+        rt.bank.hits[0] = 0;
+        rt.bank.hits[1] = 0;
+        rt.bank.avail = 0;
+    }
+
+    rt.warp.hits = 0;
+
+    if by == rt.tile_row.start || is_key_or_intra || tip_frame_mode == 2 {
+        return;
+    }
+
+    let end_x4 = imin(bx + sbsz, rt.tile_col.end);
+    let mut x = bx;
+    let mut hits = 0;
+    while x < end_x4 {
+        let r = &ra[(rt.ra_off + (x >> 1) as usize)];
+        let sz4 = crate::tables::BLOCK_DIMENSIONS[r.bs as usize][0] as i32;
+        if unsafe { r.mv[0].c.y } != INVALID_MV {
+            if refmv_bank {
+                let rp = unsafe { r.r#ref };
+                let mvs = if r.mf & 2 != 0 { &r.lmv } else { &r.mv };
+                mv_bank_add_inner(&mut rt.bank, rp, mvs, r.mf >> 2);
+            }
+            if r.mf & 2 != 0 {
+                let mut wmp = WarpedMotionParams {
+                    wm_type: unsafe { std::mem::transmute::<i8, WarpedMotionType>(r.warp_type) },
+                    matrix: r.m,
+                    ..WarpedMotionParams::default()
+                };
+                if wmp.wm_type != WarpedMotionType::Invalid {
+                    warp_bank_add(&mut rt.warp, &wmp, unsafe { r.r#ref.r[0] } as usize);
+                }
+            }
+            hits += 1;
+            if hits == 4 { break; }
+        }
+        x += sz4;
+    }
+}
+
 pub fn save_tmvs(
     r: &[Block],
     ra: &mut [Block],
@@ -2182,6 +2243,55 @@ mod tests {
         let sbsz8 = 8;
         assert_eq!(rt.rp_proj_off, (3 * sbsz8 * 32) as usize);
         assert_eq!(rt.tile_row.end, 64);
+    }
+
+    #[test]
+    fn test_reset_sb_basic() {
+        let mut rt = make_default_tile();
+        rt.r = vec![Block::default(); 128 * 64];
+        rt.tile_row = TileRange { start: 0, end: 64 };
+        rt.tile_col = TileRange { start: 0, end: 64 };
+        let ra = vec![Block::default(); 64];
+
+        reset_sb(&mut rt, &ra, 16, false, false, 0, 0, 0);
+
+        for y in 0..16usize {
+            for x in 0..16usize {
+                assert_eq!(unsafe { rt.r[y * 128 + x].mv[0].c.y }, INVALID_MV);
+                assert_eq!(unsafe { rt.r[y * 128 + x].r#ref.pair }, -1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_reset_sb_refmv_bank() {
+        let mut rt = make_default_tile();
+        rt.r = vec![Block::default(); 128 * 64];
+        rt.tile_row = TileRange { start: 0, end: 64 };
+        rt.tile_col = TileRange { start: 0, end: 64 };
+        rt.bank.hits = [5, 3];
+        rt.bank.avail = 10;
+        rt.warp.hits = 7;
+        let ra = vec![Block::default(); 64];
+
+        reset_sb(&mut rt, &ra, 16, true, false, 0, 0, 0);
+
+        assert_eq!(rt.bank.hits[0], 0);
+        assert_eq!(rt.bank.hits[1], 0);
+        assert_eq!(rt.bank.avail, 0);
+        assert_eq!(rt.warp.hits, 0);
+    }
+
+    #[test]
+    fn test_reset_sb_key_frame_early_return() {
+        let mut rt = make_default_tile();
+        rt.r = vec![Block::default(); 128 * 64];
+        rt.tile_row = TileRange { start: 0, end: 64 };
+        rt.tile_col = TileRange { start: 0, end: 64 };
+        let ra = vec![Block::default(); 64];
+
+        reset_sb(&mut rt, &ra, 16, true, true, 0, 16, 0);
+        assert_eq!(rt.bank.hits[0], 0);
     }
 
     fn make_default_frame() -> Frame {
