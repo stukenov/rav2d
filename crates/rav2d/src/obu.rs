@@ -139,7 +139,7 @@ fn parse_tile_info(
         while sbx < sbw {
             thdr.col_start_sb[thdr.cols as usize] = sbx as u16;
             let max_width = imin(sbw - sbx, max_tile_width_sb);
-            let w_tile = gb.get_uniform(max_width as u32) as i32 + 1;
+            let w_tile = if max_width > 1 { gb.get_uniform(max_width as u32) as i32 + 1 } else { 1 };
             widest_tile = imax(widest_tile, w_tile);
             sbx += w_tile;
             thdr.cols += 1;
@@ -158,7 +158,7 @@ fn parse_tile_info(
         while sby < sbh {
             thdr.row_start_sb[thdr.rows as usize] = sby as u16;
             let max_height = imin(sbh - sby, max_tile_height_sb);
-            let h_tile = gb.get_uniform(max_height as u32) as i32 + 1;
+            let h_tile = if max_height > 1 { gb.get_uniform(max_height as u32) as i32 + 1 } else { 1 };
             sby += h_tile;
             thdr.rows += 1;
         }
@@ -1715,6 +1715,9 @@ pub fn parse_frame_hdr(
         }
         if hdr.is_inter_or_switch() {
             if seqhdr.global_motion && gb.get_bit() != 0 {
+                if hdr.n_ref_frames == 0 {
+                    return Err(Dav2dError::InvalidData);
+                }
                 hdr.gmv.r#ref = gb.get_uniform(hdr.n_ref_frames as u32 + 1) as u8;
                 let (ref_base_mat, in_dist);
                 if hdr.gmv.r#ref == hdr.n_ref_frames {
@@ -3401,6 +3404,66 @@ mod tests {
         let seq = c.seq_hdr.unwrap();
         assert_eq!(seq.max_width, 352);
         assert_eq!(seq.max_height, 288);
+    }
+
+    fn try_parse_obu_file(filename: &str) -> (bool, Option<(i32, i32)>) {
+        let path = format!("{}/../../dav2d/media/{}", env!("CARGO_MANIFEST_DIR"), filename);
+        let data = std::fs::read(&path).unwrap_or_default();
+        if data.is_empty() {
+            return (false, None);
+        }
+        let mut c = make_decoder_ctx();
+        c.frame_size_limit = 1920 * 1080;
+        c.all_layers = true;
+
+        let mut offset = 0;
+        while offset < data.len() {
+            match parse_obus(&mut c, &data[offset..]) {
+                Ok(consumed) => {
+                    assert!(consumed > 0);
+                    offset += consumed;
+                    // Stop after first frame header — without full decode pipeline
+                    // we can't maintain ref state for subsequent inter frames
+                    if c.frame_hdr.is_some() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let dims = c.seq_hdr.as_ref().map(|s| (s.max_width, s.max_height));
+        (c.seq_hdr.is_some(), dims)
+    }
+
+    #[test]
+    fn test_parse_obus_all_media_files() {
+        let media_dir = format!("{}/../../dav2d/media", env!("CARGO_MANIFEST_DIR"));
+        let entries = std::fs::read_dir(&media_dir);
+        if entries.is_err() {
+            return;
+        }
+        let mut tested = 0;
+        let mut failures = Vec::new();
+        for entry in entries.unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".obu") {
+                continue;
+            }
+            let result = std::panic::catch_unwind(|| try_parse_obu_file(&name));
+            match result {
+                Ok((parsed_seq, _)) => {
+                    if !parsed_seq {
+                        failures.push(format!("{name}: no seq_hdr"));
+                    }
+                }
+                Err(_) => {
+                    failures.push(format!("{name}: panic"));
+                }
+            }
+            tested += 1;
+        }
+        assert!(failures.is_empty(), "Parse failures: {failures:?}");
+        assert!(tested > 0, "No OBU test files found");
     }
 
     #[test]
