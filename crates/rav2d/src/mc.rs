@@ -209,6 +209,123 @@ pub fn sad_nxn_8bpc(
     sad
 }
 
+#[inline(always)]
+fn bilin(a: i32, b: i32, mxy: i32) -> i32 {
+    16 * a + mxy * (b - a)
+}
+
+#[inline(always)]
+fn bilin_rnd(a: i32, b: i32, mxy: i32, sh: i32) -> i32 {
+    (bilin(a, b, mxy) + ((1 << sh) >> 1)) >> sh
+}
+
+pub fn put_bilin_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+) {
+    if mx != 0 {
+        if my != 0 {
+            let mut mid = vec![0i16; 64 * (h + 1)];
+            for y in 0..h + 1 {
+                for x in 0..w {
+                    let si = y * src_stride + x;
+                    mid[y * 64 + x] = bilin_rnd(
+                        src[si] as i32, src[si + 1] as i32, mx, 0,
+                    ) as i16;
+                }
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    let mi = y * 64 + x;
+                    dst[y * dst_stride + x] = iclip(
+                        bilin_rnd(mid[mi] as i32, mid[mi + 64] as i32, my, 8),
+                        0, 255,
+                    ) as u8;
+                }
+            }
+        } else {
+            for y in 0..h {
+                for x in 0..w {
+                    let si = y * src_stride + x;
+                    let px = bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0);
+                    dst[y * dst_stride + x] = iclip((px + 8) >> 4, 0, 255) as u8;
+                }
+            }
+        }
+    } else if my != 0 {
+        for y in 0..h {
+            for x in 0..w {
+                let si = y * src_stride + x;
+                dst[y * dst_stride + x] = iclip(
+                    bilin_rnd(src[si] as i32, src[si + src_stride] as i32, my, 4),
+                    0, 255,
+                ) as u8;
+            }
+        }
+    } else {
+        put_8bpc(dst, dst_stride, src, src_stride, w, h);
+    }
+}
+
+pub fn prep_bilin_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+) {
+    if mx != 0 {
+        if my != 0 {
+            let mut mid = vec![0i16; 64 * (h + 1)];
+            for y in 0..h + 1 {
+                for x in 0..w {
+                    let si = y * src_stride + x;
+                    mid[y * 64 + x] = bilin_rnd(
+                        src[si] as i32, src[si + 1] as i32, mx, 0,
+                    ) as i16;
+                }
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    let mi = y * 64 + x;
+                    tmp[y * tmp_stride + x] = bilin_rnd(
+                        mid[mi] as i32, mid[mi + 64] as i32, my, 4,
+                    ) as i16;
+                }
+            }
+        } else {
+            for y in 0..h {
+                for x in 0..w {
+                    let si = y * src_stride + x;
+                    tmp[y * tmp_stride + x] = bilin_rnd(
+                        src[si] as i32, src[si + 1] as i32, mx, 0,
+                    ) as i16;
+                }
+            }
+        }
+    } else if my != 0 {
+        for y in 0..h {
+            for x in 0..w {
+                let si = y * src_stride + x;
+                tmp[y * tmp_stride + x] = bilin_rnd(
+                    src[si] as i32, src[si + src_stride] as i32, my, 0,
+                ) as i16;
+            }
+        }
+    } else {
+        prep_8bpc(tmp, src, src_stride, w, h);
+    }
+}
+
 pub fn sad8x8_8bpc(
     p0: &[u8],
     p0_stride: usize,
@@ -595,6 +712,68 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_put_bilin_no_interp() {
+        let src = vec![42u8; 64];
+        let mut dst = vec![0u8; 64];
+        put_bilin_8bpc(&mut dst, 8, &src, 8, 8, 8, 0, 0);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_put_bilin_h_only() {
+        let mut src = vec![100u8; 80];
+        for y in 0..8 { src[y * 10 + 1] = 200; }
+        let mut dst = vec![0u8; 64];
+        put_bilin_8bpc(&mut dst, 8, &src, 10, 1, 8, 8, 0);
+        for y in 0..8 {
+            assert!(dst[y * 8] > 100 && dst[y * 8] < 200);
+        }
+    }
+
+    #[test]
+    fn test_put_bilin_v_only() {
+        let mut src = vec![100u8; 80];
+        for x in 0..8 { src[10 + x] = 200; }
+        let mut dst = vec![0u8; 64];
+        put_bilin_8bpc(&mut dst, 8, &src, 10, 8, 1, 0, 8);
+        assert!(dst[0] > 100 && dst[0] < 200);
+    }
+
+    #[test]
+    fn test_put_bilin_hv() {
+        let src = vec![128u8; 80];
+        let mut dst = vec![0u8; 64];
+        put_bilin_8bpc(&mut dst, 8, &src, 10, 4, 4, 8, 8);
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(dst[y * 8 + x], 128);
+            }
+        }
+    }
+
+    #[test]
+    fn test_prep_bilin_no_interp() {
+        let src = vec![128u8; 64];
+        let mut tmp = vec![0i16; 64];
+        prep_bilin_8bpc(&mut tmp, 8, &src, 8, 8, 8, 0, 0);
+        for &v in &tmp {
+            assert_eq!(v, (128 << INTERMEDIATE_BITS_8BPC) as i16);
+        }
+    }
+
+    #[test]
+    fn test_prep_bilin_h_only() {
+        let mut src = vec![100u8; 80];
+        for y in 0..8 { src[y * 10 + 1] = 200; }
+        let mut tmp = vec![0i16; 64];
+        prep_bilin_8bpc(&mut tmp, 8, &src, 10, 1, 8, 8, 0);
+        for y in 0..8 {
+            let v = tmp[y * 8] as i32;
+            assert!(v > 100 * 16 && v < 200 * 16);
+        }
+    }
+
     #[test]
     fn test_sad8x8_identical() {
         let p = vec![100u8; 64];
