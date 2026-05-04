@@ -310,6 +310,114 @@ pub fn setup_tile_wiener_banks(
     }
 }
 
+pub fn setup_tile(
+    ts: &mut crate::internal::TileState,
+    data: &[u8],
+    frame_hdr: &FrameHeader,
+    in_cdf: Option<&crate::cdf::CdfContext>,
+    qcat: usize,
+    tile_row: i32,
+    tile_col: i32,
+    col_start_sb: &[u16],
+    row_start_sb: &[u16],
+    sb_shift: i32,
+    bw: i32,
+    bh: i32,
+    n_tc: i32,
+) {
+    if let Some(cdf) = in_cdf {
+        ts.cdf = cdf.clone();
+    } else {
+        ts.cdf = crate::cdf::CdfContext::init_from_defaults(qcat);
+    }
+    ts.last_qidx = frame_hdr.quant.yac as i32;
+    ts.msac_buf = data.to_vec();
+
+    setup_tile_bounds(ts, tile_row, tile_col, col_start_sb, row_start_sb, sb_shift, bw, bh, n_tc);
+    setup_tile_wiener_banks(ts, frame_hdr);
+}
+
+pub fn decode_frame_init_cdf(
+    ts: &mut [crate::internal::TileState],
+    tile_groups: &[crate::internal::TileGroup],
+    frame_hdr: &FrameHeader,
+    in_cdf: Option<&crate::cdf::CdfContext>,
+    qcat: usize,
+    sb_shift: i32,
+    bw: i32,
+    bh: i32,
+    n_tc: i32,
+    n_passes: i32,
+    tile_start_off: &mut [u32],
+) -> Result<(), ()> {
+    let ti = &frame_hdr.tiling.t;
+    let mut tile_row = 0i32;
+    let mut tile_col = 0i32;
+
+    for tg in tile_groups.iter() {
+        let mut data_off = 0usize;
+        let mut remaining = tg.data.len();
+
+        for j in tg.start..=tg.end {
+            let tile_sz;
+            if j == tg.end {
+                tile_sz = remaining;
+            } else {
+                let n_bytes = frame_hdr.tiling.n_bytes as usize;
+                if n_bytes > remaining {
+                    return Err(());
+                }
+                let mut sz = 0usize;
+                for k in 0..n_bytes {
+                    sz |= (tg.data[data_off + k] as usize) << (k * 8);
+                }
+                sz += 1;
+                data_off += n_bytes;
+                remaining -= n_bytes;
+                if sz > remaining {
+                    return Err(());
+                }
+                tile_sz = sz;
+            }
+
+            let tile_data = &tg.data[data_off..data_off + tile_sz];
+            let start_off = if n_passes > 1 {
+                tile_start_off[j as usize]
+            } else {
+                0
+            };
+            let _ = start_off;
+
+            setup_tile(
+                &mut ts[j as usize],
+                tile_data,
+                frame_hdr,
+                in_cdf,
+                qcat,
+                tile_row,
+                tile_col,
+                ti.col_start_sb.as_ref(),
+                ti.row_start_sb.as_ref(),
+                sb_shift,
+                bw,
+                bh,
+                n_tc,
+            );
+
+            tile_col += 1;
+            if tile_col == ti.cols as i32 {
+                tile_col = 0;
+                tile_row += 1;
+            }
+
+            data_off += tile_sz;
+            remaining -= tile_sz;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn decode_tip_frame_init(
     ts: &mut [crate::internal::TileState],
     frame_hdr: &FrameHeader,
@@ -2215,5 +2323,140 @@ mod tests {
 
         assert_ne!(ts.ns_wiener_bank[0].filter[0][0][0], 0);
         assert_ne!(ts.ns_wiener_bank[2].filter[0][0][0], 0);
+    }
+
+    #[test]
+    fn test_setup_tile_sets_cdf_and_qidx() {
+        let mut ts = crate::internal::TileState::default();
+        let mut hdr = FrameHeader::default();
+        hdr.quant.yac = 128;
+        hdr.tiling.t.cols = 1;
+        hdr.tiling.t.rows = 1;
+        hdr.tiling.t.col_start_sb[1] = 4;
+        hdr.tiling.t.row_start_sb[1] = 4;
+        let data = vec![0xAA; 32];
+
+        setup_tile(
+            &mut ts, &data, &hdr, None, 2,
+            0, 0,
+            hdr.tiling.t.col_start_sb.as_ref(),
+            hdr.tiling.t.row_start_sb.as_ref(),
+            2, 32, 32, 1,
+        );
+
+        assert_eq!(ts.last_qidx, 128);
+        assert_eq!(ts.msac_buf.len(), 32);
+        assert_eq!(ts.tiling.col_start, 0);
+        assert_eq!(ts.tiling.row_start, 0);
+    }
+
+    #[test]
+    fn test_setup_tile_with_input_cdf() {
+        let mut ts = crate::internal::TileState::default();
+        let hdr = FrameHeader::default();
+        let mut cdf = crate::cdf::CdfContext::default();
+        cdf.m.data[0] = 12345;
+
+        setup_tile(
+            &mut ts, &[0; 8], &hdr, Some(&cdf), 0,
+            0, 0, &[0, 1], &[0, 1], 2, 16, 16, 1,
+        );
+
+        assert_eq!(ts.cdf.m.data[0], 12345);
+    }
+
+    #[test]
+    fn test_decode_frame_init_cdf_single_tile() {
+        let mut hdr = FrameHeader::default();
+        hdr.tiling.t.cols = 1;
+        hdr.tiling.t.rows = 1;
+        hdr.tiling.t.col_start_sb[1] = 4;
+        hdr.tiling.t.row_start_sb[1] = 4;
+        hdr.tiling.n_bytes = 2;
+
+        let tg = crate::internal::TileGroup {
+            data: vec![0x55; 64],
+            start: 0,
+            end: 0,
+        };
+
+        let mut ts = vec![crate::internal::TileState::default()];
+        let mut tile_start_off = vec![0u32];
+
+        let res = decode_frame_init_cdf(
+            &mut ts, &[tg], &hdr, None, 0,
+            2, 32, 32, 1, 1, &mut tile_start_off,
+        );
+
+        assert!(res.is_ok());
+        assert_eq!(ts[0].msac_buf.len(), 64);
+    }
+
+    #[test]
+    fn test_decode_frame_init_cdf_multi_tile() {
+        let mut hdr = FrameHeader::default();
+        hdr.tiling.t.cols = 2;
+        hdr.tiling.t.rows = 1;
+        hdr.tiling.t.col_start_sb[1] = 4;
+        hdr.tiling.t.col_start_sb[2] = 8;
+        hdr.tiling.t.row_start_sb[1] = 4;
+        hdr.tiling.n_bytes = 2;
+
+        let mut data = Vec::new();
+        // tile 0 size: 10 bytes (little-endian: 9 because tile_sz = stored+1)
+        data.push(9); data.push(0);
+        data.extend_from_slice(&[0xAA; 10]);
+        // tile 1: remaining
+        data.extend_from_slice(&[0xBB; 20]);
+
+        let tg = crate::internal::TileGroup {
+            data,
+            start: 0,
+            end: 1,
+        };
+
+        let mut ts = vec![
+            crate::internal::TileState::default(),
+            crate::internal::TileState::default(),
+        ];
+        let mut tile_start_off = vec![0u32; 2];
+
+        let res = decode_frame_init_cdf(
+            &mut ts, &[tg], &hdr, None, 0,
+            2, 64, 32, 1, 1, &mut tile_start_off,
+        );
+
+        assert!(res.is_ok());
+        assert_eq!(ts[0].msac_buf.len(), 10);
+        assert_eq!(ts[1].msac_buf.len(), 20);
+        assert_eq!(ts[0].tiling.col, 0);
+        assert_eq!(ts[1].tiling.col, 1);
+    }
+
+    #[test]
+    fn test_decode_frame_init_cdf_error_on_truncated() {
+        let mut hdr = FrameHeader::default();
+        hdr.tiling.t.cols = 2;
+        hdr.tiling.t.rows = 1;
+        hdr.tiling.n_bytes = 2;
+
+        let tg = crate::internal::TileGroup {
+            data: vec![0xFF; 3], // too short: claims huge tile_sz
+            start: 0,
+            end: 1,
+        };
+
+        let mut ts = vec![
+            crate::internal::TileState::default(),
+            crate::internal::TileState::default(),
+        ];
+        let mut tile_start_off = vec![0u32; 2];
+
+        let res = decode_frame_init_cdf(
+            &mut ts, &[tg], &hdr, None, 0,
+            2, 64, 32, 1, 1, &mut tile_start_off,
+        );
+
+        assert!(res.is_err());
     }
 }
