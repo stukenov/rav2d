@@ -254,6 +254,7 @@ impl Default for Block {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct MfmvRef {
     pub r#ref: u8,
     pub tgt: i8,
@@ -331,7 +332,10 @@ pub struct Candidate {
 
 pub struct Tile {
     pub rp_proj: Vec<SnglMvBlock>,
+    pub rp_proj_off: usize,
+    pub rp_traj_off: usize,
     pub ra: Vec<Block>,
+    pub ra_off: usize,
     pub ra_tl: Block,
     pub r: Vec<Block>,
     pub tile_col: TileRange,
@@ -1085,6 +1089,40 @@ pub fn splat_mv(
         s_src.oy4 += 2;
         bh4 -= 2;
     }
+}
+
+pub fn tile_sbrow_init(
+    rt: &mut Tile,
+    rf: &Frame,
+    tile_col_start4: i32,
+    tile_col_end4: i32,
+    tile_row_start4: i32,
+    tile_row_end4: i32,
+    sby: i32,
+    mut tile_row_idx: i32,
+) {
+    if !rf.have_threading {
+        tile_row_idx = 0;
+    }
+    let off1 = rf.rp_stride * tile_row_idx as isize;
+    let sbsz8 = rf.sbsz >> 1;
+    let off2 = sbsz8 as isize * off1;
+    let off3 = if rf.have_frame_threading {
+        (sby * sbsz8) as isize * rf.rp_stride
+    } else {
+        (sbsz8 as isize + 2) * off1 + 2 * rf.rp_stride
+    };
+    rt.rp_proj_off = off3 as usize;
+    rt.rp_traj_off = off2 as usize;
+    rt.ra_off = off1 as usize;
+    rt.tile_row.start = tile_row_start4;
+    rt.tile_row.end = imin(tile_row_end4, rf.ih4);
+    rt.tile_col.start = tile_col_start4;
+    rt.tile_col.end = imin(tile_col_end4, rf.iw4);
+    rt.bank.size = [0; 9];
+    rt.bank.idx = [0; 9];
+    rt.warp.size = [0; 7];
+    rt.warp.idx = [0; 7];
 }
 
 pub fn save_tmvs(
@@ -2085,5 +2123,100 @@ mod tests {
 
         assert_eq!(dst[0].bs, 8);
         assert_eq!(dst[256].bs, 8);
+    }
+
+    #[test]
+    fn test_tile_sbrow_init_no_threading() {
+        let rf = Frame {
+            iw4: 64, ih4: 64, iw8: 32, ih8: 32,
+            sbsz: 16, rp_stride: 32,
+            have_threading: false, have_frame_threading: false,
+            ..make_default_frame()
+        };
+        let mut rt = make_default_tile();
+        tile_sbrow_init(&mut rt, &rf, 0, 32, 0, 32, 1, 3);
+
+        assert_eq!(rt.rp_proj_off, (10 * 0 + 2 * 32) as usize);
+        assert_eq!(rt.rp_traj_off, 0);
+        assert_eq!(rt.ra_off, 0);
+        assert_eq!(rt.tile_row.start, 0);
+        assert_eq!(rt.tile_row.end, 32);
+        assert_eq!(rt.tile_col.start, 0);
+        assert_eq!(rt.tile_col.end, 32);
+        assert!(rt.bank.size.iter().all(|&x| x == 0));
+        assert!(rt.warp.size.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn test_tile_sbrow_init_with_threading() {
+        let rf = Frame {
+            iw4: 128, ih4: 128, iw8: 64, ih8: 64,
+            sbsz: 16, rp_stride: 64,
+            have_threading: true, have_frame_threading: false,
+            ..make_default_frame()
+        };
+        let mut rt = make_default_tile();
+        tile_sbrow_init(&mut rt, &rf, 4, 60, 8, 120, 2, 1);
+
+        let off1 = 64isize * 1;
+        let sbsz8 = 8;
+        let off2 = sbsz8 * off1;
+        let off3 = (sbsz8 + 2) * off1 + 2 * 64;
+        assert_eq!(rt.rp_proj_off, off3 as usize);
+        assert_eq!(rt.rp_traj_off, off2 as usize);
+        assert_eq!(rt.ra_off, off1 as usize);
+        assert_eq!(rt.tile_row.end, 120);
+    }
+
+    #[test]
+    fn test_tile_sbrow_init_frame_threading() {
+        let rf = Frame {
+            iw4: 64, ih4: 64, iw8: 32, ih8: 32,
+            sbsz: 16, rp_stride: 32,
+            have_threading: true, have_frame_threading: true,
+            ..make_default_frame()
+        };
+        let mut rt = make_default_tile();
+        tile_sbrow_init(&mut rt, &rf, 0, 64, 0, 64, 3, 2);
+
+        let sbsz8 = 8;
+        assert_eq!(rt.rp_proj_off, (3 * sbsz8 * 32) as usize);
+        assert_eq!(rt.tile_row.end, 64);
+    }
+
+    fn make_default_frame() -> Frame {
+        Frame {
+            iw4: 0, ih4: 0, iw8: 0, ih8: 0,
+            sbsz: 16, mfmv_sbsz8: 0, mfmv_edge: 0, mfmv_k_shift: 0,
+            use_ref_frame_mvs: 0,
+            tip: FrameTip { sf: [0; 2], r#ref: RefPair::default(), delta: 0 },
+            ref_sign: [0; 7], pocdiff: [0; 7], ref_flip: 0,
+            abspocdiff: [0; 7], mfmv_mask: 0,
+            mfmv: [MfmvRef { r#ref: 0, tgt: 0, dir: 0 }; 4],
+            mfmv_ref2cur: [0; 4], mfmv_ref2ref: [[0; 7]; 4],
+            mfmv_ref2idx: [[0; 7]; 4], mfmv_ref2sf: [[[0; 2]; 7]; 4],
+            n_mfmvs: 0, n_blocks: 0,
+            rp: Vec::new(), rp_stride: 0, rp_proj: Vec::new(),
+            have_threading: false, have_frame_threading: false,
+        }
+    }
+
+    fn make_default_tile() -> Tile {
+        Tile {
+            rp_proj: Vec::new(), rp_proj_off: 0, rp_traj_off: 0,
+            ra: Vec::new(), ra_off: 0, ra_tl: Block::default(),
+            r: Vec::new(),
+            tile_col: TileRange { start: 0, end: 0 },
+            tile_row: TileRange { start: 0, end: 0 },
+            bank: MvBank {
+                mv: [[[Mv::default(); 2]; 4]; 9],
+                cwp_idx: [[0; 4]; 3], r#ref: [RefPair::default(); 4],
+                size: [0; 9], idx: [0; 9], hits: [0; 2], avail: 0,
+            },
+            warp: WarpBank {
+                mat: [[[0; 6]; 4]; 7], warp_type: [[0; 4]; 7],
+                hits: 0, size: [0; 7], idx: [0; 7],
+            },
+        }
     }
 }
