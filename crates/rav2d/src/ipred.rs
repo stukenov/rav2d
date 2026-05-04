@@ -1263,6 +1263,84 @@ pub fn cfl_gen_mat_8bpc(
     mat[2][1] = mat[1][2];
 }
 
+pub fn cfl_calc_alphas_8bpc(
+    alpha: &mut [i32; 3],
+    c: &[u8],
+    c_off: usize,
+    top_sb_edge: Option<(&[u8], usize)>,
+    stride: usize,
+    refw: usize,
+    refh: usize,
+    mat: &mut [[i32; 3]; 3],
+    imat: &[[u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2],
+    edge_flags: i32,
+) {
+    let has_t = edge_flags & CFL_HAS_TOP != 0;
+    let has_l = edge_flags & CFL_HAS_LEFT != 0;
+
+    let mut n: usize = 0;
+    if has_t {
+        let (top, top_off) = if let Some((tsb, tsb_off)) = top_sb_edge {
+            (tsb, tsb_off - has_l as usize)
+        } else {
+            (c, c_off - stride - has_l as usize)
+        };
+        let start: usize = if !has_l { 1 } else { 0 };
+        let end = imax(start as i32, refw as i32 - 1 - (start == 0) as i32) as usize;
+        for i in start..end {
+            let v = top[top_off + i] as i32;
+            alpha[0] += imat[0][n] as i32 * v;
+            alpha[1] += imat[1][n] as i32 * v;
+            alpha[2] += v << 7;
+            n += 1;
+        }
+    }
+    if has_l {
+        let start = if !has_t { 0 } else { 1 };
+        let end = if has_t { refh - 2 } else { refh - 1 };
+        for i in start..end {
+            let v = c[c_off + i * stride - 1] as i32;
+            alpha[0] += imat[0][n] as i32 * v;
+            alpha[1] += imat[1][n] as i32 * v;
+            alpha[2] += v << 7;
+            n += 1;
+        }
+    }
+
+    if n > 0 {
+        let nl2 = 31 - clz(n as u32) as i32;
+        let mat_sh = 6 - nl2 - (n as i32 & ((1 << nl2) - 1) != 0) as i32;
+        if mat_sh > 0 {
+            for a in alpha.iter_mut() { *a <<= mat_sh; }
+        } else if mat_sh < 0 {
+            for a in alpha.iter_mut() { *a >>= -mat_sh; }
+        }
+    }
+
+    let mut tmp = [[0i32; 2]; 3];
+    let (mut scale, mut sh) = get_div_scale_sh(mat[0][0]);
+    tmp[0][0] = mul32(mat[0][1], scale, sh);
+    tmp[0][1] = mul32(mat[0][2], scale, sh);
+    alpha[0]  = mul32(alpha[0],  scale, sh);
+    tmp[1][0] = mat[1][1] - mul32(mat[1][0], tmp[0][0], 16);
+    tmp[1][1] = mat[1][2] - mul32(mat[1][0], tmp[0][1], 16);
+    alpha[1] -= mul32(mat[1][0], alpha[0], 16);
+    tmp[2][0] = mat[2][1] - mul32(mat[2][0], tmp[0][0], 16);
+    tmp[2][1] = mat[2][2] - mul32(mat[2][0], tmp[0][1], 16);
+    alpha[2] -= mul32(mat[2][0], alpha[0], 16);
+
+    (scale, sh) = get_div_scale_sh(tmp[1][0]);
+    tmp[1][1] = mul32(tmp[1][1], scale, sh);
+    alpha[1]  = mul32(alpha[1],  scale, sh);
+    tmp[2][1] -= mul32(tmp[2][0], tmp[1][1], 16);
+    alpha[2]  -= mul32(tmp[2][0], alpha[1],  16);
+
+    (scale, sh) = get_div_scale_sh(tmp[2][1]);
+    alpha[2] = mul32(alpha[2], scale, sh);
+    alpha[1] -= mul32(tmp[1][1], alpha[2], 16);
+    alpha[0] -= mul32(tmp[0][0], alpha[1], 16) + mul32(tmp[0][1], alpha[2], 16);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1849,5 +1927,43 @@ mod tests {
         assert!(mat[0][0] >= 2);
         assert!(mat[1][1] >= 2);
         assert!(mat[2][2] >= 2);
+    }
+
+    #[test]
+    fn test_cfl_calc_alphas_no_edges() {
+        let c = vec![128u8; 64 * 64];
+        let mut alpha = [0i32; 3];
+        let mut mat = [[0i32; 3]; 3];
+        mat[0][0] = 100; mat[1][1] = 100; mat[2][2] = 100;
+        mat[0][1] = 0; mat[1][0] = 0;
+        mat[0][2] = 0; mat[2][0] = 0;
+        mat[1][2] = 0; mat[2][1] = 0;
+        let imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
+        cfl_calc_alphas_8bpc(
+            &mut alpha, &c, 64, None, 64, 4, 4,
+            &mut mat, &imat, 0,
+        );
+        assert_eq!(alpha, [0, 0, 0]);
+    }
+
+    #[test]
+    fn test_cfl_calc_alphas_with_top() {
+        let stride = 16usize;
+        let mut c = vec![100u8; stride * 16];
+        c[stride - 1] = 100;
+        let top = vec![120u8; 32];
+        let mut mat = [[0i32; 3]; 3];
+        mat[0][0] = 1000; mat[1][1] = 1000; mat[2][2] = 1000;
+        mat[1][0] = 0; mat[0][1] = 0;
+        mat[2][0] = 0; mat[0][2] = 0;
+        mat[2][1] = 0; mat[1][2] = 0;
+        let mut imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
+        for i in 0..4 { imat[0][i] = 100; imat[1][i] = 50; }
+        let mut alpha = [0i32; 3];
+        cfl_calc_alphas_8bpc(
+            &mut alpha, &c, stride, Some((&top, 1)), stride, 4, 4,
+            &mut mat, &imat, CFL_HAS_TOP,
+        );
+        assert!(alpha[0] != 0 || alpha[1] != 0 || alpha[2] != 0);
     }
 }
