@@ -1,14 +1,15 @@
 use crate::cdf::{CdfModeContext, CdfMvContext};
+use crate::ctx::{memset_pow2, set_ctx};
 use crate::dsp::N_SWITCHABLE_FILTERS;
-use crate::env::{BlockContext, warp_type};
+use crate::env::{BlockContext, get_partition_ctx, get_partition2_ctx, warp_type};
 use crate::headers::{
     AdaptiveBoolean, FrameHeader, NSWienerPlane, RestorationType,
     WarpedMotionParams, WarpedMotionType, MAX_SEGMENTS,
 };
-use crate::internal::{LoopFilterState, NsWienerBank, ScalableMotionParams};
+use crate::internal::{LoopFilterState, NsWienerBank, Pass, ScalableMotionParams};
 use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
-use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV};
+use crate::levels::{BlockPartition, BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV};
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
@@ -1616,6 +1617,587 @@ pub fn extend_warpmv(
     };
 }
 
+pub struct SbFrameInfo {
+    pub bw: i32,
+    pub bh: i32,
+    pub ss_ver: i32,
+    pub ss_hor: i32,
+    pub root_bs: BlockSize,
+    pub is_inter_or_switch: bool,
+    pub sdp: bool,
+    pub ext_sdp: bool,
+    pub ext_partitions: bool,
+    pub uneven_4way: bool,
+    pub max_pb_aspect_ratio_log2: u8,
+    pub n_passes: i32,
+}
+
+#[allow(unused)]
+fn decode_b(
+    _fi: &SbFrameInfo,
+    _bx: i32, _by: i32,
+    _cbx: i32, _cby: i32,
+    _intra_region: i32,
+    _sdp_cfl_disallowed: i32,
+    _pass: u8,
+    _a: &mut BlockContext,
+    _l: &mut BlockContext,
+    _msac: &mut MsacContext,
+    _cdf_m: &mut CdfModeContext,
+    _lbs: BlockSize,
+    _cbs: BlockSize,
+) -> Result<(), ()> {
+    Ok(())
+}
+
+pub fn decode_sb(
+    fi: &SbFrameInfo,
+    bx: &mut i32,
+    by: &mut i32,
+    cbx: &mut i32,
+    cby: &mut i32,
+    intra_region: &mut i32,
+    sdp_cfl_disallowed: &mut i32,
+    pass: u8,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    part_w: &mut Vec<u8>,
+    part_w_idx: &mut usize,
+    part_r: &[u8],
+    part_r_idx: &mut usize,
+    lbs: BlockSize,
+    cbs: BlockSize,
+    dir_ptr: &mut i32,
+) -> Result<(), ()> {
+    let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
+    assert!(bs != BlockSize::Invalid);
+
+    let b_dim = &BLOCK_DIMENSIONS[bs as u8 as usize];
+    let bw4 = b_dim[0] as i32;
+    let bh4 = b_dim[1] as i32;
+    let hw4 = bw4 >> 1;
+    let hh4 = bh4 >> 1;
+    let qw4 = hw4 >> 1;
+    let qh4 = hh4 >> 1;
+    let have_h_split = fi.bw > *bx + hw4;
+    let have_v_split = fi.bh > *by + hh4;
+    let cbs_orig = cbs;
+
+    if lbs == BlockSize::Bs64x64 && cbs == BlockSize::Bs64x64
+        && fi.sdp && !fi.is_inter_or_switch
+    {
+        let mut dir = 0i32;
+        decode_sb(
+            fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed, pass,
+            a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+            lbs, BlockSize::Invalid, &mut dir,
+        )?;
+        return decode_sb(
+            fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed, pass,
+            a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+            BlockSize::Invalid, cbs, &mut dir,
+        );
+    }
+
+    let pl = (lbs == BlockSize::Invalid) as usize;
+    let pcc = &PARTITION_SUBB[bs as u8 as usize];
+    let mut bp = BlockPartition::Invalid;
+    let mut cbs = cbs;
+
+    if pass & (Pass::Entropy as u8) != 0 {
+        let bx4 = (*bx & 63) as usize;
+        let by4 = (*by & 63) as usize;
+        let eff_ss_ver = fi.ss_ver & (lbs == BlockSize::Invalid) as i32;
+        let eff_ss_hor = fi.ss_hor & (lbs == BlockSize::Invalid) as i32;
+        let bwh4ss = [bw4 >> eff_ss_hor, bh4 >> eff_ss_ver];
+        assert!(bwh4ss[0] >= 1 && bwh4ss[1] >= 1);
+        let mut dir = -1i32;
+
+        if imax(bwh4ss[0], bwh4ss[1]) == 1
+            || (pcc.part[0][0] & pcc.part[1][0]) == -1
+        {
+            bp = BlockPartition::None;
+        } else if !have_h_split || !have_v_split {
+            if bw4 == bh4 {
+                dir = have_v_split as i32;
+                bp = if !have_v_split { BlockPartition::H } else { BlockPartition::V };
+            } else if bw4 > bh4 {
+                if !have_h_split || fi.bh <= *by + qh4 {
+                    dir = 1;
+                    bp = BlockPartition::V;
+                }
+            } else {
+                if !have_v_split || fi.bw <= *bx + qw4 {
+                    dir = 0;
+                    bp = BlockPartition::H;
+                }
+            }
+        }
+
+        if bp == BlockPartition::Invalid {
+            if cbs == BlockSize::Bs64x64 && lbs == BlockSize::Invalid
+                && ((*dir_ptr & 0xff) == 0xff
+                    || (*dir_ptr & 0x30003) == 0x10002
+                    || (*dir_ptr & 0x30003) == 0x20001)
+            {
+                if (*dir_ptr & 0xff) == 0xff {
+                    bp = BlockPartition::None;
+                } else {
+                    dir = ((*dir_ptr & 0x30003) == 0x10002) as i32;
+                    bp = unsafe {
+                        std::mem::transmute::<i8, BlockPartition>(
+                            ((*dir_ptr >> 8) & 0xff) as i8
+                        )
+                    };
+                }
+            } else {
+                let mix_inter = fi.is_inter_or_switch && *intra_region == 0;
+                let ctx1 = get_partition_ctx(a, l, b_dim, pl, by4, bx4);
+                let ctx2 = (ctx1 + pcc.ctx[0] as i32 * 4) as usize;
+                let is_split = if mix_inter && b_dim[2] + b_dim[3] == 1 {
+                    0u32
+                } else if !have_h_split || !have_v_split {
+                    1u32
+                } else {
+                    msac.decode_bool_adapt(cdf_m.part_split(pl, ctx2))
+                };
+
+                if is_split == 0 {
+                    bp = BlockPartition::None;
+                } else {
+                    if (bs == BlockSize::Bs128x128 || bs == BlockSize::Bs256x256)
+                        && have_v_split && have_h_split
+                    {
+                        let ctx3 = (ctx1 + (bs == BlockSize::Bs256x256) as i32 * 4) as usize;
+                        let is_square = msac.decode_bool_adapt(
+                            cdf_m.part_square(ctx3),
+                        );
+                        if is_square != 0 {
+                            bp = BlockPartition::Split;
+                        }
+                    } else if imax(bw4, bh4) >= 32 {
+                        bp = if bw4 > bh4 { BlockPartition::V } else { BlockPartition::H };
+                    }
+
+                    if bp == BlockPartition::Invalid {
+                        let aspect = 1i32 << fi.max_pb_aspect_ratio_log2;
+                        let v_aspect = bw4 * aspect >= bh4 * 2;
+                        let h_aspect = bh4 * aspect >= bw4 * 2;
+                        assert!(v_aspect || h_aspect);
+
+                        if imin(bwh4ss[0], bwh4ss[1]) == 1 {
+                            dir = (bwh4ss[0] > bwh4ss[1]) as i32;
+                        } else if !(v_aspect && h_aspect) {
+                            dir = v_aspect as i32;
+                        } else {
+                            let ctx4 = (ctx1 + pcc.ctx[1] as i32 * 4) as usize;
+                            dir = msac.decode_bool_adapt(
+                                cdf_m.part_dir(pl, ctx4),
+                            ) as i32;
+                        }
+                        assert!(pcc.part[dir as usize][0] != -1);
+                        bp = if dir != 0 { BlockPartition::V } else { BlockPartition::H };
+
+                        if imax(bw4, bh4) <= 16 {
+                            let bwh4ss2 = [bw4 >> fi.ss_hor, bh4 >> fi.ss_ver];
+                            let ndir = (!dir) as usize & 1;
+                            let ddir = dir as usize;
+                            let has_hv3 = fi.ext_partitions
+                                && bwh4ss[ndir] >= 4
+                                && bwh4ss[ddir] >= 2
+                                && b_dim[ndir] as i32 * aspect >= b_dim[ddir] as i32 * 4
+                                && (cbs != lbs
+                                    || (bwh4ss2[ndir] >= 4 && bwh4ss2[ddir] >= 2)
+                                    || (if dir != 0 {
+                                        if lbs == BlockSize::Bs32x8 { have_v_split }
+                                        else { *bx + qw4 * 3 < fi.bw }
+                                    } else {
+                                        if lbs == BlockSize::Bs8x32 { have_h_split }
+                                        else { *by + qh4 * 3 < fi.bh }
+                                    }));
+                            let has_hv4ab = bwh4ss[ndir] >= 8
+                                && fi.uneven_4way
+                                && b_dim[ndir] as i32 * aspect >= b_dim[ddir] as i32 * 8
+                                && (cbs != lbs
+                                    || bwh4ss2[ndir] >= 8
+                                    || (if dir != 0 {
+                                        *bx + (qw4 >> 1) * 7 < fi.bw
+                                    } else {
+                                        *by + (qh4 >> 1) * 7 < fi.bh
+                                    }));
+
+                            if has_hv3 || has_hv4ab {
+                                assert!(pcc.part[ddir][1] != -1);
+                                let ctx5 = get_partition2_ctx(
+                                    a, l, b_dim, pl, dir, by4, bx4,
+                                );
+                                let ctx6 = (ctx5 + pcc.ctx[0] as i32 * 4) as usize;
+                                let is_ext = msac.decode_bool_adapt(
+                                    cdf_m.part_ext(pl, ctx6),
+                                );
+                                if is_ext != 0 {
+                                    bp = if dir != 0 { BlockPartition::V3 } else { BlockPartition::H3 };
+                                    if has_hv4ab {
+                                        assert!(pcc.part[ddir][2] != -1);
+                                        let is_4way = if !has_hv3 {
+                                            1u32
+                                        } else {
+                                            msac.decode_bool_adapt(
+                                                cdf_m.part_4way(pl, ctx6),
+                                            )
+                                        };
+                                        if is_4way != 0 {
+                                            let is_a_or_b = msac.decode_bool_bypass();
+                                            bp = unsafe {
+                                                std::mem::transmute::<i8, BlockPartition>(
+                                                    BlockPartition::H4A as i8
+                                                        + dir as i8 * 2
+                                                        + is_a_or_b as i8
+                                                )
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        dir += (dir != -1) as i32;
+        if lbs == BlockSize::Invalid && cbs == BlockSize::Bs64x64 {
+            *sdp_cfl_disallowed = (dir != -1 && dir != (*dir_ptr & 0x3)) as i32;
+        }
+        *dir_ptr |= (dir as u8) as i32 | ((bp as i8 as i32) << 8);
+
+        let mut unmix_bit = 0i32;
+        if fi.is_inter_or_switch && fi.ext_sdp
+            && (cbs as i8 | lbs as i8) != BlockSize::Invalid as i8
+            && bp != BlockPartition::None
+            && (*dir_ptr & (1 << 24)) == 0
+            && (bp as i8) < BlockPartition::H4A as i8
+            && imin(bw4, bh4) >= 2
+            && bs != fi.root_bs
+            && imax(bw4, bh4) <= 16
+        {
+            let sz = b_dim[2] as i32 + b_dim[3] as i32;
+            let ctx = iclip(sz - 4, 0, 3) + (sz == 4) as i32;
+            let val = msac.decode_bool_adapt(cdf_m.region_type(ctx as usize));
+            *intra_region = (val == 0) as i32;
+            unmix_bit = *intra_region;
+            if *intra_region != 0 {
+                cbs = BlockSize::Invalid;
+            }
+        }
+        if fi.n_passes > 1 {
+            part_w[*part_w_idx] = bp as u8 | ((unmix_bit as u8) << 7);
+            *part_w_idx += 1;
+        }
+    } else {
+        let pass_idx = (pass == Pass::MvRes as u8) as usize;
+        let _ = pass_idx;
+        let val = part_r[*part_r_idx];
+        *part_r_idx += 1;
+        if val & 0x80 != 0 {
+            assert!(*intra_region == 0);
+            *intra_region = 1;
+            cbs = BlockSize::Invalid;
+        }
+        bp = unsafe { std::mem::transmute::<i8, BlockPartition>((val & 0x7f) as i8) };
+    }
+
+    if bs == cbs {
+        *cbx = *bx;
+        *cby = *by;
+    }
+
+    let lim = &PARTITION_LIM[bp as u8 as usize];
+    let mut child_dir = ((bw4 <= lim[0] as i32 || bh4 <= lim[1] as i32) as i32) << 24;
+
+    match bp {
+        BlockPartition::None => {
+            decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
+                     *sdp_cfl_disallowed, pass, a, l, msac, cdf_m, lbs, cbs)?;
+            if pass & (Pass::Entropy as u8) != 0 {
+                let bx4 = (*bx & 63) as usize;
+                let by4 = (*by & 63) as usize;
+                if (cbs as i8 | lbs as i8) != BlockSize::Invalid as i8 {
+                    set_ctx(&mut a.partition[0], bx4, !(b_dim[0] - 1), b_dim[2] as usize);
+                    set_ctx(&mut a.partition[1], bx4, !(b_dim[0] - 1), b_dim[2] as usize);
+                    set_ctx(&mut l.partition[0], by4, !(b_dim[1] - 1), b_dim[3] as usize);
+                    set_ctx(&mut l.partition[1], by4, !(b_dim[1] - 1), b_dim[3] as usize);
+                } else {
+                    memset_pow2(&mut a.partition[pl], bx4, !(b_dim[0] - 1), b_dim[2]);
+                    memset_pow2(&mut l.partition[pl], by4, !(b_dim[1] - 1), b_dim[3]);
+                }
+            }
+        }
+        BlockPartition::V => {
+            assert!(hw4 > 0);
+            let sub4 = bs == cbs && (hw4 >> fi.ss_hor) > 0;
+            assert!(sub4 || pl == 0);
+            let child_lbs = if pl != 0 { BlockSize::Invalid } else {
+                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+            };
+            let child_cbs_first = if sub4 {
+                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+            } else { BlockSize::Invalid };
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      child_lbs, child_cbs_first, &mut child_dir)?;
+            if *bx + hw4 >= fi.bw { /* done */ }
+            else {
+                *bx += hw4;
+                let child_cbs_second = if sub4 {
+                    unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+                } else { cbs };
+                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          child_lbs, child_cbs_second, &mut child_dir)?;
+                *bx -= hw4;
+            }
+        }
+        BlockPartition::H => {
+            assert!(hh4 > 0);
+            let sub4 = bs == cbs && (hh4 >> fi.ss_ver) > 0;
+            assert!(sub4 || pl == 0);
+            let child_lbs = if pl != 0 { BlockSize::Invalid } else {
+                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+            };
+            let child_cbs_first = if sub4 {
+                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+            } else { BlockSize::Invalid };
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      child_lbs, child_cbs_first, &mut child_dir)?;
+            if *by + hh4 >= fi.bh { /* done */ }
+            else {
+                *by += hh4;
+                let child_cbs_second = if sub4 {
+                    unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+                } else { cbs };
+                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          child_lbs, child_cbs_second, &mut child_dir)?;
+                *by -= hh4;
+            }
+        }
+        BlockPartition::Split => {
+            assert!(have_v_split && have_h_split && cbs == lbs);
+            let sbs = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][3]) };
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      sbs, sbs, &mut child_dir)?;
+            *bx += hw4;
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      sbs, sbs, &mut child_dir)?;
+            *bx -= hw4;
+            *by += hh4;
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      sbs, sbs, &mut child_dir)?;
+            *bx += hw4;
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      sbs, sbs, &mut child_dir)?;
+            *bx -= hw4;
+            *by -= hh4;
+        }
+        BlockPartition::V3 => {
+            assert!(qw4 > 0 && hh4 > 0);
+            let sub4 = bs == cbs && (qw4 >> fi.ss_hor) > 0 && (hh4 >> fi.ss_ver) > 0;
+            assert!(sub4 || pl == 0);
+            let i_3only = cbs == BlockSize::Invalid || (!sub4 && bs != BlockSize::Bs32x8);
+            let p1_1 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][1]) };
+            let p1_3 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][3]) };
+            let lbs_child = if pl != 0 { BlockSize::Invalid } else { p1_1 };
+            let cbs_first = if i_3only { BlockSize::Invalid } else { p1_1 };
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      lbs_child, cbs_first, &mut child_dir)?;
+            if *bx + qw4 >= fi.bw { /* done */ }
+            else {
+                *bx += qw4;
+                if !i_3only { *cbx = *bx; }
+                let lbs_mid = if pl != 0 { BlockSize::Invalid } else { p1_3 };
+                let cbs_mid = if sub4 { p1_3 } else { BlockSize::Invalid };
+                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          lbs_mid, cbs_mid, &mut child_dir)?;
+                if *by + hh4 < fi.bh {
+                    *by += hh4;
+                    let cbs_mid2 = if i_3only { BlockSize::Invalid } else if sub4 { p1_3 } else {
+                        unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+                    };
+                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              lbs_mid, cbs_mid2, &mut child_dir)?;
+                    *by -= hh4;
+                }
+                if *bx + hw4 >= fi.bw { *bx -= qw4; }
+                else {
+                    *bx += hw4;
+                    let cbs_last = if i_3only { cbs } else { p1_1 };
+                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              lbs_child, cbs_last, &mut child_dir)?;
+                    *bx -= 3 * qw4;
+                }
+            }
+        }
+        BlockPartition::H3 => {
+            assert!(qh4 > 0 && hw4 > 0);
+            let sub4 = bs == cbs && (qh4 >> fi.ss_ver) > 0 && (hw4 >> fi.ss_hor) > 0;
+            assert!(sub4 || pl == 0);
+            let i_3only = cbs == BlockSize::Invalid || (!sub4 && bs != BlockSize::Bs8x32);
+            let p0_1 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][1]) };
+            let p0_3 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][3]) };
+            let lbs_child = if pl != 0 { BlockSize::Invalid } else { p0_1 };
+            let cbs_first = if i_3only { BlockSize::Invalid } else { p0_1 };
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      lbs_child, cbs_first, &mut child_dir)?;
+            if *by + qh4 >= fi.bh { /* done */ }
+            else {
+                *by += qh4;
+                if !i_3only { *cby = *by; }
+                let lbs_mid = if pl != 0 { BlockSize::Invalid } else { p0_3 };
+                let cbs_mid = if sub4 { p0_3 } else { BlockSize::Invalid };
+                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          lbs_mid, cbs_mid, &mut child_dir)?;
+                if *bx + hw4 < fi.bw {
+                    *bx += hw4;
+                    let cbs_mid2 = if i_3only { BlockSize::Invalid } else if sub4 { p0_3 } else {
+                        unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+                    };
+                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              lbs_mid, cbs_mid2, &mut child_dir)?;
+                    *bx -= hw4;
+                }
+                if *by + hh4 >= fi.bh { *by -= qh4; }
+                else {
+                    *by += hh4;
+                    let cbs_last = if i_3only { cbs } else { p0_1 };
+                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              lbs_child, cbs_last, &mut child_dir)?;
+                    *by -= 3 * qh4;
+                }
+            }
+        }
+        BlockPartition::V4A | BlockPartition::V4B => {
+            let ew4 = qw4 >> 1;
+            assert!(ew4 > 0);
+            let sub4 = bs == cbs && (ew4 >> fi.ss_hor) > 0;
+            assert!(sub4 || pl == 0);
+            let p1_2 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][2]) };
+            let var = bp as i8 - BlockPartition::V4A as i8;
+            let p1_nvar = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][(!var & 1) as usize]) };
+            let p1_var = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][var as usize]) };
+            let lbs_edge = if pl != 0 { BlockSize::Invalid } else { p1_2 };
+            let lbs_nvar = if pl != 0 { BlockSize::Invalid } else { p1_nvar };
+            let lbs_var = if pl != 0 { BlockSize::Invalid } else { p1_var };
+
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      lbs_edge, if sub4 { p1_2 } else { BlockSize::Invalid },
+                      &mut child_dir)?;
+            if *bx + ew4 >= fi.bw { /* done */ }
+            else {
+                *bx += ew4;
+                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          lbs_nvar, if sub4 { p1_nvar } else { BlockSize::Invalid },
+                          &mut child_dir)?;
+                let w4a = qw4 << var;
+                let w4b = hw4 >> var;
+                if *bx + w4a >= fi.bw { *bx -= ew4; }
+                else {
+                    *bx += w4a;
+                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              lbs_var, if sub4 { p1_var } else { BlockSize::Invalid },
+                              &mut child_dir)?;
+                    if *bx + w4b >= fi.bw { *bx -= ew4 + w4a; }
+                    else {
+                        *bx += w4b;
+                        decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                                  pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                                  lbs_edge, if sub4 { p1_2 } else { cbs },
+                                  &mut child_dir)?;
+                        *bx -= 7 * ew4;
+                    }
+                }
+            }
+        }
+        BlockPartition::H4A | BlockPartition::H4B => {
+            let eh4 = qh4 >> 1;
+            assert!(eh4 > 0);
+            let sub4 = bs == cbs && (eh4 >> fi.ss_ver) > 0;
+            assert!(sub4 || pl == 0);
+            let p0_2 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][2]) };
+            let var = bp as i8 - BlockPartition::H4A as i8;
+            let p0_nvar = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][(!var & 1) as usize]) };
+            let p0_var = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][var as usize]) };
+            let lbs_edge = if pl != 0 { BlockSize::Invalid } else { p0_2 };
+            let lbs_nvar = if pl != 0 { BlockSize::Invalid } else { p0_nvar };
+            let lbs_var = if pl != 0 { BlockSize::Invalid } else { p0_var };
+
+            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      lbs_edge, if sub4 { p0_2 } else { BlockSize::Invalid },
+                      &mut child_dir)?;
+            if *by + eh4 >= fi.bh { /* done */ }
+            else {
+                *by += eh4;
+                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          lbs_nvar, if sub4 { p0_nvar } else { BlockSize::Invalid },
+                          &mut child_dir)?;
+                let h4a = qh4 << var;
+                let h4b = hh4 >> var;
+                if *by + h4a >= fi.bh { *by -= eh4; }
+                else {
+                    *by += h4a;
+                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              lbs_var, if sub4 { p0_var } else { BlockSize::Invalid },
+                              &mut child_dir)?;
+                    if *by + h4b >= fi.bh { *by -= eh4 + h4a; }
+                    else {
+                        *by += h4b;
+                        decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
+                                  pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                                  lbs_edge, if sub4 { p0_2 } else { cbs },
+                                  &mut child_dir)?;
+                        *by -= 7 * eh4;
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    *dir_ptr |= (child_dir & 0xff) << 16;
+
+    if *intra_region != 0 && cbs_orig != BlockSize::Invalid {
+        *cbx = *bx;
+        *cby = *by;
+        decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
+                 *sdp_cfl_disallowed, pass, a, l, msac, cdf_m,
+                 BlockSize::Invalid, cbs_orig)?;
+        *intra_region = 0;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2774,5 +3356,89 @@ mod tests {
         );
         assert!(wmp.wm_type == WarpedMotionType::Invalid
             || wmp.wm_type != WarpedMotionType::Invalid);
+    }
+
+    #[test]
+    fn test_decode_sb_partition_none_leaf() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64,
+            ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+        };
+        let data = vec![0x80; 128];
+        let mut msac = MsacContext::new(&data, false);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+        let mut part_w = Vec::new();
+        let mut part_w_idx = 0usize;
+        let part_r: &[u8] = &[];
+        let mut part_r_idx = 0usize;
+        let mut bx = 0i32;
+        let mut by = 0i32;
+        let mut cbx = 0i32;
+        let mut cby = 0i32;
+        let mut intra_region = 0i32;
+        let mut sdp_cfl_disallowed = 0i32;
+        let mut dir = 0i32;
+        let pass = Pass::Entropy as u8;
+
+        let result = decode_sb(
+            &fi, &mut bx, &mut by, &mut cbx, &mut cby,
+            &mut intra_region, &mut sdp_cfl_disallowed, pass,
+            &mut a, &mut l, &mut msac, &mut cdf_m,
+            &mut part_w, &mut part_w_idx, part_r, &mut part_r_idx,
+            BlockSize::Bs4x4, BlockSize::Bs4x4, &mut dir,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_decode_sb_split_recurse() {
+        let fi = SbFrameInfo {
+            bw: 128, bh: 128,
+            ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: true,
+            sdp: false, ext_sdp: false,
+            ext_partitions: true,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+        };
+        let data = vec![0xFF; 256];
+        let mut msac = MsacContext::new(&data, false);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+        let mut part_w = Vec::new();
+        let mut part_w_idx = 0usize;
+        let part_r: &[u8] = &[];
+        let mut part_r_idx = 0usize;
+        let mut bx = 0i32;
+        let mut by = 0i32;
+        let mut cbx = 0i32;
+        let mut cby = 0i32;
+        let mut intra_region = 0i32;
+        let mut sdp_cfl_disallowed = 0i32;
+        let mut dir = 0i32;
+        let pass = Pass::Entropy as u8;
+
+        let result = decode_sb(
+            &fi, &mut bx, &mut by, &mut cbx, &mut cby,
+            &mut intra_region, &mut sdp_cfl_disallowed, pass,
+            &mut a, &mut l, &mut msac, &mut cdf_m,
+            &mut part_w, &mut part_w_idx, part_r, &mut part_r_idx,
+            BlockSize::Bs32x32, BlockSize::Bs32x32, &mut dir,
+        );
+        assert!(result.is_ok());
+        assert_eq!(bx, 0);
+        assert_eq!(by, 0);
     }
 }
