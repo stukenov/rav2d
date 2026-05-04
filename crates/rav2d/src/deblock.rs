@@ -484,6 +484,49 @@ pub fn setup_thr_rows_sb64(
     }
 }
 
+pub fn backup_db(
+    dst: &mut [u8],
+    src: &[u8],
+    stride: usize,
+    ss_ver: i32,
+    sb128: bool,
+    mut row: i32,
+    row_h: i32,
+    w: usize,
+    lr_backup: bool,
+    n_tc: i32,
+) {
+    let cdef_backup = (!lr_backup) as i32;
+    let sb128_i = sb128 as i32;
+
+    let mut stripe_h = ((64 << (cdef_backup & sb128_i)) - 8 * (row == 0) as i32) >> ss_ver;
+    let mut src_off = (stripe_h - 2) as usize * stride;
+    let mut dst_off = 0usize;
+
+    if n_tc == 1 {
+        if row > 0 {
+            let top = 4usize << sb128_i;
+            for i in 0..4usize {
+                let from = dst_off + (top + i) * stride;
+                let to = dst_off + i * stride;
+                dst.copy_within(from..from + w, to);
+            }
+        }
+        dst_off += 4 * stride;
+    }
+
+    while row + stripe_h <= row_h {
+        for _ in 0..4 {
+            dst[dst_off..dst_off + w].copy_from_slice(&src[src_off..src_off + w]);
+            dst_off += stride;
+            src_off += stride;
+        }
+        row += stripe_h;
+        stripe_h = 64 >> ss_ver;
+        src_off += (stripe_h - 4) as usize * stride;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,5 +961,145 @@ mod tests {
         // y4=1, x4=0: subpu=3, edge_q=40, result=40>>3=5
         assert_eq!(q_thr[0 + 1 * dst_stride], 5);
         assert_eq!(side_thr[0 + 1 * dst_stride], 2);
+    }
+
+    #[test]
+    fn test_backup_db_first_row_single_thread() {
+        let stride = 64;
+        let w = 16;
+        let mut src = vec![0u8; stride * 128];
+        for i in 0..4 {
+            for x in 0..w {
+                src[(54 + i) * stride + x] = (10 + i) as u8;
+            }
+        }
+        let mut dst = vec![0u8; stride * 64];
+        // row=0, sb128=false, lr_backup=false -> stripe_h=(64-8)>>0=56, src_off=54*stride
+        backup_db(&mut dst, &src, stride, 0, false, 0, 56, w, false, 1);
+        // n_tc=1, row=0 -> no top copy, dst starts at 4*stride
+        for x in 0..w {
+            assert_eq!(dst[4 * stride + x], 10);
+            assert_eq!(dst[5 * stride + x], 11);
+            assert_eq!(dst[6 * stride + x], 12);
+            assert_eq!(dst[7 * stride + x], 13);
+        }
+    }
+
+    #[test]
+    fn test_backup_db_not_first_row() {
+        let stride = 64;
+        let w = 8;
+        let mut src = vec![0u8; stride * 128];
+        // row>0: stripe_h=(64-0)>>0=64, src_off=62*stride
+        for i in 0..4 {
+            for x in 0..w {
+                src[(62 + i) * stride + x] = (20 + i) as u8;
+            }
+        }
+        let mut dst = vec![0u8; stride * 64];
+        for i in 0..4 {
+            for x in 0..w {
+                dst[(4 + i) * stride + x] = (50 + i) as u8;
+            }
+        }
+        backup_db(&mut dst, &src, stride, 0, false, 56, 120, w, false, 1);
+        // n_tc=1, row>0: copy dst rows [4..8] -> [0..4]
+        for x in 0..w {
+            assert_eq!(dst[0 * stride + x], 50);
+            assert_eq!(dst[3 * stride + x], 53);
+        }
+        // Then copy from src[62..66] into dst[4..8]
+        for x in 0..w {
+            assert_eq!(dst[4 * stride + x], 20);
+            assert_eq!(dst[7 * stride + x], 23);
+        }
+    }
+
+    #[test]
+    fn test_backup_db_multithread() {
+        let stride = 64;
+        let w = 8;
+        let mut src = vec![0u8; stride * 128];
+        for i in 0..4 {
+            for x in 0..w {
+                src[(54 + i) * stride + x] = (30 + i) as u8;
+            }
+        }
+        let mut dst = vec![0u8; stride * 64];
+        // n_tc=2: no single-thread top copy, dst_off starts at 0
+        backup_db(&mut dst, &src, stride, 0, false, 0, 56, w, false, 2);
+        for x in 0..w {
+            assert_eq!(dst[0 * stride + x], 30);
+            assert_eq!(dst[3 * stride + x], 33);
+        }
+    }
+
+    #[test]
+    fn test_backup_db_ss_ver() {
+        let stride = 64;
+        let w = 8;
+        let mut src = vec![0u8; stride * 64];
+        // ss_ver=1: stripe_h=(64-8)>>1=28, src_off=26*stride
+        for i in 0..4 {
+            for x in 0..w {
+                src[(26 + i) * stride + x] = (40 + i) as u8;
+            }
+        }
+        let mut dst = vec![0u8; stride * 32];
+        backup_db(&mut dst, &src, stride, 1, false, 0, 28, w, false, 2);
+        for x in 0..w {
+            assert_eq!(dst[0 * stride + x], 40);
+            assert_eq!(dst[3 * stride + x], 43);
+        }
+    }
+
+    #[test]
+    fn test_backup_db_sb128() {
+        let stride = 64;
+        let w = 8;
+        let mut src = vec![0u8; stride * 256];
+        // sb128=true, cdef_backup=true: stripe_h=(64<<1 - 8)>>0=120, src_off=118*stride
+        for i in 0..4 {
+            for x in 0..w {
+                src[(118 + i) * stride + x] = (60 + i) as u8;
+            }
+        }
+        let mut dst = vec![0u8; stride * 128];
+        backup_db(&mut dst, &src, stride, 0, true, 0, 120, w, false, 2);
+        for x in 0..w {
+            assert_eq!(dst[0 * stride + x], 60);
+            assert_eq!(dst[3 * stride + x], 63);
+        }
+    }
+
+    #[test]
+    fn test_backup_db_lr_mode() {
+        let stride = 64;
+        let w = 8;
+        let mut src = vec![0u8; stride * 128];
+        // lr_backup=true -> cdef_backup=0, sb128 irrelevant
+        // stripe_h=(64<<0 - 8)>>0=56, src_off=54*stride
+        for i in 0..4 {
+            for x in 0..w {
+                src[(54 + i) * stride + x] = (70 + i) as u8;
+            }
+        }
+        let mut dst = vec![0u8; stride * 64];
+        backup_db(&mut dst, &src, stride, 0, true, 0, 56, w, true, 2);
+        for x in 0..w {
+            assert_eq!(dst[0 * stride + x], 70);
+            assert_eq!(dst[3 * stride + x], 73);
+        }
+    }
+
+    #[test]
+    fn test_backup_db_no_stripes() {
+        let stride = 64;
+        let w = 8;
+        let src = vec![0u8; stride * 128];
+        let mut dst = vec![0u8; stride * 64];
+        // row_h < row + stripe_h: no stripes copied
+        backup_db(&mut dst, &src, stride, 0, false, 0, 10, w, false, 2);
+        assert!(dst.iter().all(|&x| x == 0));
     }
 }

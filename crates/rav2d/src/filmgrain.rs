@@ -48,6 +48,58 @@ pub fn generate_scaling_8bpc(points: &[[u8; 2]], scaling: &mut [u8; 256]) {
     scaling[n..].fill(points[num - 1][1]);
 }
 
+pub fn generate_scaling_hbd(bitdepth: u32, points: &[[u8; 2]], scaling: &mut [u8]) {
+    debug_assert!(bitdepth > 8);
+    let shift_x = bitdepth - 8;
+    let scaling_size = 1usize << bitdepth;
+    let num = points.len();
+
+    if num == 0 {
+        scaling[..scaling_size].fill(0);
+        return;
+    }
+
+    scaling[..(points[0][0] as usize) << shift_x].fill(points[0][1]);
+
+    for i in 0..num - 1 {
+        let bx = points[i][0] as i32;
+        let by = points[i][1] as i32;
+        let ex = points[i + 1][0] as i32;
+        let ey = points[i + 1][1] as i32;
+        let dx = ex - bx;
+        let dy = ey - by;
+        debug_assert!(dx > 0);
+        let delta = dy * ((0x10000 + (dx >> 1)) / dx);
+        let mut d = 0x8000i32;
+        for x in 0..dx {
+            scaling[((bx + x) << shift_x) as usize] = (by + (d >> 16)) as u8;
+            d += delta;
+        }
+    }
+
+    let n = (points[num - 1][0] as usize) << shift_x;
+    scaling[n..scaling_size].fill(points[num - 1][1]);
+
+    let pad = 1i32 << shift_x;
+    let rnd = pad >> 1;
+    for i in 0..num - 1 {
+        let bx = (points[i][0] as i32) << shift_x;
+        let ex = (points[i + 1][0] as i32) << shift_x;
+        let dx = ex - bx;
+        let mut x = 0;
+        while x < dx {
+            let base = scaling[(bx + x) as usize] as i32;
+            let range = scaling[(bx + x + pad) as usize] as i32 - base;
+            let mut r = rnd;
+            for n in 1..pad {
+                r += range;
+                scaling[(bx + x + n) as usize] = (base + (r >> shift_x)) as u8;
+            }
+            x += pad;
+        }
+    }
+}
+
 pub fn generate_grain_y(
     buf: &mut [[i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
     data: &FilmGrainData,
@@ -820,5 +872,50 @@ mod tests {
         );
         let modified = dst.iter().zip(src.iter()).any(|(&d, &s)| d != s);
         assert!(modified);
+    }
+
+    #[test]
+    fn test_generate_scaling_hbd_empty() {
+        let mut scaling = vec![0xFFu8; 1024];
+        generate_scaling_hbd(10, &[], &mut scaling);
+        assert!(scaling[..1024].iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn test_generate_scaling_hbd_single_point() {
+        let mut scaling = vec![0u8; 1024];
+        generate_scaling_hbd(10, &[[128, 200]], &mut scaling);
+        assert_eq!(scaling[0], 200);
+        assert_eq!(scaling[511], 200);
+        assert_eq!(scaling[512], 200);
+        assert_eq!(scaling[1023], 200);
+    }
+
+    #[test]
+    fn test_generate_scaling_hbd_two_points() {
+        let mut scaling = vec![0u8; 1024];
+        generate_scaling_hbd(10, &[[0, 0], [255, 255]], &mut scaling);
+        assert_eq!(scaling[0], 0);
+        assert_eq!(scaling[1023], 255);
+        assert!(scaling[512] > 120 && scaling[512] < 140);
+    }
+
+    #[test]
+    fn test_generate_scaling_hbd_monotonic() {
+        let mut scaling = vec![0u8; 1024];
+        generate_scaling_hbd(10, &[[0, 0], [100, 100]], &mut scaling);
+        for i in 1..400 {
+            assert!(scaling[i] >= scaling[i - 1], "not monotonic at {}", i);
+        }
+    }
+
+    #[test]
+    fn test_generate_scaling_hbd_interpolation_fills_gaps() {
+        let mut scaling = vec![0u8; 1024];
+        generate_scaling_hbd(10, &[[0, 10], [128, 200]], &mut scaling);
+        // shift_x=2, pad=4. Positions 1,2,3 should be interpolated (not zero)
+        assert!(scaling[1] > 0);
+        assert!(scaling[2] > 0);
+        assert!(scaling[3] > 0);
     }
 }
