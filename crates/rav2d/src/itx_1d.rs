@@ -367,6 +367,54 @@ pub static TX1D_FNS: [[Option<Itx1dFn>; N_TX_1D_TYPES - 1]; N_TX_SIZES] = {
     t
 };
 
+pub fn residual_add_8bpc(
+    dst: &mut [u8],
+    stride: usize,
+    c: &[i32],
+    w: usize,
+    h: usize,
+    rnd: i32,
+    shift: i32,
+    dpcm_flag: u8,
+) {
+    match dpcm_flag {
+        0 => {
+            let mut ci = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    dst[y * stride + x] =
+                        iclip(dst[y * stride + x] as i32 + ((c[ci] + rnd) >> shift), 0, 255)
+                            as u8;
+                    ci += 1;
+                }
+            }
+        }
+        1 => {
+            let mut ci = 0;
+            for y in 0..h {
+                let mut acc = 0i32;
+                for x in 0..w {
+                    acc += (c[ci] + rnd) >> shift;
+                    dst[y * stride + x] =
+                        iclip(dst[y * stride + x] as i32 + acc, 0, 255) as u8;
+                    ci += 1;
+                }
+            }
+        }
+        2 => {
+            for x in 0..w {
+                let mut acc = 0i32;
+                for y in 0..h {
+                    acc += (c[y * w + x] + rnd) >> shift;
+                    dst[y * stride + x] =
+                        iclip(dst[y * stride + x] as i32 + acc, 0, 255) as u8;
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +525,58 @@ mod tests {
         for i in 0..16 {
             assert!(u[i] >= min && u[i] <= max);
             assert!(v[i] >= min && v[i] <= max);
+        }
+    }
+
+    #[test]
+    fn test_residual_add_no_dpcm() {
+        let mut dst = vec![128u8; 16];
+        let c = vec![10i32; 16];
+        residual_add_8bpc(&mut dst, 4, &c, 4, 4, 0, 0, 0);
+        for &v in &dst {
+            assert_eq!(v, 138);
+        }
+    }
+
+    #[test]
+    fn test_residual_add_clamps() {
+        let mut dst = vec![250u8; 4];
+        let c = vec![100i32; 4];
+        residual_add_8bpc(&mut dst, 4, &c, 4, 1, 0, 0, 0);
+        for &v in &dst {
+            assert_eq!(v, 255);
+        }
+    }
+
+    #[test]
+    fn test_residual_add_dpcm_h() {
+        let mut dst = vec![100u8; 4];
+        let c = vec![5i32; 4];
+        residual_add_8bpc(&mut dst, 4, &c, 4, 1, 0, 0, 1);
+        assert_eq!(dst[0], 105);
+        assert_eq!(dst[1], 110);
+        assert_eq!(dst[2], 115);
+        assert_eq!(dst[3], 120);
+    }
+
+    #[test]
+    fn test_residual_add_dpcm_v() {
+        let mut dst = vec![100u8; 8];
+        let c = vec![5i32; 8];
+        residual_add_8bpc(&mut dst, 2, &c, 2, 4, 0, 0, 2);
+        assert_eq!(dst[0], 105);
+        assert_eq!(dst[2], 110);
+        assert_eq!(dst[4], 115);
+        assert_eq!(dst[6], 120);
+    }
+
+    #[test]
+    fn test_residual_add_with_shift() {
+        let mut dst = vec![128u8; 4];
+        let c = vec![64i32; 4];
+        residual_add_8bpc(&mut dst, 4, &c, 4, 1, 32, 6, 0);
+        for &v in &dst {
+            assert!(v > 128);
         }
     }
 }

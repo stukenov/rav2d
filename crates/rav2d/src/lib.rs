@@ -21,6 +21,7 @@ pub mod itx_1d;
 pub mod levels;
 pub mod lf_mask;
 pub mod looprestoration;
+pub mod mc;
 pub mod msac;
 pub mod obu;
 pub mod pal;

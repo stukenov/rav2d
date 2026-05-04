@@ -1,6 +1,9 @@
-use crate::intops::{ctz, iclip, imin, ulog2};
-use crate::levels::{ANGLE_IBP_FLAG, ANGLE_MULTI_MRL_FLAG};
-use crate::tables::{DC_IBP_WEIGHTS, DIV_RECIP, SM_WEIGHTS};
+use crate::intops::{ctz, iclip, imax, imin, ulog2};
+use crate::levels::ANGLE_IBP_FLAG;
+use crate::tables::{
+    DC_IBP_WEIGHTS, DIV_RECIP, DIV_SCALE_SH_BIAS, DIV_SCALE_SH_COEFW, DIV_SCALE_SH_OFFSET,
+    SM_WEIGHTS,
+};
 
 #[derive(Clone, Copy)]
 pub struct DrFilter4Tap {
@@ -390,6 +393,72 @@ pub fn ipred_smooth_h(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usi
     }
 }
 
+pub fn ibp_blend_8bpc(
+    dst: &mut [u8],
+    stride: usize,
+    tmp: &[u8],
+    width: usize,
+    height: usize,
+    inv: bool,
+    weights: &[[u8; 16]; 16],
+) {
+    let x_shift = width >> (4 + 1);
+    let y_shift = height >> (4 + 1);
+
+    for y in 0..height {
+        let wy = y >> y_shift;
+        for x in 0..width {
+            let wx = x >> x_shift;
+            let weight = if inv { weights[wx][wy] } else { weights[wy][wx] } as i32;
+            dst[y * stride + x] =
+                ((tmp[y * 64 + x] as i32 * (128 - weight) + dst[y * stride + x] as i32 * weight
+                    + 64)
+                    >> 7) as u8;
+        }
+    }
+}
+
+pub fn get_div_scale_sh(d: i32) -> (i32, i32) {
+    let d = imax(1, d.abs());
+    let sh = ulog2(d as u32);
+    let nsh = sh - 14;
+    let d = if nsh >= 0 {
+        let rnd = if nsh > 0 { 1 << (nsh - 1) } else { 0 };
+        (d + rnd) >> nsh
+    } else {
+        d << (-nsh)
+    };
+    let d = iclip(d, 1, 0x7fff);
+    let d = d & ((1 << 14) - 1);
+
+    let idx = (d >> 11) as usize;
+    let coefw = DIV_SCALE_SH_COEFW[idx] as i32;
+    let bias = DIV_SCALE_SH_BIAS[idx] as i32;
+    let d = d - DIV_SCALE_SH_OFFSET[idx] as i32;
+    let scale = (((coefw * ((d * d) >> 14)) >> 8) - (d >> 1) + bias) << 2;
+    (scale, sh)
+}
+
+pub fn mul32(a: i32, b: i32, sh: i32) -> i32 {
+    let a2 = ulog2((a.abs() | 1) as u32) + 1;
+    let b2 = ulog2((b.abs() | 1) as u32) + 1;
+    let drop = if a2 + b2 > 29 { a2 + b2 - 29 } else { 0 };
+    let ash = drop >> 1;
+    let bsh = drop - ash;
+    let adj = sh - (ash + bsh);
+    let mul = (a >> ash) * (b >> bsh);
+    if adj <= 0 {
+        return mul;
+    }
+    debug_assert!(adj <= 29);
+    let bias = 1u32 << (adj as u32 - 1);
+    if mul >= 0 {
+        ((mul as u32).wrapping_add(bias) >> adj as u32) as i32
+    } else {
+        -((((-mul) as u32).wrapping_add(bias) >> adj as u32) as i32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +646,89 @@ mod tests {
         let mut dst = [0u8; 16];
         ipred_smooth_h(&mut dst, 4, &tl, 8, 4, 4);
         assert_eq!(dst[0], dst[0]);
+    }
+
+    #[test]
+    fn test_ibp_blend_uniform_weight() {
+        let mut dst = vec![200u8; 16 * 16];
+        let tmp = vec![100u8; 16 * 64];
+        let weights = [[64u8; 16]; 16];
+        ibp_blend_8bpc(&mut dst, 16, &tmp, 16, 16, false, &weights);
+        for &v in &dst[..16 * 16] {
+            assert!((v as i32 - 150).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn test_ibp_blend_zero_weight() {
+        let mut dst = vec![200u8; 16 * 16];
+        let tmp = vec![50u8; 16 * 64];
+        let weights = [[0u8; 16]; 16];
+        ibp_blend_8bpc(&mut dst, 16, &tmp, 16, 16, false, &weights);
+        for &v in &dst[..16 * 16] {
+            assert_eq!(v, 50);
+        }
+    }
+
+    #[test]
+    fn test_ibp_blend_full_weight() {
+        let mut dst = vec![200u8; 16 * 16];
+        let tmp = vec![50u8; 16 * 64];
+        let weights = [[128u8; 16]; 16];
+        ibp_blend_8bpc(&mut dst, 16, &tmp, 16, 16, false, &weights);
+        for &v in &dst[..16 * 16] {
+            assert_eq!(v, 200);
+        }
+    }
+
+    #[test]
+    fn test_get_div_scale_sh_small() {
+        let (scale, sh) = get_div_scale_sh(1);
+        assert!(scale > 0);
+        assert_eq!(sh, 0);
+    }
+
+    #[test]
+    fn test_get_div_scale_sh_power_of_two() {
+        let (_, sh) = get_div_scale_sh(16);
+        assert_eq!(sh, 4);
+    }
+
+    #[test]
+    fn test_get_div_scale_sh_negative() {
+        let (s1, sh1) = get_div_scale_sh(10);
+        let (s2, sh2) = get_div_scale_sh(-10);
+        assert_eq!(s1, s2);
+        assert_eq!(sh1, sh2);
+    }
+
+    #[test]
+    fn test_mul32_exact() {
+        assert_eq!(mul32(100, 200, 0), 20000);
+    }
+
+    #[test]
+    fn test_mul32_with_shift() {
+        let r = mul32(1024, 1024, 10);
+        assert_eq!(r, 1024);
+    }
+
+    #[test]
+    fn test_mul32_negative() {
+        let r = mul32(-100, 200, 0);
+        assert_eq!(r, -20000);
+    }
+
+    #[test]
+    fn test_mul32_large_no_overflow() {
+        let r = mul32(1 << 20, 1 << 20, 30);
+        assert!(r > 0);
+    }
+
+    #[test]
+    fn test_mul32_symmetric_rounding() {
+        let pos = mul32(7, 1, 1);
+        let neg = mul32(-7, 1, 1);
+        assert_eq!(pos, -neg);
     }
 }
