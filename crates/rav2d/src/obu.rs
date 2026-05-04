@@ -745,6 +745,213 @@ pub fn parse_sequence_header(data: &[u8]) -> Result<SequenceHeader> {
     parse_seq_hdr(&mut gb, false)
 }
 
+pub fn parse_ci_hdr(ci: &mut ContentInterpretation, gb: &mut GetBits) -> Result<()> {
+    ci.scan_type = match gb.get_bits(2) {
+        0 => ScanType::Unknown,
+        1 => ScanType::Progressive,
+        2 => ScanType::Interlace,
+        3 => ScanType::InterlaceComplementary,
+        _ => unreachable!(),
+    };
+    ci.color_description_present = gb.get_bit() != 0;
+    ci.chroma_sample_position_present = gb.get_bit() != 0;
+    ci.aspect_ratio_info_present = gb.get_bit() != 0;
+    ci.timing_info_present = gb.get_bit() != 0;
+    ci.extension_present = gb.get_bit() != 0;
+    let _ = gb.get_bit(); // reserved
+
+    if ci.color_description_present {
+        let desc_type = gb.get_golomb(2);
+        ci.color.desc_type = match desc_type {
+            0 => ColorDescription::Explicit,
+            1 => ColorDescription::Bt709Sdr,
+            2 => ColorDescription::Bt2100Pq,
+            3 => ColorDescription::Bt2100Hlg,
+            4 => ColorDescription::Srgb,
+            5 => ColorDescription::SrgbSycc,
+            _ => ColorDescription::Explicit, // unknown → treat as explicit with unknown values
+        };
+        match ci.color.desc_type {
+            ColorDescription::Explicit => {
+                if desc_type == 0 {
+                    ci.color.pri = u8_to_color_pri(gb.get_bits(8) as u8);
+                    ci.color.trc = u8_to_trc(gb.get_bits(8) as u8);
+                    ci.color.mtrx = u8_to_mc(gb.get_bits(8) as u8);
+                } else {
+                    ci.color.pri = ColorPrimaries::Unknown;
+                    ci.color.trc = TransferCharacteristics::Unknown;
+                    ci.color.mtrx = MatrixCoefficients::Unknown;
+                }
+            }
+            ColorDescription::Bt709Sdr => {
+                ci.color.pri = ColorPrimaries::Bt709;
+                ci.color.trc = TransferCharacteristics::Bt709;
+                ci.color.mtrx = MatrixCoefficients::Bt470Bg;
+            }
+            ColorDescription::Bt2100Pq => {
+                ci.color.pri = ColorPrimaries::Bt2020;
+                ci.color.trc = TransferCharacteristics::Smpte2084;
+                ci.color.mtrx = MatrixCoefficients::Bt2020Ncl;
+            }
+            ColorDescription::Bt2100Hlg => {
+                ci.color.pri = ColorPrimaries::Bt2020;
+                ci.color.trc = TransferCharacteristics::Bt2020_10Bit;
+                ci.color.mtrx = MatrixCoefficients::Bt2020Ncl;
+            }
+            ColorDescription::Srgb => {
+                ci.color.pri = ColorPrimaries::Bt709;
+                ci.color.trc = TransferCharacteristics::Srgb;
+                ci.color.mtrx = MatrixCoefficients::Identity;
+            }
+            ColorDescription::SrgbSycc => {
+                ci.color.pri = ColorPrimaries::Bt709;
+                ci.color.trc = TransferCharacteristics::Srgb;
+                ci.color.mtrx = MatrixCoefficients::Bt470Bg;
+            }
+        }
+        ci.color.range = gb.get_bit() as u8;
+    } else {
+        ci.color.pri = ColorPrimaries::Unknown;
+        ci.color.trc = TransferCharacteristics::Unknown;
+        ci.color.mtrx = MatrixCoefficients::Unknown;
+    }
+
+    if ci.chroma_sample_position_present {
+        ci.chr[0] = u32_to_chr(gb.get_vlc());
+        ci.chr[1] = if ci.scan_type == ScanType::Progressive {
+            ci.chr[0]
+        } else {
+            u32_to_chr(gb.get_vlc())
+        };
+    } else {
+        ci.chr[0] = ChromaSamplePosition::Unknown;
+        ci.chr[1] = ChromaSamplePosition::Unknown;
+    }
+
+    if ci.aspect_ratio_info_present {
+        let sar_type = gb.get_bits(8) as u8;
+        match sar_type {
+            0 => ci.sar.sar_type = AspectRatio::Unknown,
+            1 => { ci.sar.sar_type = AspectRatio::Sar1_1; ci.sar.w = 1; ci.sar.h = 1; }
+            2 => { ci.sar.sar_type = AspectRatio::Sar12_11; ci.sar.w = 12; ci.sar.h = 11; }
+            3 => { ci.sar.sar_type = AspectRatio::Sar10_11; ci.sar.w = 10; ci.sar.h = 11; }
+            4 => { ci.sar.sar_type = AspectRatio::Sar16_11; ci.sar.w = 16; ci.sar.h = 11; }
+            5 => { ci.sar.sar_type = AspectRatio::Sar40_33; ci.sar.w = 40; ci.sar.h = 33; }
+            6 => { ci.sar.sar_type = AspectRatio::Sar24_11; ci.sar.w = 24; ci.sar.h = 11; }
+            7 => { ci.sar.sar_type = AspectRatio::Sar20_11; ci.sar.w = 20; ci.sar.h = 11; }
+            8 => { ci.sar.sar_type = AspectRatio::Sar32_11; ci.sar.w = 32; ci.sar.h = 11; }
+            9 => { ci.sar.sar_type = AspectRatio::Sar80_33; ci.sar.w = 80; ci.sar.h = 33; }
+            10 => { ci.sar.sar_type = AspectRatio::Sar18_11; ci.sar.w = 18; ci.sar.h = 11; }
+            11 => { ci.sar.sar_type = AspectRatio::Sar15_11; ci.sar.w = 15; ci.sar.h = 11; }
+            12 => { ci.sar.sar_type = AspectRatio::Sar64_33; ci.sar.w = 64; ci.sar.h = 33; }
+            13 => { ci.sar.sar_type = AspectRatio::Sar160_99; ci.sar.w = 160; ci.sar.h = 99; }
+            14 => { ci.sar.sar_type = AspectRatio::Sar4_3; ci.sar.w = 4; ci.sar.h = 3; }
+            15 => { ci.sar.sar_type = AspectRatio::Sar3_2; ci.sar.w = 3; ci.sar.h = 2; }
+            16 => { ci.sar.sar_type = AspectRatio::Sar2_1; ci.sar.w = 2; ci.sar.h = 1; }
+            255 => {
+                ci.sar.sar_type = AspectRatio::Explicit;
+                ci.sar.w = gb.get_vlc();
+                ci.sar.h = gb.get_vlc();
+            }
+            _ => return Err(Dav2dError::InvalidData),
+        }
+    }
+
+    if ci.timing_info_present {
+        ci.timing.num_units_in_display_tick = gb.get_bits(32) as u32;
+        ci.timing.time_scale = gb.get_bits(32) as u32;
+        if ci.timing.num_units_in_display_tick == 0 || ci.timing.time_scale == 0 {
+            return Err(Dav2dError::InvalidData);
+        }
+        ci.timing.equal_elemental_interval = gb.get_bit() as u8;
+        if ci.timing.equal_elemental_interval != 0 {
+            let t = gb.get_vlc();
+            if t == u32::MAX {
+                return Err(Dav2dError::InvalidData);
+            }
+            ci.timing.num_ticks_per_elemental_duration = t + 1;
+        }
+    }
+
+    Ok(())
+}
+
+fn u8_to_color_pri(v: u8) -> ColorPrimaries {
+    match v {
+        1 => ColorPrimaries::Bt709,
+        2 => ColorPrimaries::Unknown,
+        4 => ColorPrimaries::Bt470M,
+        5 => ColorPrimaries::Bt470Bg,
+        6 => ColorPrimaries::Bt601,
+        7 => ColorPrimaries::Smpte240,
+        8 => ColorPrimaries::Film,
+        9 => ColorPrimaries::Bt2020,
+        10 => ColorPrimaries::Xyz,
+        11 => ColorPrimaries::Smpte431,
+        12 => ColorPrimaries::Smpte432,
+        22 => ColorPrimaries::Ebu3213,
+        _ => ColorPrimaries::Unknown,
+    }
+}
+
+fn u8_to_trc(v: u8) -> TransferCharacteristics {
+    match v {
+        1 => TransferCharacteristics::Bt709,
+        2 => TransferCharacteristics::Unknown,
+        4 => TransferCharacteristics::Bt470M,
+        5 => TransferCharacteristics::Bt470Bg,
+        6 => TransferCharacteristics::Bt601,
+        7 => TransferCharacteristics::Smpte240,
+        8 => TransferCharacteristics::Linear,
+        9 => TransferCharacteristics::Log100,
+        10 => TransferCharacteristics::Log100Sqrt10,
+        11 => TransferCharacteristics::Iec61966,
+        12 => TransferCharacteristics::Bt1361,
+        13 => TransferCharacteristics::Srgb,
+        14 => TransferCharacteristics::Bt2020_10Bit,
+        15 => TransferCharacteristics::Bt2020_12Bit,
+        16 => TransferCharacteristics::Smpte2084,
+        17 => TransferCharacteristics::Smpte428,
+        18 => TransferCharacteristics::Hlg,
+        _ => TransferCharacteristics::Unknown,
+    }
+}
+
+fn u8_to_mc(v: u8) -> MatrixCoefficients {
+    match v {
+        0 => MatrixCoefficients::Identity,
+        1 => MatrixCoefficients::Bt709,
+        2 => MatrixCoefficients::Unknown,
+        4 => MatrixCoefficients::Fcc,
+        5 => MatrixCoefficients::Bt470Bg,
+        6 => MatrixCoefficients::Bt601,
+        7 => MatrixCoefficients::Smpte240,
+        8 => MatrixCoefficients::SmpteYcgco,
+        9 => MatrixCoefficients::Bt2020Ncl,
+        10 => MatrixCoefficients::Bt2020Cl,
+        11 => MatrixCoefficients::Smpte2085,
+        12 => MatrixCoefficients::ChromatNcl,
+        13 => MatrixCoefficients::ChromatCl,
+        14 => MatrixCoefficients::Ictcp,
+        15 => MatrixCoefficients::IptC2,
+        16 => MatrixCoefficients::YcgcoRe,
+        17 => MatrixCoefficients::YcgcoRo,
+        _ => MatrixCoefficients::Unknown,
+    }
+}
+
+fn u32_to_chr(v: u32) -> ChromaSamplePosition {
+    match v {
+        0 => ChromaSamplePosition::Left,
+        1 => ChromaSamplePosition::Center,
+        2 => ChromaSamplePosition::TopLeft,
+        3 => ChromaSamplePosition::Top,
+        4 => ChromaSamplePosition::BottomLeft,
+        5 => ChromaSamplePosition::Bottom,
+        _ => ChromaSamplePosition::Unknown,
+    }
+}
+
 pub fn read_frame_size(
     hdr: &mut FrameHeader,
     seqhdr: &SequenceHeader,
@@ -1492,6 +1699,72 @@ mod tests {
         let result = derive_pri_sec_ref(&hdr, &seqhdr, &refs);
         // ref 2 (qidx=98, qdiff=2) is closest in quality, should be primary
         assert_eq!(result[0], 2);
+    }
+
+    #[test]
+    fn test_parse_ci_hdr_minimal() {
+        // scan_type=1 (progressive), all flags=0, reserved=0
+        // 01_0_0_0_0_0_0 = 0b01000000 = 0x40
+        let data = [0x40, 0x00, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        let mut ci = ContentInterpretation::default();
+        parse_ci_hdr(&mut ci, &mut gb).unwrap();
+        assert_eq!(ci.scan_type, ScanType::Progressive);
+        assert!(!ci.color_description_present);
+        assert!(!ci.timing_info_present);
+        assert_eq!(ci.color.pri, ColorPrimaries::Unknown);
+    }
+
+    #[test]
+    fn test_parse_ci_hdr_bt709sdr() {
+        // scan_type=1, color_desc_present=1, rest flags=0, reserved=0
+        // 01_1_0_0_0_0_0 = 0b01100000 = 0x60
+        // color.type = golomb(2) for BT709SDR (=1)
+        // golomb(2): for value 1, unary = 0b0, then 2 bits = 01 → "0 01"
+        // But get_golomb encodes as: prefix 0s + 1 + k bits
+        // For k=2, value=1: bits = 1_01 (prefix length 0 since 1 < 4)
+        // Actually let me check: golomb coding with k=2
+        // value 1: quotient=0, remainder=1 → unary: 1 (for q=0), k bits: 01
+        // So bits: 1_01 = 0b101
+        // Then color.range = 1 bit
+        // Full: 0110_0000 | 101_r_0000
+        // Byte 0: 0110_0000 = 0x60
+        // golomb(2) for val 1: prefix 0 (stop), remainder 01 → "0_01"
+        // then range=0
+        // Byte 1: 001_0_0000 = 0x20
+        let data = [0x60, 0x20, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        let mut ci = ContentInterpretation::default();
+        parse_ci_hdr(&mut ci, &mut gb).unwrap();
+        assert_eq!(ci.scan_type, ScanType::Progressive);
+        assert!(ci.color_description_present);
+        assert_eq!(ci.color.desc_type, ColorDescription::Bt709Sdr);
+        assert_eq!(ci.color.pri, ColorPrimaries::Bt709);
+        assert_eq!(ci.color.trc, TransferCharacteristics::Bt709);
+        assert_eq!(ci.color.mtrx, MatrixCoefficients::Bt470Bg);
+    }
+
+    #[test]
+    fn test_parse_ci_hdr_timing_zero_error() {
+        // scan_type=0, flags: timing_info_present=1 only
+        // 00_0_0_0_1_0_0 = 0b00000100 = 0x04
+        // timing: num_units=0 (32 bits) → error
+        let mut data = [0u8; 12];
+        data[0] = 0x04;
+        let mut gb = GetBits::new(&data);
+        let mut ci = ContentInterpretation::default();
+        assert!(parse_ci_hdr(&mut ci, &mut gb).is_err());
+    }
+
+    #[test]
+    fn test_parse_ci_hdr_bad_sar() {
+        // scan_type=0, aspect_ratio_info_present=1 only
+        // 00_0_0_1_0_0_0 = 0b00001000 = 0x08
+        // sar_type = 200 (invalid, not 0-16 or 255) → error
+        let data = [0x08, 200, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        let mut ci = ContentInterpretation::default();
+        assert!(parse_ci_hdr(&mut ci, &mut gb).is_err());
     }
 
     #[test]

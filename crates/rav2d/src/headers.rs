@@ -208,6 +208,78 @@ pub enum ChromaSamplePosition {
     Unknown = 6,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ScanType {
+    #[default]
+    Unknown = 0,
+    Progressive = 1,
+    Interlace = 2,
+    InterlaceComplementary = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum AspectRatio {
+    #[default]
+    Unknown = 0,
+    Sar1_1 = 1,
+    Sar12_11 = 2,
+    Sar10_11 = 3,
+    Sar16_11 = 4,
+    Sar40_33 = 5,
+    Sar24_11 = 6,
+    Sar20_11 = 7,
+    Sar32_11 = 8,
+    Sar80_33 = 9,
+    Sar18_11 = 10,
+    Sar15_11 = 11,
+    Sar64_33 = 12,
+    Sar160_99 = 13,
+    Sar4_3 = 14,
+    Sar3_2 = 15,
+    Sar2_1 = 16,
+    Explicit = 255,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CiColor {
+    pub desc_type: ColorDescription,
+    pub pri: ColorPrimaries,
+    pub trc: TransferCharacteristics,
+    pub mtrx: MatrixCoefficients,
+    pub range: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CiSar {
+    pub sar_type: AspectRatio,
+    pub w: u32,
+    pub h: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CiTiming {
+    pub num_units_in_display_tick: u32,
+    pub time_scale: u32,
+    pub equal_elemental_interval: u8,
+    pub num_ticks_per_elemental_duration: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ContentInterpretation {
+    pub scan_type: ScanType,
+    pub color_description_present: bool,
+    pub chroma_sample_position_present: bool,
+    pub aspect_ratio_info_present: bool,
+    pub timing_info_present: bool,
+    pub extension_present: bool,
+    pub chr: [ChromaSamplePosition; 2],
+    pub color: CiColor,
+    pub sar: CiSar,
+    pub timing: CiTiming,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WarpedMotionParams {
     pub wm_type: WarpedMotionType,
