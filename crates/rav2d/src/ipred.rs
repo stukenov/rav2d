@@ -1,4 +1,5 @@
-use crate::intops::{clz, ctz, iclip, imax, imin, ulog2};
+use crate::intops::{apply_sign, clz, ctz, iclip, imax, imin, ulog2};
+use crate::recon::derive_alpha;
 use crate::levels::CflMhDir;
 use crate::levels::{
     ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG, ANGLE_IS_LUMA,
@@ -984,6 +985,12 @@ pub const CFL_HAS_LEFT: i32 = 1 << 3;
 pub const CFL_DIR_ALL: i32 = CflMhDir::All as i32;
 pub const CFL_DIR_LEFT: i32 = CflMhDir::Left as i32;
 pub const CFL_DIR_TOP: i32 = CflMhDir::Top as i32;
+pub const CFL_IS_TOP_SB_EDGE: u32 = 1 << 4;
+pub const CFL_ALPHA_LOG2: u32 = 5;
+pub const CFL_ALPHA_U_SHIFT: u32 = 16 - CFL_ALPHA_LOG2;
+pub const CFL_ALPHA_V_SHIFT: u32 = 32 - CFL_ALPHA_LOG2;
+pub const CFL_ALPHA_U_MASK: u32 = ((1 << CFL_ALPHA_LOG2) - 1) << CFL_ALPHA_U_SHIFT;
+pub const CFL_ALPHA_V_MASK: u32 = ((1 << CFL_ALPHA_LOG2) - 1) << CFL_ALPHA_V_SHIFT;
 
 #[inline(always)]
 fn cfl_filter(src: &[u8], c: usize, l: usize, r: usize, b: usize,
@@ -1410,6 +1417,327 @@ pub fn cfl_mhccp_pred_8bpc(
         sp += w;
         dp += dst_stride;
         y += 1;
+    }
+}
+
+fn cfl_luma_left(
+    ypx: &[u8], yleft: usize, ystride: isize,
+    ss_hor: usize, ss_ver: usize, flags: u32, y: usize,
+) -> i32 {
+    if ss_hor | ss_ver == 0 {
+        return (ypx[yleft] as i32) << 3;
+    }
+    if ss_ver == 0 {
+        let flt = flags & (CFL_FLT_TYPE_GAUSS as u32 | CFL_FLT_TYPE_VSTRIP as u32);
+        return if flt == CFL_FLT_TYPE_GAUSS as u32 {
+            (ypx[yleft] as i32) << 3
+        } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
+            (ypx[yleft - 1] as i32 + 2 * ypx[yleft] as i32 + ypx[yleft + 1] as i32) << 1
+        } else {
+            (ypx[yleft] as i32 + ypx[yleft + 1] as i32) << 2
+        };
+    }
+    let flt = flags & 3;
+    if flt == CFL_FLT_TYPE_GAUSS as u32 {
+        let top = if y > 0 { (yleft as isize - ystride) as usize } else { yleft };
+        ypx[yleft - 1] as i32 + 4 * ypx[yleft] as i32 + ypx[yleft + 1] as i32 +
+        ypx[top] as i32 + ypx[(yleft as isize + ystride) as usize] as i32
+    } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
+        ypx[yleft - 1] as i32 + 2 * ypx[yleft] as i32 + ypx[yleft + 1] as i32 +
+        ypx[(yleft as isize + ystride) as usize - 1] as i32 +
+        2 * ypx[(yleft as isize + ystride) as usize] as i32 +
+        ypx[(yleft as isize + ystride) as usize + 1] as i32
+    } else {
+        (ypx[yleft] as i32 + ypx[yleft + 1] as i32 +
+         ypx[(yleft as isize + ystride) as usize] as i32 +
+         ypx[(yleft as isize + ystride) as usize + 1] as i32) << 1
+    }
+}
+
+fn cfl_luma_top(
+    ytop: &[u8], xl: usize, ystride: isize,
+    ss_hor: usize, ss_ver: usize, flags: u32, is_top_sb: bool,
+) -> i32 {
+    if ss_hor | ss_ver == 0 {
+        return (ytop[xl] as i32) << 3;
+    }
+    if ss_ver == 0 {
+        let flt = flags & 3;
+        return if flt == CFL_FLT_TYPE_GAUSS as u32 {
+            (ytop[xl] as i32) << 3
+        } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
+            (ytop[imax(0, xl as i32 - 1) as usize] as i32 + 2 * ytop[xl] as i32 + ytop[xl + 1] as i32) << 1
+        } else {
+            (ytop[xl] as i32 + ytop[xl + 1] as i32) << 2
+        };
+    }
+    let bottom = if is_top_sb { 0isize } else { ystride };
+    let flt = flags & 3;
+    if flt == CFL_FLT_TYPE_GAUSS as u32 {
+        ytop[imax(0, xl as i32 - 1) as usize] as i32 + 4 * ytop[xl] as i32 + ytop[xl + 1] as i32 +
+        ytop[(xl as isize - bottom) as usize] as i32 + ytop[(xl as isize + bottom) as usize] as i32
+    } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
+        ytop[imax(0, xl as i32 - 1) as usize] as i32 + 2 * ytop[xl] as i32 + ytop[xl + 1] as i32 +
+        ytop[(imax(0, xl as i32 - 1) as isize + bottom) as usize] as i32 +
+        2 * ytop[(xl as isize + bottom) as usize] as i32 + ytop[(xl as isize + bottom) as usize + 1] as i32
+    } else {
+        (ytop[xl] as i32 + ytop[xl + 1] as i32 +
+         ytop[(xl as isize + bottom) as usize] as i32 + ytop[(xl as isize + bottom) as usize + 1] as i32) << 1
+    }
+}
+
+fn cfl_luma_block(
+    ypx: &[u8], px: usize, xl: usize, ystride: isize,
+    ss_hor: usize, ss_ver: usize, flags: u32, y: usize,
+) -> i32 {
+    if ss_hor | ss_ver == 0 {
+        return (ypx[px + xl] as i32) << 3;
+    }
+    if ss_ver == 0 {
+        let flt = flags & 3;
+        return if flt == CFL_FLT_TYPE_GAUSS as u32 {
+            (ypx[px + xl] as i32) << 3
+        } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
+            let left = imax((xl as i32) & -64, xl as i32 - 1) as usize;
+            (ypx[px + left] as i32 + 2 * ypx[px + xl] as i32 + ypx[px + xl + 1] as i32) << 1
+        } else {
+            (ypx[px + xl] as i32 + ypx[px + xl + 1] as i32) << 2
+        };
+    }
+    let bot = (px + xl) as isize + ystride;
+    let left = imax((xl as i32) & -64, xl as i32 - 1) as usize;
+    let flt = flags & 3;
+    if flt == CFL_FLT_TYPE_GAUSS as u32 {
+        let top = if y & 31 == 0 { px + xl } else { (px as isize + xl as isize - ystride) as usize };
+        ypx[px + left] as i32 + 4 * ypx[px + xl] as i32 + ypx[px + xl + 1] as i32 +
+        ypx[top] as i32 + ypx[bot as usize] as i32
+    } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
+        ypx[px + left] as i32 + 2 * ypx[px + xl] as i32 + ypx[px + xl + 1] as i32 +
+        ypx[(px + left) as isize as usize + ystride as usize] as i32 +
+        2 * ypx[bot as usize] as i32 + ypx[bot as usize + 1] as i32
+    } else {
+        (ypx[px + xl] as i32 + ypx[px + xl + 1] as i32 +
+         ypx[bot as usize] as i32 + ypx[bot as usize + 1] as i32) << 1
+    }
+}
+
+/// CFL chroma-from-luma prediction (explicit and implicit modes).
+///
+/// Buffer layout: `u_buf`/`v_buf` are the chroma planes. The block starts at
+/// `u_off`/`v_off`; the left neighbor column is at offset -1 from those.
+pub fn cfl_pred_8bpc(
+    ytop: &[u8], ytop_off: usize,
+    utop: &[u8], utop_off: usize,
+    vtop: &[u8], vtop_off: usize,
+    ypx: &[u8], ypx_off: usize,
+    u_buf: &mut [u8], u_off: usize,
+    v_buf: &mut [u8], v_off: usize,
+    ystride: isize,
+    cstride: isize,
+    wpad: usize, hpad: usize,
+    w: usize, h: usize,
+    flags: u32,
+    implicit: bool,
+    ss_hor: usize, ss_ver: usize,
+) {
+    let has_t = flags & CFL_HAS_TOP as u32 != 0;
+    let has_l = flags & CFL_HAS_LEFT as u32 != 0;
+    let xlim = w - 4 * wpad;
+    let ylim = h - 4 * hpad;
+    let skiph = w == 64;
+    let skipv = h == 64;
+
+    let mut dc = [0i32; 3];
+    let mut n_top = 0usize;
+    let mut n_left = 0usize;
+    let mut i = 0usize;
+    let mut sum_x = 0i32;
+    let mut sum_xx = 0i32;
+    let mut sum_y = [0i32; 2];
+    let mut sum_xy = [0i32; 2];
+    let mut edge = [[0u8; 8]; 3];
+
+    if implicit {
+        if has_t && has_l {
+            if w > h * 2 {
+                n_top = 8; n_left = 0;
+            } else if h > w * 2 {
+                n_top = 0; n_left = 8;
+            } else {
+                n_top = 4; n_left = 4;
+            }
+        } else {
+            n_top = if has_t { imin(8, w as i32) as usize } else { 0 };
+            n_left = if has_l { imin(8, h as i32) as usize } else { 0 };
+        }
+    }
+
+    if has_l {
+        let mut yleft = ypx_off - (1 + ss_hor);
+        let step = if n_left > 0 { h >> ctz(n_left as u32) } else { 0 };
+        let mut l = 0i32;
+        let mut u_lp = u_off;
+        let mut v_lp = v_off;
+        for y in 0..ylim {
+            l = cfl_luma_left(ypx, yleft, ystride, ss_hor, ss_ver, flags, y);
+            if !skipv || y & 1 == 0 {
+                dc[0] += l;
+                dc[1] += u_buf[u_lp - 1] as i32;
+                dc[2] += v_buf[v_lp - 1] as i32;
+            }
+            if n_left > 0 && (y & (step - 1)) ^ (step >> 1) == 0 {
+                edge[0][i] = (l >> 3) as u8;
+                edge[1][i] = u_buf[u_lp - 1];
+                edge[2][i] = v_buf[v_lp - 1];
+                i += 1;
+            }
+            yleft = (yleft as isize + (ystride << ss_ver)) as usize;
+            u_lp = (u_lp as isize + cstride) as usize;
+            v_lp = (v_lp as isize + cstride) as usize;
+        }
+        for y in ylim..h {
+            if !skipv || y & 1 == 0 {
+                dc[0] += l;
+                dc[1] += u_buf[(u_lp as isize - cstride) as usize] as i32;
+                dc[2] += v_buf[(v_lp as isize - cstride) as usize] as i32;
+            }
+            if n_left > 0 && (y & (step - 1)) ^ (step >> 1) == 0 {
+                edge[0][i] = (l >> 3) as u8;
+                edge[1][i] = u_buf[(u_lp as isize - cstride) as usize];
+                edge[2][i] = v_buf[(v_lp as isize - cstride) as usize];
+                i += 1;
+            }
+        }
+    }
+
+    if has_t {
+        let step = if n_top > 0 { w >> ctz(n_top as u32) } else { 0 };
+        let is_top_sb = flags & CFL_IS_TOP_SB_EDGE != 0;
+        let mut l = 0i32;
+        for x in 0..xlim {
+            let xl = x << ss_hor;
+            l = cfl_luma_top(ytop, ytop_off + xl, ystride, ss_hor, ss_ver, flags, is_top_sb);
+            if !skiph || x & 1 == 0 {
+                dc[0] += l;
+                dc[1] += utop[utop_off + x] as i32;
+                dc[2] += vtop[vtop_off + x] as i32;
+            }
+            if n_top > 0 && (x & (step - 1)) ^ (step >> 1) == 0 {
+                edge[0][i] = (l >> 3) as u8;
+                edge[1][i] = utop[utop_off + x];
+                edge[2][i] = vtop[vtop_off + x];
+                i += 1;
+            }
+        }
+        for x in xlim..w {
+            if !skiph || x & 1 == 0 {
+                dc[0] += l;
+                dc[1] += utop[utop_off + xlim - 1] as i32;
+                dc[2] += vtop[vtop_off + xlim - 1] as i32;
+            }
+            if n_top > 0 && (x & (step - 1)) ^ (step >> 1) == 0 {
+                edge[0][i] = (l >> 3) as u8;
+                edge[1][i] = utop[utop_off + xlim - 1];
+                edge[2][i] = vtop[vtop_off + xlim - 1];
+                i += 1;
+            }
+        }
+    }
+
+    if !has_t && !has_l {
+        dc[0] = 4 << 8;
+        dc[1] = 128;
+        dc[2] = 128;
+    } else {
+        let npx = (if has_t { w >> skiph as usize } else { 0 }) +
+                  (if has_l { h >> skipv as usize } else { 0 });
+        if npx & (npx - 1) == 0 {
+            dc[0] = (dc[0] + (npx as i32 >> 1)) >> ctz(npx as u32);
+            dc[1] = (dc[1] + (npx as i32 >> 1)) >> ctz(npx as u32);
+            dc[2] = (dc[2] + (npx as i32 >> 1)) >> ctz(npx as u32);
+        } else {
+            dc[0] = fast_div32_dc(dc[0] as u32, npx as u32) as i32;
+            dc[1] = fast_div32_dc(dc[1] as u32, npx as u32) as i32;
+            dc[2] = fast_div32_dc(dc[2] as u32, npx as u32) as i32;
+        }
+    }
+
+    let mut alpha = [0i32; 2];
+    if implicit {
+        for j in 0..n_top + n_left {
+            sum_x += edge[0][j] as i32;
+            sum_y[0] += edge[1][j] as i32;
+            sum_y[1] += edge[2][j] as i32;
+            sum_xx += edge[0][j] as i32 * edge[0][j] as i32;
+            sum_xy[0] += edge[0][j] as i32 * edge[1][j] as i32;
+            sum_xy[1] += edge[0][j] as i32 * edge[2][j] as i32;
+        }
+        let count_l2 = ctz((n_top + n_left) as u32);
+        let den = sum_xx - ((sum_x as i64 * sum_x as i64) >> count_l2) as i32;
+        for pl in 0..2 {
+            let num = sum_xy[pl] - ((sum_x as i64 * sum_y[pl] as i64) >> count_l2) as i32;
+            alpha[pl] = derive_alpha(num, den, 0);
+        }
+    } else {
+        let shu = CFL_ALPHA_U_SHIFT - 5;
+        let shv = CFL_ALPHA_V_SHIFT - 5;
+        alpha[0] = ((flags & CFL_ALPHA_U_MASK) as i16 as i32) >> shu;
+        alpha[1] = ((flags & CFL_ALPHA_V_MASK) as i32) >> shv;
+    }
+
+    if alpha[0] == 0 {
+        let dc_u = iclip(dc[1], 0, 255) as u8;
+        splat_dc(u_buf, cstride as usize, u_off, w, h, dc_u);
+    }
+    if alpha[1] == 0 {
+        let dc_v = iclip(dc[2], 0, 255) as u8;
+        splat_dc(v_buf, cstride as usize, v_off, w, h, dc_v);
+    }
+
+    let mut yp = ypx_off;
+    let mut u_dp = u_off;
+    let mut v_dp = v_off;
+
+    for y in 0..ylim {
+        for x in 0..xlim {
+            let xl = x << ss_hor;
+            let ac = cfl_luma_block(ypx, yp, xl, ystride, ss_hor, ss_ver, flags, y) - dc[0];
+            for pl in 0..2 {
+                if alpha[pl] != 0 {
+                    let diff = alpha[pl] * ac;
+                    let val = dc[1 + pl] + apply_sign((diff.abs() + 1024) >> 11, diff);
+                    let dp = if pl == 0 { u_dp } else { v_dp };
+                    let buf: &mut [u8] = if pl == 0 { u_buf } else { v_buf };
+                    buf[dp + x] = iclip(val, 0, 255) as u8;
+                }
+            }
+        }
+        for pl in 0..2 {
+            if alpha[pl] != 0 {
+                let dp = if pl == 0 { u_dp } else { v_dp };
+                let buf: &mut [u8] = if pl == 0 { u_buf } else { v_buf };
+                let last_val = buf[dp + xlim - 1];
+                for xpad in xlim..w {
+                    buf[dp + xpad] = last_val;
+                }
+            }
+        }
+        yp = (yp as isize + (ystride << ss_ver)) as usize;
+        u_dp = (u_dp as isize + cstride) as usize;
+        v_dp = (v_dp as isize + cstride) as usize;
+    }
+
+    for pl in 0..2 {
+        if alpha[pl] != 0 {
+            let buf: &mut [u8] = if pl == 0 { u_buf } else { v_buf };
+            let mut dp = if pl == 0 { u_dp } else { v_dp };
+            for y in ylim..h {
+                let prev_row = (dp as isize - (1 + y as isize - ylim as isize) * cstride) as usize;
+                let tmp: Vec<u8> = buf[prev_row..prev_row + w].to_vec();
+                buf[dp..dp + w].copy_from_slice(&tmp);
+                dp = (dp as isize + cstride) as usize;
+            }
+        }
     }
 }
 
@@ -2065,6 +2393,57 @@ mod tests {
         for y in 0..4 {
             for x in 0..4 {
                 assert!(dst[y * 8 + x] > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cfl_pred_explicit_444_uniform() {
+        let stride = 16isize;
+        let ytop = vec![128u8; 64];
+        let utop = vec![128u8; 32];
+        let vtop = vec![128u8; 32];
+        let ypx = vec![128u8; 512];
+        let mut u_buf = vec![128u8; 512];
+        let mut v_buf = vec![128u8; 512];
+        let off = stride as usize + 1;
+        let yoff = stride as usize + 1;
+        let flags = CFL_HAS_TOP as u32 | CFL_HAS_LEFT as u32;
+        cfl_pred_8bpc(
+            &ytop, 0, &utop, 0, &vtop, 0,
+            &ypx, yoff,
+            &mut u_buf, off, &mut v_buf, off,
+            stride, stride,
+            0, 0, 4, 4, flags, false, 0, 0,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(u_buf[off + y * stride as usize + x], 128);
+                assert_eq!(v_buf[off + y * stride as usize + x], 128);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cfl_pred_no_edges() {
+        let ytop = vec![0u8; 32];
+        let utop = vec![0u8; 32];
+        let vtop = vec![0u8; 32];
+        let ypx = vec![100u8; 256];
+        let mut u_buf = vec![0u8; 256];
+        let mut v_buf = vec![0u8; 256];
+        let off = 1usize;
+        cfl_pred_8bpc(
+            &ytop, 0, &utop, 0, &vtop, 0,
+            &ypx, 0,
+            &mut u_buf, off, &mut v_buf, off,
+            16, 16,
+            0, 0, 4, 4, 0, false, 0, 0,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(u_buf[off + y * 16 + x], 128);
+                assert_eq!(v_buf[off + y * 16 + x], 128);
             }
         }
     }
