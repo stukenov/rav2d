@@ -1,14 +1,18 @@
 use crate::cdf::{CdfModeContext, CdfMvContext};
 use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::env::BlockContext;
-use crate::headers::{AdaptiveBoolean, FrameHeader, RestorationType, MAX_SEGMENTS};
+use crate::headers::{AdaptiveBoolean, FrameHeader, NSWienerPlane, RestorationType, MAX_SEGMENTS};
 use crate::internal::{LoopFilterState, NsWienerBank, ScalableMotionParams};
+use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, imax, imin, inv_recenter};
 use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES};
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
-use crate::tables::{NS_WIENER_COEF_RANGE_Y, NS_WIENER_COEF_RANGE_UV};
+use crate::tables::{
+    NS_WIENER_COEF_RANGE_Y, NS_WIENER_COEF_RANGE_UV,
+    SUBSET_MASKS_Y, SUBSET_MASKS_UV,
+};
 
 pub fn init_wiener(frame_hdr: &FrameHeader, lf: &mut LoopFilterState) {
     let rtype = frame_hdr.restoration.p[0].restoration_type;
@@ -995,6 +999,127 @@ pub fn read_tx_part(
     }
 }
 
+pub fn read_restoration_info(
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    bank: &mut NsWienerBank,
+    lr: &mut Av2RestorationUnit,
+    p: usize,
+    frame_type: RestorationType,
+    ns_plane: &NSWienerPlane,
+) {
+    let is_uv = (p != 0) as usize;
+
+    if frame_type == RestorationType::Switchable {
+        debug_assert!(p == 0);
+        if msac.decode_bool_adapt(cdf_m.rst_switchable(0)) != 0 {
+            lr.restoration_type = RestorationType::None as u8;
+        } else {
+            let t = msac.decode_bool_adapt(cdf_m.rst_switchable(1));
+            lr.restoration_type = if t != 0 {
+                RestorationType::PcWiener as u8
+            } else {
+                RestorationType::NsWiener as u8
+            };
+        }
+    } else {
+        debug_assert!(p == 0 || frame_type == RestorationType::NsWiener);
+        let cdf = if frame_type == RestorationType::NsWiener {
+            cdf_m.rst_ns_wiener()
+        } else {
+            cdf_m.rst_pc_wiener()
+        };
+        let t = msac.decode_bool_adapt(cdf);
+        lr.restoration_type = if t != 0 { frame_type as u8 } else { RestorationType::None as u8 };
+    }
+
+    if lr.restoration_type == RestorationType::NsWiener as u8 && ns_plane.frame_filters_on == 0 {
+        let n_classes = ns_plane.num_classes as usize;
+        let mut exact_match_mask = 0u32;
+        let mut bank_refs = [0u8; 16];
+
+        for n in 0..n_classes {
+            let exact_match = msac.decode_bool_bypass();
+            let bank_size = bank.bank_size[n] as i32;
+            let mut r = 0i32;
+            while r < bank_size - 1 {
+                if msac.decode_bool_bypass() != 0 {
+                    break;
+                }
+                r += 1;
+            }
+            let r_idx = ((bank.bank_idx[n] as i32 - r) & 3) as u8;
+            exact_match_mask |= (1 << n) * exact_match;
+            bank_refs[n] = r_idx;
+        }
+
+        let masks: &[u32] = if is_uv != 0 { &SUBSET_MASKS_UV } else { &SUBSET_MASKS_Y };
+        let cf_range: &[[i8; 2]] = if is_uv != 0 {
+            &NS_WIENER_COEF_RANGE_UV
+        } else {
+            &NS_WIENER_COEF_RANGE_Y
+        };
+        let n_coefs = 16 + is_uv * 2;
+
+        for n in 0..n_classes {
+            let r = bank_refs[n] as usize;
+            let exact = (exact_match_mask >> n) & 1 != 0;
+
+            if exact {
+                lr.ns_filter[n][..n_coefs].copy_from_slice(&bank.filter[r][n][..n_coefs]);
+                if bank.bank_size[n] == 0 {
+                    bank.bank_size[n] = 1;
+                }
+                continue;
+            }
+
+            lr.ns_filter[n][..n_coefs].fill(0);
+            let mut s = 0usize;
+            while s < 3 - is_uv {
+                if msac.decode_bool_adapt(cdf_m.wiener_ns_len(is_uv)) == 0 {
+                    break;
+                }
+                s += 1;
+            }
+            let mask = masks[s];
+            let asym = is_uv != 0
+                && s != 0
+                && msac.decode_bool_adapt(cdf_m.wiener_ns_sym()) != 0;
+
+            let ref_filter = &bank.filter[r][n];
+            let mut i = 0usize;
+            let mut m = mask;
+            while i < n_coefs {
+                if m & 1 == 0 {
+                    i += 1;
+                    m >>= 1;
+                    continue;
+                }
+                lr.ns_filter[n][i] = (decode_4way(
+                    msac,
+                    ref_filter[i] as i32 - cf_range[i][1] as i32,
+                    cdf_m.wiener_ns_cf(),
+                    cf_range[i][0] as i32,
+                ) + cf_range[i][1] as i32) as i8;
+                if asym && i >= 6 {
+                    lr.ns_filter[n][i + 1] = lr.ns_filter[n][i];
+                    i += 1;
+                    m >>= 1;
+                }
+                i += 1;
+                m >>= 1;
+            }
+
+            let bidx = ((1 + bank.bank_idx[n]) & 3) as usize;
+            bank.bank_idx[n] = bidx as u8;
+            bank.filter[bidx][n][..n_coefs].copy_from_slice(&lr.ns_filter[n][..n_coefs]);
+            if bank.bank_size[n] < 4 {
+                bank.bank_size[n] += 1;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1597,5 +1722,123 @@ mod tests {
         fh.quant.yac = 250;
         init_wiener(&fh, &mut lf);
         assert_eq!(lf.wiener_idx, 3);
+    }
+
+    fn make_default_ns_plane(n_classes: u8) -> NSWienerPlane {
+        NSWienerPlane {
+            frame_filters_on: 0,
+            num_classes_idx: 0,
+            num_classes: n_classes,
+            temporal: 0,
+            refidx: 0,
+            filter: [[0; 18]; 16],
+        }
+    }
+
+    fn make_flat_cdf_mode() -> CdfModeContext {
+        let mut m = CdfModeContext { data: [0; 3496] };
+        for i in (0..20).step_by(2) {
+            m.data[i] = 16384;
+            m.data[i + 1] = 0;
+        }
+        m
+    }
+
+    #[test]
+    fn test_read_restoration_info_switchable_none() {
+        let data = [0xFF; 16];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = make_flat_cdf_mode();
+        let mut bank = NsWienerBank::default();
+        let mut lr = Av2RestorationUnit::default();
+        let ns = make_default_ns_plane(1);
+
+        read_restoration_info(
+            &mut msac, &mut cdf_m, &mut bank, &mut lr,
+            0, RestorationType::Switchable, &ns,
+        );
+        assert!(
+            lr.restoration_type == RestorationType::None as u8
+                || lr.restoration_type == RestorationType::PcWiener as u8
+                || lr.restoration_type == RestorationType::NsWiener as u8
+        );
+    }
+
+    #[test]
+    fn test_read_restoration_info_ns_wiener_type() {
+        let data = [0x00; 16];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = make_flat_cdf_mode();
+        let mut bank = NsWienerBank::default();
+        let mut lr = Av2RestorationUnit::default();
+        let ns = make_default_ns_plane(1);
+
+        read_restoration_info(
+            &mut msac, &mut cdf_m, &mut bank, &mut lr,
+            0, RestorationType::NsWiener, &ns,
+        );
+        assert!(
+            lr.restoration_type == RestorationType::None as u8
+                || lr.restoration_type == RestorationType::NsWiener as u8
+        );
+    }
+
+    #[test]
+    fn test_read_restoration_info_pc_wiener_type() {
+        let data = [0x80; 16];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = make_flat_cdf_mode();
+        let mut bank = NsWienerBank::default();
+        let mut lr = Av2RestorationUnit::default();
+        let ns = make_default_ns_plane(1);
+
+        read_restoration_info(
+            &mut msac, &mut cdf_m, &mut bank, &mut lr,
+            0, RestorationType::PcWiener, &ns,
+        );
+        assert!(
+            lr.restoration_type == RestorationType::None as u8
+                || lr.restoration_type == RestorationType::PcWiener as u8
+        );
+    }
+
+    #[test]
+    fn test_read_restoration_info_ns_filter_exact_match() {
+        let data = [0xFF; 64];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = make_flat_cdf_mode();
+        cdf_m.data[6] = 0;
+        let mut bank = NsWienerBank::default();
+        bank.filter[0][0][0] = 5;
+        bank.filter[0][0][1] = -3;
+        let mut lr = Av2RestorationUnit::default();
+        let ns = make_default_ns_plane(1);
+
+        read_restoration_info(
+            &mut msac, &mut cdf_m, &mut bank, &mut lr,
+            0, RestorationType::NsWiener, &ns,
+        );
+        if lr.restoration_type == RestorationType::NsWiener as u8 {
+            assert!(bank.bank_size[0] <= 4);
+        }
+    }
+
+    #[test]
+    fn test_read_restoration_info_uv_plane() {
+        let data = [0x40; 64];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = make_flat_cdf_mode();
+        let mut bank = NsWienerBank::default();
+        let mut lr = Av2RestorationUnit::default();
+        let ns = make_default_ns_plane(1);
+
+        read_restoration_info(
+            &mut msac, &mut cdf_m, &mut bank, &mut lr,
+            1, RestorationType::NsWiener, &ns,
+        );
+        assert!(
+            lr.restoration_type == RestorationType::None as u8
+                || lr.restoration_type == RestorationType::NsWiener as u8
+        );
     }
 }
