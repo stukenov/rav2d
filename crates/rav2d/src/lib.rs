@@ -17,6 +17,7 @@ pub mod intops;
 pub mod intra_edge;
 pub mod ipred;
 pub mod ipred_prepare;
+pub mod itx;
 pub mod itx_1d;
 pub mod levels;
 pub mod lf_mask;
