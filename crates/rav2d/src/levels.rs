@@ -100,9 +100,16 @@ pub const Z2_PRED: u8 = 17;
 pub const Z3_PRED: u8 = 18;
 pub const DIP_PRED: u8 = 13;
 
+pub const ANGLE_SMOOTH_LEFT_EDGE_FLAG: i32 = 1 << 9;
+pub const ANGLE_SMOOTH_TOP_EDGE_FLAG: i32 = 1 << 10;
 pub const ANGLE_USE_EDGE_FILTER_FLAG: i32 = 1 << 11;
 pub const ANGLE_IBP_FLAG: i32 = 1 << 12;
+pub const ANGLE_MRL_IDX_SHIFT: i32 = 13;
+pub const ANGLE_MRL_IDX_MASK: i32 = 3 << 13;
 pub const ANGLE_MULTI_MRL_FLAG: i32 = 1 << 15;
+pub const ANGLE_HAS_LEFT_FLAG: i32 = 1 << 16;
+pub const ANGLE_HAS_TOP_FLAG: i32 = 1 << 17;
+pub const ANGLE_IS_LUMA: i32 = 1 << 19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

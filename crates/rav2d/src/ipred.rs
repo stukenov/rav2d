@@ -1,8 +1,12 @@
 use crate::intops::{ctz, iclip, imax, imin, ulog2};
-use crate::levels::ANGLE_IBP_FLAG;
+use crate::levels::{
+    ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG, ANGLE_IS_LUMA,
+    ANGLE_MRL_IDX_MASK, ANGLE_MRL_IDX_SHIFT, ANGLE_MULTI_MRL_FLAG,
+    ANGLE_SMOOTH_LEFT_EDGE_FLAG, ANGLE_SMOOTH_TOP_EDGE_FLAG, ANGLE_USE_EDGE_FILTER_FLAG,
+};
 use crate::tables::{
     DC_IBP_WEIGHTS, DIV_RECIP, DIV_SCALE_SH_BIAS, DIV_SCALE_SH_COEFW, DIV_SCALE_SH_OFFSET,
-    SM_WEIGHTS,
+    DR_INTRA_DERIVATIVE, SM_WEIGHTS,
 };
 
 #[derive(Clone, Copy)]
@@ -393,6 +397,231 @@ pub fn ipred_smooth_h(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usi
     }
 }
 
+pub fn ipred_z1(
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    width: usize,
+    height: usize,
+    mut angle: i32,
+    max_width: i32,
+    _max_height: i32,
+    ibp_weights: &[[[u8; 16]; 16]; 7],
+) {
+    let angle_flags = angle & !(511 | ANGLE_IBP_FLAG);
+    let is_luma = angle & ANGLE_IS_LUMA != 0;
+    let is_sm_t = angle & ANGLE_SMOOTH_TOP_EDGE_FLAG != 0;
+    let enable_intra_edge_filter = angle & ANGLE_USE_EDGE_FILTER_FLAG != 0;
+    let enable_ibp = angle & ANGLE_IBP_FLAG != 0;
+    let mrl_idx = ((angle & ANGLE_MRL_IDX_MASK) >> ANGLE_MRL_IDX_SHIFT) as usize;
+    let mrl_mul = angle & ANGLE_MULTI_MRL_FLAG != 0;
+    let have_top = angle & ANGLE_HAS_TOP_FLAG != 0;
+    angle &= 511;
+
+    if mrl_mul {
+        let e_stride = (width + height) * 2 + mrl_idx * 3 + 1;
+        let mut tmp = vec![0u8; 64 * 64];
+        ipred_z1(
+            &mut tmp, 64, tl, o, width, height,
+            angle | ((mrl_idx as i32) << ANGLE_MRL_IDX_SHIFT) | ANGLE_IS_LUMA,
+            max_width, _max_height, ibp_weights,
+        );
+        ipred_z1(
+            dst, stride, tl, o + e_stride, width, height,
+            angle | ANGLE_IS_LUMA, max_width, _max_height, ibp_weights,
+        );
+        for y in 0..height {
+            for x in 0..width {
+                dst[y * stride + x] = ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
+            }
+        }
+        return;
+    }
+
+    let dx = DR_INTRA_DERIVATIVE[angle as usize] as i32;
+    let max_base_x = (width + height) as i32 - 1 + (mrl_idx as i32 * 2);
+
+    let mut filt = vec![0u8; 136];
+    let top_off = 2 + mrl_idx;
+    let sz = 1 + mrl_idx + width + height + mrl_idx * 2;
+    let str = if enable_intra_edge_filter && have_top && mrl_idx == 0 {
+        get_filter_strength((width + height) as i32, 90 - angle, is_sm_t)
+    } else {
+        0
+    };
+    if str > 0 {
+        filter_edge(
+            &mut filt[1..], sz, 1, sz + max_width as usize - width,
+            &tl[o..], 0, sz as i32, str as usize,
+        );
+    } else {
+        filt[1..1 + sz].copy_from_slice(&tl[o..o + sz]);
+    }
+    filt[0] = filt[1];
+    filt[sz + 2] = filt[sz + 1];
+    if sz + 1 < filt.len() {
+        filt[sz + 1] = filt[sz];
+    }
+
+    let mut ypos = dx * (1 + mrl_idx as i32);
+    for y in 0..height {
+        let mut base = ypos >> 6;
+        if base > max_base_x {
+            for yy in y..height {
+                for x in 0..width {
+                    dst[yy * stride + x] = filt[top_off + max_base_x as usize];
+                }
+            }
+            break;
+        }
+        let shift = ((ypos & 0x3F) >> 1) as usize;
+        let f = &DR_INTERP_FILTER[shift];
+        for x in 0..width {
+            if base > max_base_x {
+                let fill = filt[top_off + max_base_x as usize];
+                for xx in x..width {
+                    dst[y * stride + xx] = fill;
+                }
+                break;
+            }
+            let bi = top_off as i32 + base;
+            if is_luma {
+                let v = f.a as i32 * filt[(bi - 1) as usize] as i32
+                    + f.b as i32 * filt[bi as usize] as i32
+                    + f.c as i32 * filt[(bi + 1) as usize] as i32
+                    + f.d as i32 * filt[(bi + 2) as usize] as i32;
+                dst[y * stride + x] = iclip((v + 64) >> 7, 0, 255) as u8;
+            } else {
+                let v = (32 - shift as i32) * filt[bi as usize] as i32
+                    + shift as i32 * filt[(bi + 1) as usize] as i32;
+                dst[y * stride + x] = iclip((v + 16) >> 5, 0, 255) as u8;
+            }
+            base += 1;
+        }
+        ypos += dx;
+    }
+
+    if enable_ibp {
+        let mode_idx = imin(10 - (angle >> 3), 6) as usize;
+        let mut tmp = vec![0u8; 64 * 64];
+        ipred_z3(
+            &mut tmp, 64, tl, o, width, height,
+            (180 + angle) | angle_flags, max_width, _max_height, ibp_weights,
+        );
+        ibp_blend_8bpc(dst, stride, &tmp, width, height, false, &ibp_weights[mode_idx]);
+    }
+}
+
+pub fn ipred_z3(
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    width: usize,
+    height: usize,
+    mut angle: i32,
+    max_width: i32,
+    max_height: i32,
+    ibp_weights: &[[[u8; 16]; 16]; 7],
+) {
+    let angle_flags = angle & !(511 | ANGLE_IBP_FLAG);
+    let is_luma = angle & ANGLE_IS_LUMA != 0;
+    let is_sm_l = angle & ANGLE_SMOOTH_LEFT_EDGE_FLAG != 0;
+    let enable_intra_edge_filter = angle & ANGLE_USE_EDGE_FILTER_FLAG != 0;
+    let have_left = angle & ANGLE_HAS_LEFT_FLAG != 0;
+    let enable_ibp = angle & ANGLE_IBP_FLAG != 0;
+    let mrl_idx = ((angle & ANGLE_MRL_IDX_MASK) >> ANGLE_MRL_IDX_SHIFT) as usize;
+    let mrl_mul = angle & ANGLE_MULTI_MRL_FLAG != 0;
+    angle &= 511;
+
+    if mrl_mul {
+        let e_stride = (width + height) * 2 + mrl_idx * 3 + 1;
+        let mut tmp = vec![0u8; 64 * 64];
+        ipred_z3(
+            &mut tmp, 64, tl, o, width, height,
+            angle | ((mrl_idx as i32) << ANGLE_MRL_IDX_SHIFT) | ANGLE_IS_LUMA,
+            max_width, max_height, ibp_weights,
+        );
+        ipred_z3(
+            dst, stride, tl, o + e_stride, width, height,
+            angle | ANGLE_IS_LUMA, max_width, max_height, ibp_weights,
+        );
+        for y in 0..height {
+            for x in 0..width {
+                dst[y * stride + x] = ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
+            }
+        }
+        return;
+    }
+
+    let dy = DR_INTRA_DERIVATIVE[(270 - angle) as usize] as i32;
+    let max_base_y = (width + height) as i32 - 1 + (mrl_idx as i32 * 2);
+
+    let mut filt = vec![0u8; 136];
+    let left_off = 1 + width + height + mrl_idx * 2;
+    let sz = 1 + mrl_idx + width + height + mrl_idx * 2;
+
+    let str = if enable_intra_edge_filter && mrl_idx == 0 && have_left {
+        get_filter_strength((width + height) as i32, angle - 180, is_sm_l)
+    } else {
+        0
+    };
+
+    if str > 0 {
+        filter_edge(
+            &mut filt[2..], sz, height - max_height as usize, sz - 1,
+            &tl[o + 1 - sz..], 0, sz as i32, str as usize,
+        );
+    } else {
+        filt[2..2 + sz].copy_from_slice(&tl[o + 1 - sz..o + 1]);
+    }
+    filt[0] = filt[2];
+    filt[1] = filt[2];
+    filt[sz + 2] = filt[sz + 1];
+
+    let mut ypos = dy * (1 + mrl_idx as i32);
+    for x in 0..width {
+        let shift = ((ypos & 0x3F) >> 1) as usize;
+        let f = &DR_INTERP_FILTER[shift];
+        let mut base = ypos >> 6;
+        for y in 0..height {
+            if base <= max_base_y {
+                let bi = left_off as i32 - base;
+                if is_luma {
+                    let v = f.a as i32 * filt[(bi + 1) as usize] as i32
+                        + f.b as i32 * filt[bi as usize] as i32
+                        + f.c as i32 * filt[(bi - 1) as usize] as i32
+                        + f.d as i32 * filt[(bi - 2) as usize] as i32;
+                    dst[y * stride + x] = iclip((v + 64) >> 7, 0, 255) as u8;
+                } else {
+                    let v = (32 - shift as i32) * filt[bi as usize] as i32
+                        + shift as i32 * filt[(bi - 1) as usize] as i32;
+                    dst[y * stride + x] = iclip((v + 16) >> 5, 0, 255) as u8;
+                }
+            } else {
+                let fill = filt[left_off - max_base_y as usize];
+                for yy in y..height {
+                    dst[yy * stride + x] = fill;
+                }
+                break;
+            }
+            base += 1;
+        }
+        ypos += dy;
+    }
+
+    if enable_ibp {
+        let mode_idx = imin((angle - 183) >> 3, 6) as usize;
+        let mut tmp = vec![0u8; 64 * 64];
+        ipred_z1(
+            &mut tmp, 64, tl, o, width, height,
+            (angle - 180) | angle_flags, max_width, max_height, ibp_weights,
+        );
+        ibp_blend_8bpc(dst, stride, &tmp, width, height, true, &ibp_weights[mode_idx]);
+    }
+}
+
 pub fn ibp_blend_8bpc(
     dst: &mut [u8],
     stride: usize,
@@ -730,5 +959,54 @@ mod tests {
         let pos = mul32(7, 1, 1);
         let neg = mul32(-7, 1, 1);
         assert_eq!(pos, -neg);
+    }
+
+    fn make_ibp_weights() -> [[[u8; 16]; 16]; 7] {
+        crate::ibp::init_ibp_weights()
+    }
+
+    #[test]
+    fn test_ipred_z1_basic() {
+        let mut tl = vec![128u8; 256];
+        for i in 0..64 { tl[i] = (128 + i) as u8; }
+        let mut dst = [0u8; 64];
+        let w = make_ibp_weights();
+        ipred_z1(&mut dst, 8, &tl, 0, 8, 8,
+                 45 | ANGLE_IS_LUMA | ANGLE_HAS_TOP_FLAG, 8, 8, &w);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_ipred_z1_chroma() {
+        let tl = vec![150u8; 256];
+        let mut dst = [0u8; 16];
+        let w = make_ibp_weights();
+        ipred_z1(&mut dst, 4, &tl, 0, 4, 4,
+                 45 | ANGLE_HAS_TOP_FLAG, 4, 4, &w);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_ipred_z3_basic() {
+        let mut tl = vec![128u8; 256];
+        let o = 128;
+        for i in 1..=64 { tl[o - i] = (128 + i) as u8; }
+        let mut dst = [0u8; 64];
+        let w = make_ibp_weights();
+        ipred_z3(&mut dst, 8, &tl, o, 8, 8,
+                 225 | ANGLE_IS_LUMA | ANGLE_HAS_LEFT_FLAG, 8, 8, &w);
+        assert!(dst.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_ipred_z3_chroma() {
+        let mut tl = vec![150u8; 256];
+        let o = 128;
+        for i in 1..=32 { tl[o - i] = 150; }
+        let mut dst = [0u8; 16];
+        let w = make_ibp_weights();
+        ipred_z3(&mut dst, 4, &tl, o, 4, 4,
+                 225 | ANGLE_HAS_LEFT_FLAG, 4, 4, &w);
+        assert!(dst.iter().any(|&v| v > 0));
     }
 }
