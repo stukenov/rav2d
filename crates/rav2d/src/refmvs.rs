@@ -1,7 +1,7 @@
 use crate::headers::{WarpedMotionParams, WarpedMotionType};
 use crate::intops::{apply_sign, apply_sign64, iclip, iclip64to32, imax, imin, ulog2};
 use crate::levels::INVALID_MV;
-use crate::levels::{Mv, MvXY, RefPair};
+use crate::levels::{Av2Block, BlockSize, Mv, MvXY, RefPair};
 
 pub const INVALID_TRAJ: u16 = 0x8080;
 pub const INVALID_REF2CUR: i8 = -32;
@@ -1054,6 +1054,31 @@ pub fn bank_update(
         bank.hits[1] = 0;
         bank.avail = (bank.avail as i32 + w) as u8;
     }
+}
+
+pub fn bank_add(
+    bank: &mut MvBank,
+    bs: BlockSize,
+    by4: i32,
+    bx4: i32,
+    sbsz: i32,
+    sb128: bool,
+    b: &Av2Block,
+) {
+    debug_assert!(b.is_intra == 0 || b.intrabc != 0);
+    bank_update(bank, bs, by4, bx4, sbsz, sb128);
+    if bank.hits[0] >= 64 || bank.hits[1] >= 16 || bank.avail == 0 {
+        return;
+    }
+    bank.hits[1] += 1;
+    bank.avail -= 1;
+    let mv = unsafe { &b.data.inter.mv };
+    let cwp_idx = if unsafe { b.ref_pair.r[1] } == -1 {
+        0
+    } else {
+        unsafe { b.data.inter.cwp_idx }
+    };
+    mv_bank_add_inner(bank, b.ref_pair, mv, cwp_idx);
 }
 
 pub fn splat_mv(
