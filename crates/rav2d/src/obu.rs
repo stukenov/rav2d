@@ -60,6 +60,7 @@ fn parse_seg_info(seg: &mut SegmentationDataSet, gb: &mut GetBits, n_seg: usize)
 fn parse_tile_info(
     thdr: &mut TileInfo,
     gb: &mut GetBits,
+    sbmul: i32,
     sb128: u8,
     seq_sb128: u8,
     w: i32,
@@ -100,7 +101,7 @@ fn parse_tile_info(
         thdr.cols = 0;
         let mut sbx = 0;
         while sbx < fsbw {
-            thdr.col_start_sb[thdr.cols as usize] = sbx as u16;
+            thdr.col_start_sb[thdr.cols as usize] = (sbx * sbmul) as u16;
             let add = tile_w + if extra > 0 { 1 } else { 0 };
             sbx += add;
             thdr.cols += 1;
@@ -120,7 +121,7 @@ fn parse_tile_info(
         thdr.rows = 0;
         let mut sby = 0;
         while sby < fsbh {
-            thdr.row_start_sb[thdr.rows as usize] = sby as u16;
+            thdr.row_start_sb[thdr.rows as usize] = (sby * sbmul) as u16;
             let add = tile_h + if extra > 0 { 1 } else { 0 };
             sby += add;
             thdr.rows += 1;
@@ -160,6 +161,158 @@ fn parse_tile_info(
     }
     thdr.col_start_sb[thdr.cols as usize] = sbw as u16;
     thdr.row_start_sb[thdr.rows as usize] = sbh as u16;
+}
+
+pub fn parse_tile_info_frmhdr(
+    hdr: &mut FrameHeader,
+    seqhdr: &SequenceHeader,
+    gb: &mut GetBits,
+) {
+    hdr.sb128 = if hdr.is_inter_or_switch() {
+        seqhdr.sb128
+    } else {
+        if seqhdr.sb128 != 0 { 1 } else { 0 }
+    };
+
+    let mut reuse_allowed = false;
+    if seqhdr.tiling.present != AdaptiveBoolean::Off {
+        let sbsz_min1 = (64i32 << hdr.sb128) - 1;
+        let sbsz_log2 = 6 + hdr.sb128 as i32;
+        let sbw = (hdr.width + sbsz_min1) >> sbsz_log2;
+        let sbh = (hdr.height + sbsz_min1) >> sbsz_log2;
+        if !seqhdr.tiling.t.uniform {
+            let seq_sbsz_min1 = (64i32 << seqhdr.sb128) - 1;
+            let seq_sbsz_log2 = 6 + seqhdr.sb128 as i32;
+            let seq_sbw = (seqhdr.max_width + seq_sbsz_min1) >> seq_sbsz_log2;
+            let seq_sbh = (seqhdr.max_height + seq_sbsz_min1) >> seq_sbsz_log2;
+            reuse_allowed = seq_sbw == sbw && seq_sbh == sbh;
+        } else {
+            let tile_w =
+                (sbw + seqhdr.tiling.t.cols as i32 - 1) >> seqhdr.tiling.t.log2_cols;
+            let tile_h =
+                (sbh + seqhdr.tiling.t.rows as i32 - 1) >> seqhdr.tiling.t.log2_rows;
+            reuse_allowed = tile_w * (seqhdr.tiling.t.cols as i32 - 1) < sbw
+                && tile_h * (seqhdr.tiling.t.rows as i32 - 1) < sbh;
+        }
+    }
+
+    let sbmul;
+    if reuse_allowed
+        && (seqhdr.tiling.present == AdaptiveBoolean::On
+            || (seqhdr.tiling.present == AdaptiveBoolean::Adaptive
+                && gb.get_bit() != 0))
+    {
+        hdr.tiling.t = seqhdr.tiling.t.clone();
+        if hdr.sb128 != seqhdr.sb128 {
+            debug_assert!(hdr.sb128 == 1 && seqhdr.sb128 == 2 && hdr.is_key_or_intra());
+            sbmul = 2;
+            for n in 0..hdr.tiling.t.rows as usize {
+                hdr.tiling.t.row_start_sb[n] *= 2;
+            }
+            for n in 0..hdr.tiling.t.cols as usize {
+                hdr.tiling.t.col_start_sb[n] *= 2;
+            }
+        } else {
+            sbmul = 1;
+        }
+    } else {
+        sbmul = if seqhdr.sb128 == 2 && hdr.is_key_or_intra() { 2 } else { 1 };
+        parse_tile_info(
+            &mut hdr.tiling.t,
+            gb,
+            sbmul,
+            hdr.sb128,
+            seqhdr.sb128,
+            hdr.width,
+            hdr.height,
+            seqhdr.level,
+            seqhdr.tier,
+        );
+    }
+
+    if sbmul == 2 {
+        hdr.tiling.t.row_start_sb[hdr.tiling.t.rows as usize] =
+            ((hdr.height + 127) >> 7) as u16;
+        hdr.tiling.t.col_start_sb[hdr.tiling.t.cols as usize] =
+            ((hdr.width + 127) >> 7) as u16;
+    }
+}
+
+pub fn parse_film_grain_data(
+    gb: &mut GetBits,
+    layout: PixelLayout,
+) -> Result<FilmGrainData> {
+    let mut fgd = FilmGrainData::default();
+
+    let mut num_pl = 1;
+    if layout != PixelLayout::I400 {
+        fgd.chroma_scaling_from_luma = gb.get_bit() != 0;
+        if !fgd.chroma_scaling_from_luma {
+            num_pl = 3;
+        }
+    }
+
+    for pl in 0..num_pl {
+        fgd.num_points[pl] = gb.get_bits(4) as i32;
+        if fgd.num_points[pl] > 14 {
+            return Err(Dav2dError::InvalidData);
+        }
+        if fgd.num_points[pl] == 0 {
+            continue;
+        }
+        let index_bits = 1 + gb.get_bits(3) as i32;
+        let scaling_bits = 5 + gb.get_bits(2) as i32;
+        let mut base = 0u32;
+        for i in 0..fgd.num_points[pl] as usize {
+            base += gb.get_bits(index_bits);
+            if base > 255 {
+                return Err(Dav2dError::InvalidData);
+            }
+            fgd.points[pl][i][0] = base as u8;
+            fgd.points[pl][i][1] = gb.get_bits(scaling_bits) as u8;
+        }
+    }
+
+    if layout == PixelLayout::I420
+        && (fgd.num_points[1] != 0) != (fgd.num_points[2] != 0)
+    {
+        return Err(Dav2dError::InvalidData);
+    }
+
+    fgd.scaling_shift = gb.get_bits(2) as i32 + 8;
+    fgd.ar_coeff_lag = gb.get_bits(2) as i32;
+    let num_pos = 2 * fgd.ar_coeff_lag * (fgd.ar_coeff_lag + 1);
+    for pl in 0..3 {
+        if fgd.num_points[pl] == 0
+            && (pl == 0 || !fgd.chroma_scaling_from_luma)
+        {
+            continue;
+        }
+        let num_pl_pos =
+            num_pos + (pl != 0 && fgd.num_points[0] != 0) as i32;
+        let coef_bits = 5 + gb.get_bits(2) as i32;
+        for i in 0..num_pl_pos as usize {
+            fgd.ar_coeffs[pl][i] = (gb.get_bits(coef_bits) as i32 - 128) as i8;
+        }
+    }
+    fgd.ar_coeff_shift = gb.get_bits(2) as u64 + 6;
+    fgd.grain_scale_shift = gb.get_bits(2) as i32;
+    for pl in 0..2 {
+        if fgd.num_points[1 + pl] == 0 {
+            continue;
+        }
+        fgd.uv_mult[pl] = gb.get_bits(8) as i32 - 128;
+        fgd.uv_luma_mult[pl] = gb.get_bits(8) as i32 - 128;
+        fgd.uv_offset[pl] = gb.get_bits(9) as i32 - 256;
+    }
+    fgd.overlap_flag = gb.get_bit() != 0;
+    fgd.clip_to_restricted_range = gb.get_bit() != 0;
+    if fgd.clip_to_restricted_range {
+        fgd.mc_identity = gb.get_bit() != 0;
+    }
+    fgd.block_size = gb.get_bit() as i32;
+
+    Ok(fgd)
 }
 
 pub fn rescale_matrix(dm: &mut [i32; 6], sm: &[i32; 6], in_dist: i32, out_dist: i32) {
@@ -538,6 +691,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
         parse_tile_info(
             &mut hdr.tiling.t,
             gb,
+            1,
             hdr.sb128,
             hdr.sb128,
             hdr.max_width,
@@ -635,5 +789,185 @@ mod tests {
         assert_eq!(LAYOUTS[1], PixelLayout::I400);
         assert_eq!(LAYOUTS[2], PixelLayout::I444);
         assert_eq!(LAYOUTS[3], PixelLayout::I422);
+    }
+
+    #[test]
+    fn test_parse_tile_info_frmhdr_inter_no_tiling() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_type = FrameType::Inter;
+        hdr.width = 1920;
+        hdr.height = 1080;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.sb128 = 1;
+        seqhdr.level = 8;
+        // tiling.present = Off => reuse_allowed stays false, falls to parse_tile_info
+        let data = [0xFF; 32];
+        let mut gb = GetBits::new(&data);
+        parse_tile_info_frmhdr(&mut hdr, &seqhdr, &mut gb);
+        assert_eq!(hdr.sb128, 1);
+        assert!(hdr.tiling.t.cols >= 1);
+        assert!(hdr.tiling.t.rows >= 1);
+    }
+
+    #[test]
+    fn test_parse_tile_info_frmhdr_key_sb128_downgrade() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_type = FrameType::Key;
+        hdr.width = 256;
+        hdr.height = 256;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.sb128 = 2;
+        seqhdr.max_width = 256;
+        seqhdr.max_height = 256;
+        seqhdr.level = 4;
+        // key frame with sb128=2 => hdr.sb128 = 1 (!!2), sbmul=2
+        let data = [0xFF; 32];
+        let mut gb = GetBits::new(&data);
+        parse_tile_info_frmhdr(&mut hdr, &seqhdr, &mut gb);
+        assert_eq!(hdr.sb128, 1);
+    }
+
+    #[test]
+    fn test_parse_tile_info_frmhdr_inter_inherits_sb128() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_type = FrameType::Inter;
+        hdr.width = 512;
+        hdr.height = 512;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.sb128 = 0;
+        seqhdr.level = 4;
+        // uniform=1 bit, then all zeros for log2_cols/rows
+        let data = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        parse_tile_info_frmhdr(&mut hdr, &seqhdr, &mut gb);
+        assert_eq!(hdr.sb128, 0);
+    }
+
+    #[test]
+    fn test_parse_tile_info_frmhdr_key_sb128_zero() {
+        let mut hdr = FrameHeader::default();
+        hdr.frame_type = FrameType::Key;
+        hdr.width = 128;
+        hdr.height = 128;
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.sb128 = 0;
+        seqhdr.level = 4;
+        // uniform=1 bit, then zeros
+        let data = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        parse_tile_info_frmhdr(&mut hdr, &seqhdr, &mut gb);
+        assert_eq!(hdr.sb128, 0); // !!0 = 0
+        assert!(hdr.tiling.t.cols >= 1);
+    }
+
+    #[test]
+    fn test_parse_tile_info_frmhdr_reuse_uniform() {
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.sb128 = 1;
+        seqhdr.max_width = 512;
+        seqhdr.max_height = 512;
+        seqhdr.level = 4;
+        seqhdr.tiling.present = AdaptiveBoolean::On;
+        seqhdr.tiling.t.uniform = true;
+        seqhdr.tiling.t.cols = 2;
+        seqhdr.tiling.t.rows = 2;
+        seqhdr.tiling.t.log2_cols = 1;
+        seqhdr.tiling.t.log2_rows = 1;
+        seqhdr.tiling.t.col_start_sb[0] = 0;
+        seqhdr.tiling.t.col_start_sb[1] = 2;
+        seqhdr.tiling.t.col_start_sb[2] = 4;
+        seqhdr.tiling.t.row_start_sb[0] = 0;
+        seqhdr.tiling.t.row_start_sb[1] = 2;
+        seqhdr.tiling.t.row_start_sb[2] = 4;
+
+        let mut hdr = FrameHeader::default();
+        hdr.frame_type = FrameType::Inter;
+        hdr.width = 512;
+        hdr.height = 512;
+
+        let data = [0x00; 32];
+        let mut gb = GetBits::new(&data);
+        parse_tile_info_frmhdr(&mut hdr, &seqhdr, &mut gb);
+        // inter => sb128 inherits from seqhdr (1)
+        assert_eq!(hdr.sb128, 1);
+        // reuse check: uniform, tile_w * (cols-1) < sbw and tile_h * (rows-1) < sbh
+        // sbw = (512+127)>>7 = 4, tile_w = (4+1)>>1 = 2, 2*(2-1) = 2 < 4 => reuse_allowed
+        // present=On => reuse happens, sb128 match => sbmul=1
+        assert_eq!(hdr.tiling.t.cols, 2);
+        assert_eq!(hdr.tiling.t.rows, 2);
+        assert_eq!(hdr.tiling.t.col_start_sb[0], 0);
+        assert_eq!(hdr.tiling.t.col_start_sb[1], 2);
+    }
+
+    #[test]
+    fn test_parse_fgd_i400_no_points() {
+        // I400: no chroma_scaling bit, 4 bits num_points=0, then scaling/ar fields
+        // num_points[0]=0 => skip points loop
+        // scaling_shift(2), ar_coeff_lag(2)=0, ar_coeff_shift(2), grain_scale_shift(2)
+        // overlap(1), clip_to_restricted(1)=0, block_size(1)
+        let data = [0x00; 16];
+        let mut gb = GetBits::new(&data);
+        let fgd = parse_film_grain_data(&mut gb, PixelLayout::I400).unwrap();
+        assert_eq!(fgd.num_points[0], 0);
+        assert!(!fgd.chroma_scaling_from_luma);
+        assert_eq!(fgd.scaling_shift, 8);
+        assert_eq!(fgd.ar_coeff_lag, 0);
+    }
+
+    #[test]
+    fn test_parse_fgd_i420_chroma_scaling_from_luma() {
+        // chroma_scaling_from_luma=1, num_points[0]=0
+        // then ar fields for pl=0 (skipped since num_points=0 and pl==0)
+        let data = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        let fgd = parse_film_grain_data(&mut gb, PixelLayout::I420).unwrap();
+        assert!(fgd.chroma_scaling_from_luma);
+        assert_eq!(fgd.num_points[0], 0);
+    }
+
+    #[test]
+    fn test_parse_fgd_i420_with_points() {
+        // chroma_scaling_from_luma=0 => num_pl=3
+        // num_points[0]=1 (4 bits: 0001)
+        // index_bits=1+0=1 (3 bits: 000), scaling_bits=5+0=5 (2 bits: 00)
+        // point[0]: base=0 (1 bit: 0), scaling=0 (5 bits: 00000)
+        // num_points[1]=0, num_points[2]=0
+        // (I420 check: both 0 => ok)
+        // scaling_shift, ar_coeff_lag=0, ...
+        // Bit layout: 0 | 0001 | 000 | 00 | 0 | 00000 | 0000 | 0000 | ...
+        //           = 0_0001_000_00_0_00000_0000_0000...
+        //           = 0000 1000 0000 0000 0000 0000...
+        let data = [0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        let fgd = parse_film_grain_data(&mut gb, PixelLayout::I420).unwrap();
+        assert!(!fgd.chroma_scaling_from_luma);
+        assert_eq!(fgd.num_points[0], 1);
+        assert_eq!(fgd.num_points[1], 0);
+        assert_eq!(fgd.num_points[2], 0);
+        assert_eq!(fgd.points[0][0][0], 0);
+    }
+
+    #[test]
+    fn test_parse_fgd_too_many_points() {
+        // chroma_scaling_from_luma=0 (1 bit), num_points[0]=15 (4 bits: 1111)
+        // 0_1111_000 = 0x78
+        let data = [0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut gb = GetBits::new(&data);
+        assert!(parse_film_grain_data(&mut gb, PixelLayout::I420).is_err());
+    }
+
+    #[test]
+    fn test_parse_fgd_i444_no_chroma_check() {
+        // I444 doesn't have the I420 num_points consistency check
+        // chroma_scaling_from_luma=0 => num_pl=3
+        // all num_points=0
+        let data = [0x00; 16];
+        let mut gb = GetBits::new(&data);
+        let fgd = parse_film_grain_data(&mut gb, PixelLayout::I444).unwrap();
+        assert!(!fgd.chroma_scaling_from_luma);
+        assert_eq!(fgd.num_points[0], 0);
     }
 }
