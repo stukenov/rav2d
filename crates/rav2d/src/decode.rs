@@ -1,13 +1,75 @@
 use crate::cdf::{CdfModeContext, CdfMvContext};
 use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::env::BlockContext;
-use crate::headers::{FrameHeader, MAX_SEGMENTS};
-use crate::internal::ScalableMotionParams;
+use crate::headers::{FrameHeader, RestorationType, MAX_SEGMENTS};
+use crate::internal::{LoopFilterState, NsWienerBank, ScalableMotionParams};
 use crate::intops::{apply_sign64, imax, imin, inv_recenter};
 use crate::levels::{BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES};
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
+use crate::tables::{NS_WIENER_COEF_RANGE_Y, NS_WIENER_COEF_RANGE_UV};
+
+pub fn init_wiener(frame_hdr: &FrameHeader, lf: &mut LoopFilterState) {
+    let rtype = frame_hdr.restoration.p[0].restoration_type;
+    if rtype == RestorationType::None as u8 {
+        return;
+    }
+
+    let qidx = frame_hdr.quant.yac as i32;
+    lf.base_q = dq_lookup(qidx);
+
+    let idx = if qidx < 130 {
+        0
+    } else if qidx < 190 {
+        1
+    } else if qidx < 220 {
+        2
+    } else {
+        3
+    };
+    lf.wiener_idx = idx;
+
+    if rtype == RestorationType::NsWiener as u8 || rtype == RestorationType::Switchable as u8 {
+        let num_classes_idx = frame_hdr.restoration.p[0].ns.num_classes_idx as usize;
+        if num_classes_idx > 0 {
+            lf.ns_subclass_class_idx = Some(num_classes_idx - 1);
+        } else {
+            lf.ns_subclass_class_idx = None;
+        }
+    } else {
+        lf.ns_subclass_class_idx = None;
+    }
+}
+
+pub fn init_ns_wiener_bank(bank: &mut NsWienerBank, pl: usize, n_classes: usize) {
+    bank.bank_size = [0; 16];
+    bank.bank_idx = [0; 16];
+    let cf_range: &[[i8; 2]] = if pl > 0 {
+        &NS_WIENER_COEF_RANGE_UV
+    } else {
+        &NS_WIENER_COEF_RANGE_Y
+    };
+    let n_coeffs = 16 + if pl > 0 { 2 } else { 0 };
+    for n in 0..n_classes {
+        for m in 0..n_coeffs {
+            bank.filter[0][n][m] = cf_range[m][1] + ((1i8 << cf_range[m][0]) >> 1);
+        }
+    }
+}
+
+pub fn init_start_of_tile_row(buf: &mut Vec<u8>, sbh: i32, tile_rows: u8, row_start_sb: &[u16]) {
+    buf.resize(sbh as usize, 0);
+    let mut sby = 0usize;
+    for tile_row in 0..tile_rows as usize {
+        buf[sby] = ((tile_row << 1) | 1) as u8;
+        sby += 1;
+        while sby < row_start_sb[tile_row + 1] as usize {
+            buf[sby] = (tile_row << 1) as u8;
+            sby += 1;
+        }
+    }
+}
 
 pub fn neg_deinterleave(diff: i32, r: i32, max: i32) -> i32 {
     if r == 0 {
@@ -1369,5 +1431,107 @@ mod tests {
             let sz = [8, 4, 8, 4];
             let _ = read_pal_indices(&mut msac, &mut cdf_m, &mut pal_out, &mut scratch, 4, &sz);
         }
+    }
+
+    #[test]
+    fn test_init_ns_wiener_bank_y() {
+        let mut bank = NsWienerBank::default();
+        init_ns_wiener_bank(&mut bank, 0, 3);
+        assert_eq!(bank.bank_size, [0; 16]);
+        assert_eq!(bank.bank_idx, [0; 16]);
+        for n in 0..3 {
+            assert_ne!(bank.filter[0][n][0], 0);
+        }
+        assert_eq!(bank.filter[0][3][0], 0);
+    }
+
+    #[test]
+    fn test_init_ns_wiener_bank_uv() {
+        let mut bank = NsWienerBank::default();
+        init_ns_wiener_bank(&mut bank, 1, 2);
+        for n in 0..2 {
+            assert_ne!(bank.filter[0][n][0], 0);
+        }
+        assert_eq!(bank.filter[0][2][0], 0);
+        assert_eq!(bank.filter[0][0][16], 0); // cf_range[16] = [4,-8] → -8+8=0
+        assert_eq!(bank.filter[0][0][18], 0); // beyond n_coeffs, untouched
+    }
+
+    #[test]
+    fn test_init_start_of_tile_row() {
+        let row_start_sb: [u16; 4] = [0, 3, 5, 8];
+        let mut buf = Vec::new();
+        init_start_of_tile_row(&mut buf, 8, 3, &row_start_sb);
+        assert_eq!(buf[0], 0b01); // tile_row=0, start
+        assert_eq!(buf[1], 0b00); // tile_row=0, cont
+        assert_eq!(buf[2], 0b00); // tile_row=0, cont
+        assert_eq!(buf[3], 0b11); // tile_row=1, start
+        assert_eq!(buf[4], 0b10); // tile_row=1, cont
+        assert_eq!(buf[5], 0b101); // tile_row=2, start
+        assert_eq!(buf[6], 0b100); // tile_row=2, cont
+        assert_eq!(buf[7], 0b100); // tile_row=2, cont
+    }
+
+    fn make_lf_state() -> LoopFilterState {
+        LoopFilterState {
+            mask: Vec::new(),
+            lr_mask: Vec::new(),
+            segmap_uv: Vec::new(),
+            uv_segmap_stride: 0,
+            cdef_buf_plane_sz: [0; 2],
+            cdef_buf_sbh: 0,
+            lr_buf_plane_sz: [0; 4],
+            re_sz: 0,
+            base_q: 0,
+            gdf_ref_dst_idx: 0,
+            start_of_tile_row: Vec::new(),
+            restore_planes: 0,
+            wiener_idx: 0,
+            ns_subclass_class_idx: None,
+        }
+    }
+
+    #[test]
+    fn test_init_wiener_none() {
+        let fh = FrameHeader::default();
+        let mut lf = make_lf_state();
+        init_wiener(&fh, &mut lf);
+        assert_eq!(lf.base_q, 0);
+    }
+
+    #[test]
+    fn test_init_wiener_ns_wiener() {
+        let mut fh = FrameHeader::default();
+        fh.restoration.p[0].restoration_type = RestorationType::NsWiener as u8;
+        fh.restoration.p[0].ns.num_classes_idx = 3;
+        fh.quant.yac = 100;
+        let mut lf = make_lf_state();
+        init_wiener(&fh, &mut lf);
+        assert_eq!(lf.wiener_idx, 0);
+        assert_eq!(lf.ns_subclass_class_idx, Some(2));
+        assert!(lf.base_q != 0);
+    }
+
+    #[test]
+    fn test_init_wiener_idx_ranges() {
+        let mut fh = FrameHeader::default();
+        fh.restoration.p[0].restoration_type = RestorationType::PcWiener as u8;
+
+        let mut lf = make_lf_state();
+        fh.quant.yac = 50;
+        init_wiener(&fh, &mut lf);
+        assert_eq!(lf.wiener_idx, 0);
+
+        fh.quant.yac = 150;
+        init_wiener(&fh, &mut lf);
+        assert_eq!(lf.wiener_idx, 1);
+
+        fh.quant.yac = 200;
+        init_wiener(&fh, &mut lf);
+        assert_eq!(lf.wiener_idx, 2);
+
+        fh.quant.yac = 250;
+        init_wiener(&fh, &mut lf);
+        assert_eq!(lf.wiener_idx, 3);
     }
 }

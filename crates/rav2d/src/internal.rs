@@ -132,6 +132,8 @@ pub struct LoopFilterState {
     pub gdf_ref_dst_idx: i32,
     pub start_of_tile_row: Vec<u8>,
     pub restore_planes: i32,
+    pub wiener_idx: usize,
+    pub ns_subclass_class_idx: Option<usize>,
 }
 
 pub struct FrameContext {
