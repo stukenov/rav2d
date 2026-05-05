@@ -71,6 +71,56 @@ pub enum TxClass {
     ClassV = 3,
 }
 
+// TxfmType encoding: hor_1d[0:2] | tx_class[3:4] | ver_1d[5:7]
+macro_rules! txtp {
+    ($hor:expr, $ver:expr, $class:expr) => {
+        ($hor) | (($class) << 3) | (($ver) << 5)
+    };
+}
+pub mod txtp {
+    pub const DCT_DCT: u8 = txtp!(0, 0, 0);
+    pub const ADST_DCT: u8 = txtp!(0, 2, 0);
+    pub const DCT_ADST: u8 = txtp!(2, 0, 0);
+    pub const ADST_ADST: u8 = txtp!(2, 2, 0);
+    pub const DCT_FLIPADST: u8 = txtp!(3, 0, 0);
+    pub const FLIPADST_DCT: u8 = txtp!(0, 3, 0);
+    pub const FLIPADST_FLIPADST: u8 = txtp!(3, 3, 0);
+    pub const FLIPADST_ADST: u8 = txtp!(2, 3, 0);
+    pub const ADST_FLIPADST: u8 = txtp!(3, 2, 0);
+    pub const IDTX: u8 = txtp!(1, 1, 0);
+    pub const IDTX_INV: u8 = txtp!(1, 1, 1);
+    pub const V_DCT: u8 = txtp!(1, 0, 3);
+    pub const H_DCT: u8 = txtp!(0, 1, 2);
+    pub const V_ADST: u8 = txtp!(1, 2, 3);
+    pub const H_ADST: u8 = txtp!(2, 1, 2);
+    pub const V_FLIPADST: u8 = txtp!(1, 3, 3);
+    pub const H_FLIPADST: u8 = txtp!(3, 1, 2);
+    pub const WHT_WHT: u8 = txtp!(6, 6, 0);
+    pub const DDT_DCT: u8 = txtp!(0, 4, 0);
+    pub const FLIPDDT_DCT: u8 = txtp!(0, 5, 0);
+    pub const DDT_IDENTITY: u8 = txtp!(1, 4, 0);
+    pub const FLIPDDT_IDENTITY: u8 = txtp!(1, 5, 0);
+    pub const DDT_DDT: u8 = txtp!(4, 4, 0);
+    pub const DDT_FLIPDDT: u8 = txtp!(5, 4, 0);
+    pub const DCT_DDT: u8 = txtp!(4, 0, 0);
+    pub const IDENTITY_DDT: u8 = txtp!(4, 1, 0);
+    pub const FLIPDDT_FLIPDDT: u8 = txtp!(5, 5, 0);
+    pub const FLIPDDT_DDT: u8 = txtp!(4, 5, 0);
+    pub const DCT_FLIPDDT: u8 = txtp!(5, 0, 0);
+    pub const IDENTITY_FLIPDDT: u8 = txtp!(5, 1, 0);
+    pub const ADST_DDT: u8 = txtp!(4, 2, 0);
+    pub const DDT_ADST: u8 = txtp!(2, 4, 0);
+    pub const ADST_FLIPDDT: u8 = txtp!(5, 2, 0);
+    pub const FLIPDDT_ADST: u8 = txtp!(2, 5, 0);
+
+    #[inline(always)]
+    pub const fn hor_1d(t: u8) -> u8 { t & 7 }
+    #[inline(always)]
+    pub const fn ver_1d(t: u8) -> u8 { t >> 5 }
+    #[inline(always)]
+    pub const fn class(t: u8) -> u8 { (t >> 3) & 3 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum IntraPredMode {
@@ -399,4 +449,24 @@ pub struct Av2Block {
     pub tx_size_ll: u8,
     pub ref_pair: RefPair,
     pub data: Av2BlockData,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::txtp;
+
+    #[test]
+    fn test_txtp_encoding() {
+        assert_eq!(txtp::DCT_DCT, 0);
+        assert_eq!(txtp::IDTX, 1 | (1 << 5));
+        assert_eq!(txtp::WHT_WHT, 6 | (6 << 5));
+        assert_eq!(txtp::V_DCT, 1 | (3 << 3) | (0 << 5));
+        assert_eq!(txtp::H_DCT, 0 | (2 << 3) | (1 << 5));
+        assert_eq!(txtp::hor_1d(txtp::ADST_DCT), 0); // hor is DCT
+        assert_eq!(txtp::ver_1d(txtp::ADST_DCT), 2); // ver is ADST
+        assert_eq!(txtp::class(txtp::V_DCT), 3);     // ClassV
+        assert_eq!(txtp::class(txtp::H_DCT), 2);     // ClassH
+        assert_eq!(txtp::class(txtp::IDTX), 0);      // Class2D
+        assert_eq!(txtp::class(txtp::IDTX_INV), 1);  // Class2DInv
+    }
 }
