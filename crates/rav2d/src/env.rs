@@ -79,6 +79,35 @@ impl Default for SBEdgeCtx {
     }
 }
 
+pub fn reset_context(ctx: &mut BlockContext, keyframe: bool, is_tip_frame: bool) {
+    ctx.tx_lpf_y.fill(3);
+    ctx.tx_lpf_uv.fill(2);
+    if is_tip_frame { return; }
+    ctx.midx.fill(0xff);
+    ctx.intra.fill(keyframe as u8);
+    ctx.uvmode.fill(0); // DC_PRED
+    if keyframe {
+        ctx.mode.fill(0); // DC_PRED
+    }
+    ctx.partition[0].fill(0);
+    ctx.partition[1].fill(0);
+    ctx.skip_txfm.fill(0);
+    ctx.skip_mode.fill(0);
+    if !keyframe {
+        ctx.r#ref[0].fill(-1);
+        ctx.r#ref[1].fill(-1);
+        ctx.comp_type.fill(0);
+        ctx.mode.fill(13); // InterPredMode::NearMv
+    }
+    ctx.mrl.fill(0);
+    ctx.lcoef.fill(0x40);
+    ctx.ccoef[0].fill(0x40);
+    ctx.ccoef[1].fill(0x40);
+    ctx.filter.fill(N_SWITCHABLE_FILTERS as u8);
+    ctx.seg_pred.fill(0);
+    ctx.pal_sz.fill(0);
+}
+
 #[inline(always)]
 pub fn get_intra_ctx(
     nx: [&BlockContext; 2],
