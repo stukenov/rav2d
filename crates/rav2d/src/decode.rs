@@ -1646,6 +1646,9 @@ pub struct SbFrameInfo {
     pub allow_intrabc: bool,
     pub any_lossless: bool,
     pub has_chroma_layout: bool,
+    // Sequence features
+    pub idtx_intra: bool,
+    pub mrls: bool,
     // Tile bounds
     pub tile_col_start: i32,
     pub tile_col_end: i32,
@@ -1773,32 +1776,54 @@ fn decode_b(
         b.is_intra = 1;
     }
 
+    // Pre-compute spatial neighbour (nb) context values within SB.
+    // These are used by intrabc, FSC, MRL, multi_mrl, DIP, morph_pred.
+    // boff[i] = -1 means unavailable.
+    let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
+    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx) = if has_luma {
+        let mut fsc = [0u8; 2];
+        let mut mrl = [0u8; 2];
+        let mut mmrl = [0u8; 2];
+        let mut ibc = [0u8; 2];
+        let mut mid = [0xffu8; 2];
+        let mut boff = [-1i32; 2];
+        let mut idx = 0usize;
+
+        if have_left && bh4 == h4 {
+            let off = (by4 + bh4 as usize).saturating_sub(1);
+            fsc[0] = l.fsc[off]; mrl[0] = l.mrl[off]; mmrl[0] = l.multi_mrl[off];
+            ibc[0] = l.intrabc[off]; mid[0] = l.midx[off];
+            boff[0] = off as i32; idx += 1;
+        }
+        if have_top_in_sb && bw4 == w4 {
+            let off = (bx4 + bw4 as usize).saturating_sub(1);
+            fsc[idx] = a.fsc[off]; mrl[idx] = a.mrl[off]; mmrl[idx] = a.multi_mrl[off];
+            ibc[idx] = a.intrabc[off]; mid[idx] = a.midx[off];
+            boff[idx] = off as i32; idx += 1;
+        }
+        if have_left && idx < 2 {
+            fsc[idx] = l.fsc[by4]; mrl[idx] = l.mrl[by4]; mmrl[idx] = l.multi_mrl[by4];
+            ibc[idx] = l.intrabc[by4]; mid[idx] = l.midx[by4];
+            boff[idx] = by4 as i32; idx += 1;
+        }
+        if have_top_in_sb && idx < 2 {
+            fsc[idx] = a.fsc[bx4]; mrl[idx] = a.mrl[bx4]; mmrl[idx] = a.multi_mrl[bx4];
+            ibc[idx] = a.intrabc[bx4]; mid[idx] = a.midx[bx4];
+            boff[idx] = bx4 as i32;
+            if idx == 0 { fsc[1] = fsc[0]; mrl[1] = mrl[0]; mmrl[1] = mmrl[0];
+                          ibc[1] = ibc[0]; mid[1] = mid[0]; }
+        }
+        (fsc, mrl, mmrl, ibc, mid)
+    } else {
+        ([0u8; 2], [0u8; 2], [0u8; 2], [0u8; 2], [0xffu8; 2])
+    };
+
     // intrabc
     if has_luma {
         b.intrabc = 0;
         if fi.allow_intrabc && imin(bw4, bh4) < 16 && b.is_intra != 0 && intra_region == 0 {
-            let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
-
-            // Compute intrabc context from spatial neighbours (not crossing SB vertically)
-            let mut ibc_ctx = 0u8;
-            let mut nb_idx = 0;
-            if have_left && bh4 == h4 {
-                ibc_ctx += l.intrabc[(by4 + bh4 as usize).saturating_sub(1)];
-                nb_idx += 1;
-            }
-            if have_top_in_sb && bw4 == w4 {
-                ibc_ctx += a.intrabc[(bx4 + bw4 as usize).saturating_sub(1)];
-                nb_idx += 1;
-            }
-            if have_left && nb_idx < 2 {
-                ibc_ctx += l.intrabc[by4];
-                nb_idx += 1;
-            }
-            if have_top_in_sb && nb_idx < 2 {
-                ibc_ctx += a.intrabc[bx4];
-            }
-
-            b.intrabc = msac.decode_bool_adapt(cdf_m.intrabc(ibc_ctx as usize)) as u8;
+            let ctx = (nb_intrabc[0] + nb_intrabc[1]) as usize;
+            b.intrabc = msac.decode_bool_adapt(cdf_m.intrabc(ctx)) as u8;
         }
     }
     let intrabc = has_luma && b.intrabc != 0;
@@ -1940,9 +1965,54 @@ fn decode_b(
             b.data.intra.y_mode = y_mode;
             b.data.intra.y_angle = y_angle;
         }
+
+        // FSC (Frequency Segmented Coding)
+        if imax(bw4, bh4) <= 8 && fi.idtx_intra {
+            #[rustfmt::skip]
+            const FSC_BSIZE_GROUPS: [u8; N_BS_SIZES] = {
+                let mut t = [0u8; N_BS_SIZES];
+                t[BlockSize::Bs32x32 as u8 as usize] = 5;
+                t[BlockSize::Bs32x16 as u8 as usize] = 5;
+                t[BlockSize::Bs32x8 as u8 as usize] = 4;
+                t[BlockSize::Bs32x4 as u8 as usize] = 4;
+                t[BlockSize::Bs16x32 as u8 as usize] = 5;
+                t[BlockSize::Bs16x16 as u8 as usize] = 4;
+                t[BlockSize::Bs16x8 as u8 as usize] = 3;
+                t[BlockSize::Bs16x4 as u8 as usize] = 3;
+                t[BlockSize::Bs8x32 as u8 as usize] = 4;
+                t[BlockSize::Bs8x16 as u8 as usize] = 3;
+                t[BlockSize::Bs8x8 as u8 as usize] = 2;
+                t[BlockSize::Bs8x4 as u8 as usize] = 1;
+                t[BlockSize::Bs4x32 as u8 as usize] = 4;
+                t[BlockSize::Bs4x16 as u8 as usize] = 3;
+                t[BlockSize::Bs4x8 as u8 as usize] = 1;
+                t
+            };
+            let sz_ctx = FSC_BSIZE_GROUPS[bs as u8 as usize] as usize;
+            let fsc_ctx = if fi.is_inter_or_switch && intra_region == 0 {
+                3usize
+            } else {
+                (nb_fsc[0] + nb_fsc[1]) as usize
+            };
+            b.fsc = msac.decode_bool_adapt(cdf_m.fsc(fsc_ctx, sz_ctx)) as u8;
+        }
+
+        // MRL (Multi-Reference Line) index
+        unsafe { b.data.intra.mrl_index = 0; }
+        unsafe { b.data.intra.multi_mrl = 0; }
+        if !dpcm && midx != 0xff && fi.mrls {
+            let mrl_ctx = (nb_mrl[0] + nb_mrl[1]) as usize;
+            let mrl_idx = msac.decode_symbol_adapt(cdf_m.mrl_index(mrl_ctx), 3) as u8;
+            unsafe { b.data.intra.mrl_index = mrl_idx; }
+            if mrl_idx > 0 {
+                let mmrl_ctx = (nb_multi_mrl[0] + nb_multi_mrl[1]) as usize;
+                let mmrl = msac.decode_bool_adapt(cdf_m.multi_mrl(mmrl_ctx)) as u8;
+                unsafe { b.data.intra.multi_mrl = mmrl; }
+            }
+        }
     }
 
-    // TODO: continue porting decode_b (MRL, multi-MRL, chroma mode, inter mode, transform, etc.)
+    // TODO: continue porting decode_b (chroma mode, inter mode, transform, etc.)
     Ok(b)
 }
 
@@ -3670,7 +3740,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3718,7 +3788,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false,
             tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
             sb_step: 16,
         };
@@ -3764,7 +3834,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3795,7 +3865,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3826,7 +3896,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 1,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3855,7 +3925,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3886,7 +3956,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3905,5 +3975,39 @@ mod tests {
         assert_eq!(b.is_intra, 1);
         let y_mode = unsafe { b.data.intra.y_mode };
         assert!(y_mode <= 12, "y_mode={y_mode} out of range");
+    }
+
+    #[test]
+    fn test_decode_b_fsc_and_mrl() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true, idtx_intra: true, mrls: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0x55; 256];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        assert_eq!(b.is_intra, 1);
+        // FSC decoded (8x8 block, idtx_intra=true)
+        // fsc is 0 or 1
+        assert!(b.fsc <= 1);
+        // MRL decoded only if directional mode (midx != 0xff)
+        let mrl = unsafe { b.data.intra.mrl_index };
+        assert!(mrl <= 3);
     }
 }
