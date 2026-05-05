@@ -2804,8 +2804,7 @@ fn decode_b(
                     {
                         unsafe {
                             b.data.inter.comp_type = 2; // COMP_WEDGE
-                            // TODO: read_wedge_idx
-                            b.data.inter.wedge_idx = 0;
+                            b.data.inter.wedge_idx = read_wedge_idx(msac, cdf_m);
                             b.data.inter.wedge_sign = msac.decode_bool_bypass() as i8;
                         }
                     } else {
@@ -2997,8 +2996,7 @@ fn decode_b(
                         if imin(bw4, bh4) > 1
                             && msac.decode_bool_adapt(cdf_m.interintra_wedge()) != 0
                         {
-                            // TODO: read_wedge_idx
-                            unsafe { b.data.inter.wedge_idx = 0; }
+                            unsafe { b.data.inter.wedge_idx = read_wedge_idx(msac, cdf_m); }
                         }
                     }
                 }
@@ -3197,8 +3195,9 @@ fn decode_b(
                         b.data.inter.interintra_mode =
                             msac.decode_symbol_adapt(cdf_m.interintra_mode(ctx), 3) as u8;
                         b.data.inter.wedge_idx =
-                            if msac.decode_bool_adapt(cdf_m.interintra_wedge()) != 0 { 0 }
-                            else { -1 };
+                            if msac.decode_bool_adapt(cdf_m.interintra_wedge()) != 0 {
+                                read_wedge_idx(msac, cdf_m)
+                            } else { -1 };
                     }
                 }
             }
