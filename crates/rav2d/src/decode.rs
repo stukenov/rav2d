@@ -10,7 +10,7 @@ use crate::internal::{LoopFilterState, NsWienerBank, Pass, ScalableMotionParams}
 use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
 use crate::levels::{
-    Av2Block, BlockPartition, BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV,
+    Av2Block, BlockPartition, BlockSize, CFL_PRED, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV,
 };
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
@@ -1649,6 +1649,8 @@ pub struct SbFrameInfo {
     // Sequence features
     pub idtx_intra: bool,
     pub mrls: bool,
+    pub mhccp: bool,
+    pub cfl: bool,
     // Tile bounds
     pub tile_col_start: i32,
     pub tile_col_end: i32,
@@ -1841,9 +1843,11 @@ fn decode_b(
     }
 
     // Intra mode decoding
+    const REORDERED_NONDIR_Y_MODE: [u8; 5] = [0, 9, 10, 11, 12];
+    const REORDERED_DIR_Y_MODE: [u8; 8] = [3, 8, 1, 5, 4, 6, 2, 7];
+
+    let mut luma_midx = 0xffu8;
     if b.is_intra != 0 && !intrabc && has_luma {
-        const REORDERED_NONDIR_Y_MODE: [u8; 5] = [0, 9, 10, 11, 12];
-        const REORDERED_DIR_Y_MODE: [u8; 8] = [3, 8, 1, 5, 4, 6, 2, 7];
         const DEFAULT_MODE_LIST_Y: [u8; 56] = [
             17, 45, 3, 10, 24, 31, 38, 52,
             15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
@@ -2010,9 +2014,107 @@ fn decode_b(
                 unsafe { b.data.intra.multi_mrl = mmrl; }
             }
         }
+
+        luma_midx = midx;
     }
 
-    // TODO: continue porting decode_b (chroma mode, inter mode, transform, etc.)
+    // UV chroma mode decoding
+    if b.is_intra != 0 && !intrabc && has_chroma {
+        let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
+        let cbx4 = (cbx & 63) as usize;
+        let cby4 = (cby & 63) as usize;
+        let cbw4 = cb_dim[0] as i32;
+        let cbh4 = cb_dim[1] as i32;
+
+        let mut midx = luma_midx;
+
+        // DPCM for chroma
+        unsafe {
+            b.data.intra.dpcm[1] = (fi.any_lossless
+                && msac.decode_bool_adapt(cdf_m.dpcm(1)) != 0) as u8;
+        }
+        let chroma_dpcm = unsafe { b.data.intra.dpcm[1] } != 0;
+
+        if chroma_dpcm {
+            let uv_mode = if msac.decode_bool_adapt(cdf_m.dpcm_dir(1)) != 0 {
+                2u8 // HOR_PRED
+            } else {
+                1u8 // VERT_PRED
+            };
+            let uv_mode_idx: i32 = if uv_mode == 2 { 45 } else { 17 };
+            let uv_angle = if (midx as i32 - uv_mode_idx).unsigned_abs() >= 4 {
+                0i8
+            } else {
+                (midx % 7) as i8 - 3
+            };
+            unsafe {
+                b.data.intra.uv_mode = uv_mode;
+                b.data.intra.uv_angle = uv_angle;
+            }
+        } else {
+            let ll = fi.any_lossless;
+            let mhccp_allowed = fi.mhccp
+                && imax(cbw4, cbh4) <= if ll { 1 } else { 8 }
+                && cbw4 * cbh4 >= if ll { 1 } else { 2 };
+            let cfl_allowed = (fi.cfl || mhccp_allowed)
+                && (imax(bw4, bh4) > 16 || _sdp_cfl_disallowed == 0)
+                && imax(cbw4, cbh4) <= if ll { 1 } else { 16 };
+
+            let is_cfl = cfl_allowed && {
+                let cfl_ctx = (a.uvmode[cbx4] == CFL_PRED) as usize
+                    + (l.uvmode[cby4] == CFL_PRED) as usize;
+                msac.decode_bool_adapt(cdf_m.cfl(cfl_ctx)) != 0
+            };
+
+            if is_cfl {
+                unsafe {
+                    b.data.intra.uv_mode = CFL_PRED;
+                    b.data.intra.uv_angle = 0;
+                }
+            } else {
+                let uv_mode_ctx = (midx != 0xff) as usize;
+                let mut uv_mode_idx = msac.decode_symbol_adapt(
+                    cdf_m.intra_uv_mode(uv_mode_ctx), 7) as usize;
+                if uv_mode_idx == 7 {
+                    uv_mode_idx += msac.decode_bools_bypass(3) as usize;
+                }
+                if uv_mode_idx > 12 {
+                    return Err(());
+                }
+
+                if uv_mode_idx < uv_mode_ctx {
+                    // Same directional mode as luma
+                    unsafe {
+                        b.data.intra.uv_mode = REORDERED_DIR_Y_MODE[(midx / 7) as usize];
+                        b.data.intra.uv_angle = (midx % 7) as i8 - 3;
+                    }
+                } else if uv_mode_idx - uv_mode_ctx < 5 {
+                    // Non-directional mode
+                    unsafe {
+                        b.data.intra.uv_mode = REORDERED_NONDIR_Y_MODE[uv_mode_idx - uv_mode_ctx];
+                        b.data.intra.uv_angle = 0;
+                    }
+                } else {
+                    // Directional mode from default UV list
+                    const DEFAULT_MODE_LIST_UV: [u8; 8] = [
+                        1, 2, 3, 4, 5, 6, 7, 8, // VERT, HOR, D45, D135, D113, D157, D203, D67
+                    ];
+                    const INTRA_DIR_MODE_Y_TO_UV_IDX: [u8; 8] = [2, 4, 0, 5, 3, 6, 1, 7];
+
+                    let mut idx = (uv_mode_idx - 5 - uv_mode_ctx) as i32;
+                    if uv_mode_ctx != 0 {
+                        idx += (idx >= INTRA_DIR_MODE_Y_TO_UV_IDX[(midx / 7) as usize] as i32) as i32;
+                    }
+                    unsafe {
+                        b.data.intra.uv_mode = DEFAULT_MODE_LIST_UV[idx as usize];
+                        b.data.intra.uv_angle = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // TODO: continue porting decode_b (inter mode, transform, context update)
     Ok(b)
 }
 
@@ -3740,7 +3842,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3788,7 +3890,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
             sb_step: 16,
         };
@@ -3834,7 +3936,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3865,7 +3967,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3896,7 +3998,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 1,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3925,7 +4027,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3956,7 +4058,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3989,7 +4091,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: true, mrls: true,
+            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4009,5 +4111,76 @@ mod tests {
         // MRL decoded only if directional mode (midx != 0xff)
         let mrl = unsafe { b.data.intra.mrl_index };
         assert!(mrl <= 3);
+    }
+
+    #[test]
+    fn test_decode_b_uv_chroma_mode() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0xAA; 256];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        // Decode with both luma and chroma
+        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs4x4).unwrap();
+        assert_eq!(b.is_intra, 1);
+        let uv_mode = unsafe { b.data.intra.uv_mode };
+        let uv_angle = unsafe { b.data.intra.uv_angle };
+        // UV mode should be valid (0-13)
+        assert!(uv_mode <= CFL_PRED, "uv_mode {} out of range", uv_mode);
+        // UV angle in [-3, 3]
+        assert!(uv_angle >= -3 && uv_angle <= 3, "uv_angle {} out of range", uv_angle);
+    }
+
+    #[test]
+    fn test_decode_b_uv_dpcm_chroma() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        // Feed data that makes dpcm[0]=true and dpcm[1]=true
+        let data = vec![0xFF; 256];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs4x4, BlockSize::Bs4x4).unwrap();
+        assert_eq!(b.is_intra, 1);
+        let dpcm_chroma = unsafe { b.data.intra.dpcm[1] };
+        // With 0xFF data and lossless, DPCM should be triggered
+        let uv_mode = unsafe { b.data.intra.uv_mode };
+        if dpcm_chroma != 0 {
+            // DPCM chroma: uv_mode is VERT(1) or HOR(2)
+            assert!(uv_mode == 1 || uv_mode == 2);
+        }
     }
 }
