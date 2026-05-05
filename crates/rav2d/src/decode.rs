@@ -1651,6 +1651,8 @@ pub struct SbFrameInfo {
     pub mrls: bool,
     pub mhccp: bool,
     pub cfl: bool,
+    pub allow_screen_content_tools: bool,
+    pub intra_dip: bool,
     // Tile bounds
     pub tile_col_start: i32,
     pub tile_col_end: i32,
@@ -2070,6 +2072,40 @@ fn decode_b(
                 unsafe {
                     b.data.intra.uv_mode = CFL_PRED;
                     b.data.intra.uv_angle = 0;
+                    b.data.intra.cfl.cfl_alpha = [0; 2];
+                }
+                // CFL parameters
+                const CFL_EXPLICIT: i8 = 0;
+                const CFL_MHCCP: i8 = 2;
+                if mhccp_allowed
+                    && (!fi.cfl || msac.decode_bool_adapt(cdf_m.mhccp()) != 0)
+                {
+                    let sz_ctx = SIZE_GROUP[bs as u8 as usize] as usize;
+                    unsafe {
+                        b.data.intra.cfl_type = CFL_MHCCP;
+                        b.data.intra.cfl.cfl_mh_dir =
+                            msac.decode_symbol_adapt(cdf_m.mhccp_filter_dir(sz_ctx), 2) as u8;
+                    }
+                } else {
+                    let cfl_type = msac.decode_bool_adapt(cdf_m.cfl_type()) as i8;
+                    unsafe { b.data.intra.cfl_type = cfl_type; }
+                    if cfl_type == CFL_EXPLICIT {
+                        let sign = msac.decode_symbol_adapt(cdf_m.cfl_sign(), 7) as i32 + 1;
+                        let sign_u = sign * 0x56 >> 8;
+                        let sign_v = sign - sign_u * 3;
+                        if sign_u != 0 {
+                            let ctx = (sign_u == 2) as usize * 3 + sign_v as usize;
+                            let mut alpha = msac.decode_symbol_adapt(cdf_m.cfl_alpha(ctx), 7) as i8 + 1;
+                            if sign_u == 1 { alpha = -alpha; }
+                            unsafe { b.data.intra.cfl.cfl_alpha[0] = alpha; }
+                        }
+                        if sign_v != 0 {
+                            let ctx = (sign_v == 2) as usize * 3 + sign_u as usize;
+                            let mut alpha = msac.decode_symbol_adapt(cdf_m.cfl_alpha(ctx), 7) as i8 + 1;
+                            if sign_v == 1 { alpha = -alpha; }
+                            unsafe { b.data.intra.cfl.cfl_alpha[1] = alpha; }
+                        }
+                    }
                 }
             } else {
                 let uv_mode_ctx = (midx != 0xff) as usize;
@@ -2110,6 +2146,45 @@ fn decode_b(
                         b.data.intra.uv_angle = 0;
                     }
                 }
+            }
+        }
+    }
+
+    // Palette and DIP (has_luma intra path)
+    if b.is_intra != 0 && !intrabc && has_luma {
+        let y_mode = unsafe { b.data.intra.y_mode };
+        unsafe { b.data.intra.pal_sz = 0; }
+
+        if fi.allow_screen_content_tools
+            && y_mode == 0 // DC_PRED
+            && imax(bw4, bh4) <= 16
+            && bw4 + bh4 >= 4
+        {
+            let use_y_pal = msac.decode_bool_adapt(cdf_m.pal_y()) != 0;
+            if use_y_pal {
+                // TODO: read_pal_plane (palette color decoding)
+                let pal_sz = msac.decode_symbol_adapt(cdf_m.pal_sz(), 6) as u8 + 2;
+                unsafe { b.data.intra.pal_sz = pal_sz; }
+            }
+        }
+
+        // DIP (Directional Intra Prediction enhancement)
+        unsafe { b.data.intra.dip = 0; }
+        let pal_sz = unsafe { b.data.intra.pal_sz };
+        if y_mode == 0 // DC_PRED
+            && fi.intra_dip
+            && pal_sz == 0
+            && imin(bw4, bh4) >= 2
+            && bw4 * bh4 >= 8
+        {
+            let nb_dip_0 = if have_left { l.dip[(by4 + bh4 as usize).saturating_sub(1)] } else { 0 };
+            let nb_dip_1 = if have_top { a.dip[(bx4 + bw4 as usize).saturating_sub(1)] } else { 0 };
+            let ctx = (nb_dip_0 != 0) as usize + (nb_dip_1 != 0) as usize;
+            let dip_flag = msac.decode_bool_adapt(cdf_m.dip(ctx)) != 0;
+            if dip_flag {
+                let tp = msac.decode_bools_bypass(1) as u8;
+                let m = msac.decode_symbol_adapt(cdf_m.dip_mode(), 5) as u8;
+                unsafe { b.data.intra.dip = (tp << 4) | (m + 1); }
             }
         }
     }
@@ -3842,7 +3917,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3890,7 +3965,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
             sb_step: 16,
         };
@@ -3936,7 +4011,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3967,7 +4042,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -3998,7 +4073,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 1,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4027,7 +4102,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4058,7 +4133,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4091,7 +4166,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true,
+            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4125,7 +4200,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true,
+            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4160,7 +4235,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: true,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
