@@ -1815,7 +1815,134 @@ fn decode_b(
         b.skip_txfm = msac.decode_bool_adapt(cdf_m.skip_txfm(ctx)) as u8;
     }
 
-    // TODO: continue porting decode_b (intra mode, inter mode, transform, etc.)
+    // Intra mode decoding
+    if b.is_intra != 0 && !intrabc && has_luma {
+        const REORDERED_NONDIR_Y_MODE: [u8; 5] = [0, 9, 10, 11, 12];
+        const REORDERED_DIR_Y_MODE: [u8; 8] = [3, 8, 1, 5, 4, 6, 2, 7];
+        const DEFAULT_MODE_LIST_Y: [u8; 56] = [
+            17, 45, 3, 10, 24, 31, 38, 52,
+            15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
+            16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53,
+            14, 20, 42, 48, 0, 6, 7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
+        ];
+
+        // DPCM (lossless mode)
+        let dpcm = fi.any_lossless
+            && msac.decode_bool_adapt(cdf_m.dpcm(0)) != 0;
+        let (y_mode, y_angle, midx);
+
+        if dpcm {
+            if msac.decode_bool_adapt(cdf_m.dpcm_dir(0)) != 0 {
+                y_mode = 2; // HOR_PRED
+                midx = 45u8;
+            } else {
+                y_mode = 1; // VERT_PRED
+                midx = 17u8;
+            }
+            y_angle = 0i8;
+            unsafe { b.data.intra.mrl_index = 0; }
+            unsafe { b.data.intra.multi_mrl = 0; }
+        } else {
+            let y_set = msac.decode_symbol_adapt(cdf_m.intra_y_set(), 3) as usize;
+            let y_mode_idx;
+
+            if y_set == 0 {
+                let y_mode_ctx =
+                    (w4 == bw4 && a.midx[(bx4 + bw4 as usize).saturating_sub(1)] != 0xff) as usize
+                    + (h4 == bh4 && l.midx[(by4 + bh4 as usize).saturating_sub(1)] != 0xff) as usize;
+                let mut idx0 = msac.decode_symbol_adapt(
+                    cdf_m.intra_y_idx0(y_mode_ctx), 7) as usize;
+                if idx0 == 7 {
+                    idx0 += msac.decode_symbol_adapt(
+                        cdf_m.intra_y_idx1(y_mode_ctx), 5) as usize;
+                }
+                y_mode_idx = idx0;
+            } else {
+                y_mode_idx = y_set * 16 - 3 + msac.decode_bools_bypass(4) as usize;
+            }
+
+            if y_mode_idx < 5 {
+                y_mode = REORDERED_NONDIR_Y_MODE[y_mode_idx];
+                y_angle = 0;
+                midx = 0xff;
+            } else {
+                let dir_idx = y_mode_idx - 5;
+
+                // Build custom mode list from neighbour directional modes
+                let mut custom_list = [0u8; 56];
+                let mut use_custom = false;
+                let mut _list_len = 0usize;
+
+                if bw4 * bh4 > 2 {
+                    let mut mask = 0u64;
+                    let mut ptr = 0usize;
+
+                    if h4 == bh4 {
+                        let lmidx = l.midx[(by4 + bh4 as usize).saturating_sub(1)];
+                        if lmidx != 0xff {
+                            custom_list[ptr] = lmidx;
+                            mask |= 1u64 << lmidx;
+                            ptr += 1;
+                        }
+                    }
+                    if w4 == bw4 {
+                        let amidx = a.midx[(bx4 + bw4 as usize).saturating_sub(1)];
+                        if amidx != 0xff && (ptr == 0 || amidx != custom_list[0]) {
+                            custom_list[ptr] = amidx;
+                            mask |= 1u64 << amidx;
+                            ptr += 1;
+                        }
+                    }
+                    let n_dirs = ptr;
+                    if n_dirs > 0 {
+                        use_custom = true;
+                        if bw4 * bh4 > 4 && dir_idx >= n_dirs {
+                            for i in 1..5i32 {
+                                for n in 0..n_dirs {
+                                    let cmidx = custom_list[n] as i32;
+                                    for delta in [-i, i] {
+                                        let dmidx = ((cmidx + delta + 56) % 56) as u8;
+                                        if mask & (1u64 << dmidx) == 0 {
+                                            custom_list[ptr] = dmidx;
+                                            mask |= 1u64 << dmidx;
+                                            ptr += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if dir_idx >= ptr {
+                            for &fmidx in DEFAULT_MODE_LIST_Y.iter() {
+                                let bit = 1u64 << fmidx;
+                                if mask & bit == 0 {
+                                    custom_list[ptr] = fmidx;
+                                    ptr += 1;
+                                }
+                            }
+                        }
+                        _list_len = ptr;
+                    }
+                }
+
+                let dir_y_mode_reord = if use_custom {
+                    custom_list[dir_idx]
+                } else {
+                    DEFAULT_MODE_LIST_Y[dir_idx]
+                };
+                midx = dir_y_mode_reord;
+                y_mode = REORDERED_DIR_Y_MODE[(dir_y_mode_reord / 7) as usize];
+                y_angle = (dir_y_mode_reord % 7) as i8 - 3;
+            }
+        }
+
+        unsafe {
+            b.data.intra.dpcm[0] = dpcm as u8;
+            b.data.intra.y_mode = y_mode;
+            b.data.intra.y_angle = y_angle;
+        }
+    }
+
+    // TODO: continue porting decode_b (MRL, multi-MRL, chroma mode, inter mode, transform, etc.)
     Ok(b)
 }
 
@@ -3714,5 +3841,69 @@ mod tests {
                          BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
         // seg_skip_mask bit 0 set, seg_id=0 → skip_txfm forced to 1
         assert_eq!(b.skip_txfm, 1);
+    }
+
+    #[test]
+    fn test_decode_b_intra_y_mode_decoding() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0x80; 128];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        assert_eq!(b.is_intra, 1);
+        // y_mode should be a valid intra prediction mode (0-12)
+        let y_mode = unsafe { b.data.intra.y_mode };
+        assert!(y_mode <= 12, "y_mode={y_mode} out of range");
+    }
+
+    #[test]
+    fn test_decode_b_intra_y_mode_with_neighbours() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0xAA; 256];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+        // Set neighbour midx to directional mode 17 (VERT_PRED centre)
+        a.midx[9] = 17;
+        l.midx[9] = 17;
+
+        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        assert_eq!(b.is_intra, 1);
+        let y_mode = unsafe { b.data.intra.y_mode };
+        assert!(y_mode <= 12, "y_mode={y_mode} out of range");
     }
 }
