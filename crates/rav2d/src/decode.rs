@@ -10,8 +10,8 @@ use crate::internal::{LoopFilterState, NsWienerBank, Pass, ScalableMotionParams}
 use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
 use crate::levels::{
-    Av2Block, BlockPartition, BlockSize, CFL_PRED, Mv, MvXY, RefPair,
-    TxPartition, N_BS_SIZES, INVALID_MV, InterPredMode, MotionMode, TIP_FRAME,
+    Av2Block, BlockPartition, BlockSize, CFL_PRED, CompInterPredMode, Mv, MvXY,
+    RefPair, TxPartition, N_BS_SIZES, INVALID_MV, InterPredMode, MotionMode, TIP_FRAME,
 };
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
@@ -1678,6 +1678,7 @@ pub struct SbFrameInfo {
     pub tip_frame_mode: u8,
     pub six_param_warp_delta: bool,
     pub subpel_filter_mode: u8,
+    pub switchable_comp_refs: bool,
     // Tile bounds
     pub tile_col_start: i32,
     pub tile_col_end: i32,
@@ -2450,6 +2451,31 @@ fn decode_b(
             b.data.inter.refine_mv = 0;
         }
 
+        // TIP decision
+        let is_tip = if b.skip_mode == 0 && fi.tip_frame_mode != 0
+            && cbs == lbs && imax(bw4, bh4) >= 2
+        {
+            let ctx = (if n_ctx >= 1 { (nx_ref0[0] == TIP_FRAME as i8) as usize } else { 0 })
+                + (if n_ctx >= 2 { (nx_ref0[1] == TIP_FRAME as i8) as usize } else { 0 });
+            msac.decode_bool_adapt(cdf_m.tip(ctx)) != 0
+        } else {
+            false
+        };
+
+        // Compound decision
+        let is_comp = if b.skip_mode != 0 {
+            true
+        } else if !is_tip
+            && (fi.seg_globalmv_mask | fi.seg_skip_mask) & (1 << b.seg_id) == 0
+            && fi.switchable_comp_refs && bw4 * bh4 >= 4
+        {
+            // simplified comp context
+            let ctx = 0usize;
+            msac.decode_bool_adapt(cdf_m.comp(ctx)) != 0
+        } else {
+            false
+        };
+
         if b.skip_mode != 0 {
             // skip_mode DRL index
             unsafe { b.data.inter.drl_idx[0] = 0; }
@@ -2466,9 +2492,16 @@ fn decode_b(
                 b.data.inter.comp_type = 1; // COMP_AVG
                 b.data.inter.inter_mode = 0; // NEARESTMV_NEARESTMV-like
             }
+        } else if is_comp {
+            // --- compound inter mode (stub) ---
+            unsafe {
+                b.data.inter.comp_type = 1; // COMP_AVG
+                b.data.inter.inter_mode = CompInterPredMode::NearMvNearMv as u8;
+            }
+            b.ref_pair = RefPair::default();
+            // TODO: compound ref selection, comp_mode, DRL, MV residuals, CWP, wedge/seg
         } else {
             unsafe { b.data.inter.comp_type = 0; } // COMP_INTER_NONE
-            let is_tip = fi.tip_frame_mode == 2;
 
             // --- single ref selection ---
             let ref0: i8;
@@ -4637,7 +4670,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4687,7 +4720,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
             sb_step: 16,
         };
@@ -4735,7 +4768,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4768,7 +4801,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4801,7 +4834,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 1,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4832,7 +4865,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4865,7 +4898,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4900,7 +4933,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4936,7 +4969,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4973,7 +5006,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: true,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -5012,7 +5045,7 @@ mod tests {
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -5059,7 +5092,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -5090,6 +5123,45 @@ mod tests {
             // Context writeback: intra=0 in both a and l
             assert_eq!(a.intra[1], 0); // bx4=1 (bx=4, &63=4, /4=1)
             assert_eq!(l.intra[1], 0);
+        }
+    }
+
+    #[test]
+    fn test_decode_b_compound_inter() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: true,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        // 0xFF data: decode_bool_adapt tends to return 1
+        let data = vec![0xFF; 512];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+
+        if b.is_intra == 0 {
+            let comp_type = unsafe { b.data.inter.comp_type };
+            // With switchable_comp_refs and 0xFF data (decode returns 1),
+            // is_comp=true so comp_type should be AVG(1)
+            if b.skip_mode == 0 {
+                assert_eq!(comp_type, 1, "expected compound (AVG) mode");
+            }
         }
     }
 }
