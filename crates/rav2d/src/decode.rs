@@ -2198,6 +2198,28 @@ fn decode_b(
         read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
     }
 
+    // is_sm flags for reconstruction (smooth mode neighbours)
+    if b.is_intra != 0 && !intrabc {
+        if has_luma {
+            let sm = |mode: u8| -> i32 { (mode == 9 || mode == 10 || mode == 11) as i32 };
+            let a_mode = a.mode[bx4];
+            let l_mode = l.mode[by4];
+            unsafe {
+                b.data.intra.is_sm[0].a = if a.intra[bx4] != 0 { sm(a_mode) } else { 0 };
+                b.data.intra.is_sm[0].l = if l.intra[by4] != 0 { sm(l_mode) } else { 0 };
+            }
+        }
+        if has_chroma {
+            let sm = |mode: u8| -> i32 { (mode == 9 || mode == 10 || mode == 11) as i32 };
+            let cbx4 = (cbx & 63) as usize;
+            let cby4 = (cby & 63) as usize;
+            unsafe {
+                b.data.intra.is_sm[1].a = sm(a.uvmode[cbx4]);
+                b.data.intra.is_sm[1].l = sm(l.uvmode[cby4]);
+            }
+        }
+    }
+
     // Intra context update
     if b.is_intra != 0 && !intrabc && has_luma {
         let y_mode = unsafe { b.data.intra.y_mode };
