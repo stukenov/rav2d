@@ -945,7 +945,7 @@ pub fn decode_4way(msac: &mut MsacContext, r: i32, cdf: &mut [u16], n_bits: i32)
     }
 }
 
-pub fn read_amvd(
+pub fn read_amvd_raw(
     msac: &mut MsacContext,
     amvd_joint: &mut [u16],
     amvd_index: &mut [u16],
@@ -1070,6 +1070,22 @@ pub fn read_mv_full(msac: &mut MsacContext, cdf_mv: &mut CdfMvContext, mv_prec: 
     cdf_mv.data[114] = shell_tip[0];
     cdf_mv.data[115] = shell_tip[1];
     mv
+}
+
+pub fn read_amvd(msac: &mut MsacContext, cdf_m: &mut CdfModeContext) -> Mv {
+    let joint = msac.decode_symbol_adapt(cdf_m.amvd_joint(), 3) as i32;
+    if joint == 0 {
+        return Mv::default();
+    }
+    let y = if joint & 2 != 0 {
+        let s = msac.decode_symbol_adapt(cdf_m.amvd_index(0), 7) as i32;
+        if s < 3 { 2 + s * 2 } else { 1 << s }
+    } else { 0 };
+    let x = if joint & 1 != 0 {
+        let s = msac.decode_symbol_adapt(cdf_m.amvd_index(1), 7) as i32;
+        if s < 3 { 2 + s * 2 } else { 1 << s }
+    } else { 0 };
+    Mv { c: MvXY { y, x } }
 }
 
 pub fn read_pal_indices(
@@ -2701,7 +2717,7 @@ fn decode_b(
                 for n in start..end {
                     if m_pair.get(n).copied() != Some(InterPredMode::NewMv as u8) { continue; }
                     let mv = if amvd_val != 0 {
-                        Mv::default()
+                        read_amvd(msac, cdf_m)
                     } else {
                         read_mv_full(msac, cdf_dmv, mv_prec)
                     };
@@ -3099,8 +3115,7 @@ fn decode_b(
                 || (inter_mode == InterPredMode::WarpMv as u8 && warpmv_with_mvd != 0)
             {
                 let mv = if amvd_val != 0 {
-                    // TODO: read_amvd
-                    Mv::default()
+                    read_amvd(msac, cdf_m)
                 } else {
                     read_mv_full(msac, cdf_dmv, mv_prec)
                 };
@@ -4094,7 +4109,7 @@ mod tests {
         let mut msac = make_msac(&data);
         let mut amvd_joint = [16384u16, 16384, 16384, 0];
         let mut amvd_index = [16384u16; 16];
-        let mv = read_amvd(&mut msac, &mut amvd_joint, &mut amvd_index);
+        let mv = read_amvd_raw(&mut msac, &mut amvd_joint, &mut amvd_index);
         let (y, x) = unsafe { (mv.c.y, mv.c.x) };
         assert!(y >= 0 && x >= 0);
     }
@@ -4110,7 +4125,7 @@ mod tests {
                 amvd_index[i * 8 + j] = ((j + 1) as u16) * 4096;
             }
         }
-        let mv = read_amvd(&mut msac, &mut amvd_joint, &mut amvd_index);
+        let mv = read_amvd_raw(&mut msac, &mut amvd_joint, &mut amvd_index);
         let (y, x) = unsafe { (mv.c.y, mv.c.x) };
         assert!(y >= 0 && x >= 0);
     }
