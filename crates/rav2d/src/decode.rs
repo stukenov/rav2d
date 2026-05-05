@@ -10,7 +10,8 @@ use crate::internal::{LoopFilterState, NsWienerBank, Pass, ScalableMotionParams}
 use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
 use crate::levels::{
-    Av2Block, BlockPartition, BlockSize, CFL_PRED, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV,
+    Av2Block, BlockPartition, BlockSize, CFL_PRED, Mv, MvXY, RefPair,
+    TxPartition, N_BS_SIZES, INVALID_MV,
 };
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
@@ -1655,8 +1656,10 @@ pub struct SbFrameInfo {
     pub intra_dip: bool,
     pub force_integer_mv: bool,
     pub max_bvp_drl_bits: u8,
+    pub max_drl_bits: u8,
     pub bawp: bool,
     pub txfm_switchable: bool,
+    pub skip_mode_refs: RefPair,
     // Tile bounds
     pub tile_col_start: i32,
     pub tile_col_end: i32,
@@ -2381,7 +2384,108 @@ fn decode_b(
         }
     }
 
-    // TODO: continue porting decode_b (inter mode, transform)
+    // Inter mode path
+    if b.is_intra == 0 && !intrabc {
+        unsafe {
+            b.data.inter.amvd = 0;
+            b.data.inter.motion_mode = 0; // Translation
+            b.data.inter.refine_mv = 0;
+        }
+
+        if b.skip_mode != 0 {
+            // skip_mode DRL index
+            unsafe { b.data.inter.drl_idx[0] = 0; }
+            let mut ctx = 0usize;
+            for _ in 0..fi.max_drl_bits {
+                if msac.decode_bool_adapt(cdf_m.skip_mode_drl_idx(ctx)) == 0 {
+                    break;
+                }
+                unsafe { b.data.inter.drl_idx[0] += 1; }
+                if ctx < 2 { ctx += 1; }
+            }
+            b.ref_pair = fi.skip_mode_refs;
+            unsafe {
+                b.data.inter.comp_type = 1; // COMP_AVG
+                b.data.inter.inter_mode = 0; // NEARESTMV_NEARESTMV-like
+            }
+        } else {
+            // TODO: full inter mode decoding (TIP, comp, ref frames, inter_mode, MVs, etc.)
+            b.ref_pair = RefPair::default();
+            unsafe {
+                b.data.inter.comp_type = 0; // COMP_INTER_NONE
+                b.data.inter.inter_mode = 0;
+            }
+        }
+
+        // TX partition for inter
+        if has_luma {
+            read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
+        }
+
+        // Inter context write-back
+        if has_luma {
+            let aw = 1usize << b_dim[2];
+            let lh = 1usize << b_dim[3];
+            let inter_mode = unsafe { b.data.inter.inter_mode };
+            let comp_type = unsafe { b.data.inter.comp_type };
+            let motion_mode = unsafe { b.data.inter.motion_mode };
+            let amvd = unsafe { b.data.inter.amvd };
+            let refs = unsafe { b.ref_pair.r };
+            let filter_val = unsafe { b.data.inter.filter };
+
+            a.seg_pred[bx4..bx4 + aw].fill(0);
+            a.skip_mode[bx4..bx4 + aw].fill(b.skip_mode);
+            a.intra[bx4..bx4 + aw].fill(0);
+            a.intrabc[bx4..bx4 + aw].fill(0);
+            a.morph_pred[bx4..bx4 + aw].fill(0);
+            a.midx[bx4..bx4 + aw].fill(0xff);
+            a.fsc[bx4..bx4 + aw].fill(0);
+            a.skip_txfm[bx4..bx4 + aw].fill(b.skip_txfm);
+            a.pal_sz[bx4..bx4 + aw].fill(0);
+            a.comp_type[bx4..bx4 + aw].fill(comp_type);
+            a.filter[bx4..bx4 + aw].fill(filter_val);
+            a.mode[bx4..bx4 + aw].fill(inter_mode);
+            a.mrl[bx4..bx4 + aw].fill(0);
+            a.multi_mrl[bx4..bx4 + aw].fill(0);
+            a.dip[bx4..bx4 + aw].fill(0);
+            a.r#ref[0][bx4..bx4 + aw].fill(refs[0]);
+            a.r#ref[1][bx4..bx4 + aw].fill(refs[1]);
+            a.motion_mode[bx4..bx4 + aw].fill(motion_mode);
+            a.amvd[bx4..bx4 + aw].fill(amvd as u8);
+            a.mvprec[bx4..bx4 + aw].fill(1); // mvprec_def=1
+
+            l.seg_pred[by4..by4 + lh].fill(0);
+            l.skip_mode[by4..by4 + lh].fill(b.skip_mode);
+            l.intra[by4..by4 + lh].fill(0);
+            l.intrabc[by4..by4 + lh].fill(0);
+            l.morph_pred[by4..by4 + lh].fill(0);
+            l.midx[by4..by4 + lh].fill(0xff);
+            l.fsc[by4..by4 + lh].fill(0);
+            l.skip_txfm[by4..by4 + lh].fill(b.skip_txfm);
+            l.pal_sz[by4..by4 + lh].fill(0);
+            l.comp_type[by4..by4 + lh].fill(comp_type);
+            l.filter[by4..by4 + lh].fill(filter_val);
+            l.mode[by4..by4 + lh].fill(inter_mode);
+            l.mrl[by4..by4 + lh].fill(0);
+            l.multi_mrl[by4..by4 + lh].fill(0);
+            l.dip[by4..by4 + lh].fill(0);
+            l.r#ref[0][by4..by4 + lh].fill(refs[0]);
+            l.r#ref[1][by4..by4 + lh].fill(refs[1]);
+            l.motion_mode[by4..by4 + lh].fill(motion_mode);
+            l.amvd[by4..by4 + lh].fill(amvd as u8);
+            l.mvprec[by4..by4 + lh].fill(1);
+        }
+        if has_chroma {
+            let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
+            let cbx4 = (cbx & 63) as usize;
+            let cby4 = (cby & 63) as usize;
+            let cbw4 = 1usize << cb_dim[2];
+            let cbh4 = 1usize << cb_dim[3];
+            a.uvmode[cbx4..cbx4 + cbw4].fill(0); // DC_PRED
+            l.uvmode[cby4..cby4 + cbh4].fill(0);
+        }
+    }
+
     Ok(b)
 }
 
@@ -4109,7 +4213,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4157,7 +4261,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
             sb_step: 16,
         };
@@ -4203,7 +4307,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4234,7 +4338,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4265,7 +4369,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 1,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4294,7 +4398,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4325,7 +4429,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4358,7 +4462,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4392,7 +4496,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4427,7 +4531,7 @@ mod tests {
             seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: true,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4464,7 +4568,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
-            allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, bawp: false, txfm_switchable: true,
+            allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
