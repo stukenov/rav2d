@@ -9,7 +9,9 @@ use crate::headers::{
 use crate::internal::{LoopFilterState, NsWienerBank, Pass, ScalableMotionParams};
 use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
-use crate::levels::{BlockPartition, BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV};
+use crate::levels::{
+    Av2Block, BlockPartition, BlockSize, Mv, MvXY, TxPartition, N_BS_SIZES, INVALID_MV,
+};
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
 use crate::quantizer::dq_lookup;
@@ -1630,24 +1632,191 @@ pub struct SbFrameInfo {
     pub uneven_4way: bool,
     pub max_pb_aspect_ratio_log2: u8,
     pub n_passes: i32,
+    // Segmentation
+    pub seg_enabled: bool,
+    pub seg_update_map: bool,
+    pub seg_temporal: bool,
+    pub seg_preskip: bool,
+    pub seg_ext: bool,
+    pub seg_last_active_segid: u8,
+    pub seg_globalmv_mask: u16,
+    pub seg_skip_mask: u16,
+    // Frame flags
+    pub skip_mode_enabled: bool,
+    pub allow_intrabc: bool,
+    pub any_lossless: bool,
+    pub has_chroma_layout: bool,
+    // Tile bounds
+    pub tile_col_start: i32,
+    pub tile_col_end: i32,
+    pub tile_row_start: i32,
+    pub tile_row_end: i32,
+    pub sb_step: i32,
 }
 
 #[allow(unused)]
 fn decode_b(
-    _fi: &SbFrameInfo,
-    _bx: i32, _by: i32,
-    _cbx: i32, _cby: i32,
-    _intra_region: i32,
+    fi: &SbFrameInfo,
+    bx: i32, by: i32,
+    cbx: i32, cby: i32,
+    intra_region: i32,
     _sdp_cfl_disallowed: i32,
     _pass: u8,
-    _a: &mut BlockContext,
-    _l: &mut BlockContext,
-    _msac: &mut MsacContext,
-    _cdf_m: &mut CdfModeContext,
-    _lbs: BlockSize,
-    _cbs: BlockSize,
-) -> Result<(), ()> {
-    Ok(())
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    lbs: BlockSize,
+    cbs: BlockSize,
+) -> Result<Av2Block, ()> {
+    let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
+    debug_assert!(bs != BlockSize::Invalid);
+
+    let b_dim = &BLOCK_DIMENSIONS[bs as u8 as usize];
+    let bx4 = (bx & 63) as usize;
+    let by4 = (by & 63) as usize;
+    let bw4 = b_dim[0] as i32;
+    let bh4 = b_dim[1] as i32;
+
+    let w4 = imin(bw4, fi.bw - bx);
+    let h4 = imin(bh4, fi.bh - by);
+    let have_left = bx > fi.tile_col_start;
+    let have_top = by > fi.tile_row_start;
+    let has_luma = lbs != BlockSize::Invalid;
+    let has_chroma = cbs != BlockSize::Invalid;
+
+    let mut b = Av2Block::default();
+    if has_luma { b.bs = lbs as i8; }
+    if has_chroma { b.cbs = cbs as i8; }
+
+    // Pre-compute cross-SB boundary neighbour context values.
+    // The C code uses nx[2] pointers into a/l; here we read out
+    // the values we need before any mutable operations.
+    let (nx_skip_mode, nx_skip_txfm, nx_intra, nx_intrabc, nx_xoff, n_ctx) = {
+        let mut sm = [0u8; 2];
+        let mut st = [0u8; 2];
+        let mut intra_vals = [0u8; 2];
+        let mut ibc_vals = [0u8; 2];
+        let mut xoff = [0usize; 2];
+        let mut idx = 0usize;
+
+        if have_left && by + bh4 <= fi.tile_row_end {
+            let off = (by4 + bh4 as usize).saturating_sub(1);
+            sm[0] = l.skip_mode[off];
+            st[0] = l.skip_txfm[off];
+            intra_vals[0] = if l.intra[off] != 0 && l.intrabc[off] == 0 { 1 } else { 0 };
+            ibc_vals[0] = l.intrabc[off];
+            xoff[0] = off;
+            idx += 1;
+        }
+        if have_top && bx + bw4 <= fi.tile_col_end {
+            let off = (bx4 + bw4 as usize).saturating_sub(1);
+            sm[idx] = a.skip_mode[off];
+            st[idx] = a.skip_txfm[off];
+            intra_vals[idx] = if a.intra[off] != 0 && a.intrabc[off] == 0 { 1 } else { 0 };
+            ibc_vals[idx] = a.intrabc[off];
+            xoff[idx] = off;
+            idx += 1;
+        }
+        if idx < 2 && have_left {
+            sm[idx] = l.skip_mode[by4];
+            st[idx] = l.skip_txfm[by4];
+            intra_vals[idx] = if l.intra[by4] != 0 && l.intrabc[by4] == 0 { 1 } else { 0 };
+            ibc_vals[idx] = l.intrabc[by4];
+            xoff[idx] = by4;
+            idx += 1;
+        }
+        if idx < 2 {
+            sm[idx] = a.skip_mode[bx4];
+            st[idx] = a.skip_txfm[bx4];
+            intra_vals[idx] = if a.intra[bx4] != 0 && a.intrabc[bx4] == 0 { 1 } else { 0 };
+            ibc_vals[idx] = a.intrabc[bx4];
+            xoff[idx] = bx4;
+            if idx == 0 {
+                sm[1] = sm[0];
+                st[1] = st[0];
+                intra_vals[1] = intra_vals[0];
+                ibc_vals[1] = ibc_vals[0];
+                xoff[1] = xoff[0];
+            }
+            if have_top { idx += 1; }
+        }
+        (sm, st, intra_vals, ibc_vals, xoff, idx)
+    };
+
+    // Segmentation (simplified: seg_id = 0 when not enabled)
+    b.seg_id = 0;
+
+    // skip_mode
+    if (fi.seg_globalmv_mask | fi.seg_skip_mask) & (1 << b.seg_id) == 0
+        && fi.skip_mode_enabled
+        && bw4 * bh4 > 2
+        && intra_region == 0
+    {
+        let ctx = nx_skip_mode[0] as usize + nx_skip_mode[1] as usize;
+        b.skip_mode = msac.decode_bool_adapt(cdf_m.skip_mode(ctx)) as u8;
+    } else {
+        b.skip_mode = 0;
+    }
+
+    // intra/inter decision
+    if b.skip_mode != 0 {
+        b.is_intra = 0;
+    } else if fi.is_inter_or_switch && intra_region == 0 {
+        if fi.has_chroma_layout && lbs != cbs {
+            b.is_intra = 0;
+        } else {
+            let ictx = (nx_intra[0] + nx_intra[1]) as i32 + n_ctx as i32;
+            b.is_intra = (msac.decode_bool_adapt(cdf_m.intra(ictx as usize)) == 0) as u8;
+        }
+    } else {
+        b.is_intra = 1;
+    }
+
+    // intrabc
+    if has_luma {
+        b.intrabc = 0;
+        if fi.allow_intrabc && imin(bw4, bh4) < 16 && b.is_intra != 0 && intra_region == 0 {
+            let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
+
+            // Compute intrabc context from spatial neighbours (not crossing SB vertically)
+            let mut ibc_ctx = 0u8;
+            let mut nb_idx = 0;
+            if have_left && bh4 == h4 {
+                ibc_ctx += l.intrabc[(by4 + bh4 as usize).saturating_sub(1)];
+                nb_idx += 1;
+            }
+            if have_top_in_sb && bw4 == w4 {
+                ibc_ctx += a.intrabc[(bx4 + bw4 as usize).saturating_sub(1)];
+                nb_idx += 1;
+            }
+            if have_left && nb_idx < 2 {
+                ibc_ctx += l.intrabc[by4];
+                nb_idx += 1;
+            }
+            if have_top_in_sb && nb_idx < 2 {
+                ibc_ctx += a.intrabc[bx4];
+            }
+
+            b.intrabc = msac.decode_bool_adapt(cdf_m.intrabc(ibc_ctx as usize)) as u8;
+        }
+    }
+    let intrabc = has_luma && b.intrabc != 0;
+
+    // skip_txfm
+    if fi.seg_skip_mask & (1 << b.seg_id) != 0 {
+        b.skip_txfm = 1;
+    } else if b.is_intra != 0 && !intrabc {
+        if has_luma { b.skip_txfm = 0; }
+    } else {
+        let ctx = nx_skip_txfm[0] as usize
+            + nx_skip_txfm[1] as usize
+            + b.skip_mode as usize * 3;
+        b.skip_txfm = msac.decode_bool_adapt(cdf_m.skip_txfm(ctx)) as u8;
+    }
+
+    // TODO: continue porting decode_b (intra mode, inter mode, transform, etc.)
+    Ok(b)
 }
 
 pub fn decode_sb(
@@ -1919,7 +2088,7 @@ pub fn decode_sb(
 
     match bp {
         BlockPartition::None => {
-            decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
+            let _b = decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
                      *sdp_cfl_disallowed, pass, a, l, msac, cdf_m, lbs, cbs)?;
             if pass & (Pass::Entropy as u8) != 0 {
                 let bx4 = (*bx & 63) as usize;
@@ -2189,7 +2358,7 @@ pub fn decode_sb(
     if *intra_region != 0 && cbs_orig != BlockSize::Invalid {
         *cbx = *bx;
         *cby = *by;
-        decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
+        let _b = decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
                  *sdp_cfl_disallowed, pass, a, l, msac, cdf_m,
                  BlockSize::Invalid, cbs_orig)?;
         *intra_region = 0;
@@ -3370,6 +3539,13 @@ mod tests {
             uneven_4way: false,
             max_pb_aspect_ratio_log2: 2,
             n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
         };
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, false);
@@ -3411,6 +3587,13 @@ mod tests {
             uneven_4way: false,
             max_pb_aspect_ratio_log2: 2,
             n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true,
+            tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
+            sb_step: 16,
         };
         let data = vec![0xFF; 256];
         let mut msac = MsacContext::new(&data, false);
@@ -3440,5 +3623,96 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(bx, 0);
         assert_eq!(by, 0);
+    }
+
+    #[test]
+    fn test_decode_b_intra_keyframe() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0x80; 128];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        assert_eq!(b.is_intra, 1);
+        assert_eq!(b.skip_mode, 0);
+        assert_eq!(b.skip_txfm, 0);
+        assert_eq!(b.intrabc, 0);
+    }
+
+    #[test]
+    fn test_decode_b_inter_skip_mode() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: true,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        // All 0xFF data → MSAC will decode 1s for all bool_adapt calls
+        let data = vec![0x00; 128];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        // skip_mode decoded (block is 2x2=4 > 2, inter frame, skip_mode_enabled)
+        // With all-zero data and default CDFs, skip_mode will be decoded
+        assert_eq!(b.seg_id, 0);
+    }
+
+    #[test]
+    fn test_decode_b_skip_mask_forces_skip_txfm() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: true,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 1,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0x80; 128];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        // seg_skip_mask bit 0 set, seg_id=0 → skip_txfm forced to 1
+        assert_eq!(b.skip_txfm, 1);
     }
 }
