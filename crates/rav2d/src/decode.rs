@@ -1064,6 +1064,14 @@ pub fn read_mv_residual(
     }
 }
 
+pub fn read_mv_full(msac: &mut MsacContext, cdf_mv: &mut CdfMvContext, mv_prec: i32) -> Mv {
+    let mut shell_tip = [cdf_mv.data[114], cdf_mv.data[115]];
+    let mv = read_mv_residual(msac, cdf_mv, &mut shell_tip, mv_prec);
+    cdf_mv.data[114] = shell_tip[0];
+    cdf_mv.data[115] = shell_tip[1];
+    mv
+}
+
 pub fn read_pal_indices(
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
@@ -1680,6 +1688,7 @@ fn decode_b(
     l: &mut BlockContext,
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
+    cdf_dmv: &mut CdfMvContext,
     lbs: BlockSize,
     cbs: BlockSize,
 ) -> Result<Av2Block, ()> {
@@ -2309,7 +2318,20 @@ fn decode_b(
             unsafe { b.data.intra.is_qpel = msac.decode_bool_adapt(cdf_m.intrabc_precision()) as u8; }
         }
 
-        // TODO: read_mv_residual for IntraBC (needs CdfMvContext dmv parameter)
+        // IntraBC MV residual
+        if is_refmv == 0 {
+            let mv_prec = 3 + 2 * (unsafe { b.data.intra.is_qpel } as i32);
+            let mut mv = read_mv_full(msac, cdf_dmv, mv_prec);
+            unsafe {
+                if mv.c.y != 0 && msac.decode_bools_bypass(1) != 0 {
+                    mv.c.y = -mv.c.y;
+                }
+                if mv.c.x != 0 && msac.decode_bools_bypass(1) != 0 {
+                    mv.c.x = -mv.c.x;
+                }
+                b.data.intra.intrabc_mv = mv;
+            }
+        }
 
         // TX partition for IntraBC
         read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
@@ -2502,6 +2524,7 @@ pub fn decode_sb(
     l: &mut BlockContext,
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
+    cdf_dmv: &mut CdfMvContext,
     part_w: &mut Vec<u8>,
     part_w_idx: &mut usize,
     part_r: &[u8],
@@ -2530,12 +2553,12 @@ pub fn decode_sb(
         let mut dir = 0i32;
         decode_sb(
             fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed, pass,
-            a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+            a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
             lbs, BlockSize::Invalid, &mut dir,
         )?;
         return decode_sb(
             fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed, pass,
-            a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+            a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
             BlockSize::Invalid, cbs, &mut dir,
         );
     }
@@ -2759,7 +2782,7 @@ pub fn decode_sb(
     match bp {
         BlockPartition::None => {
             let _b = decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
-                     *sdp_cfl_disallowed, pass, a, l, msac, cdf_m, lbs, cbs)?;
+                     *sdp_cfl_disallowed, pass, a, l, msac, cdf_m, cdf_dmv, lbs, cbs)?;
             if pass & (Pass::Entropy as u8) != 0 {
                 let bx4 = (*bx & 63) as usize;
                 let by4 = (*by & 63) as usize;
@@ -2785,7 +2808,7 @@ pub fn decode_sb(
                 unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
             } else { BlockSize::Invalid };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       child_lbs, child_cbs_first, &mut child_dir)?;
             if *bx + hw4 >= fi.bw { /* done */ }
             else {
@@ -2794,7 +2817,7 @@ pub fn decode_sb(
                     unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
                 } else { cbs };
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                           child_lbs, child_cbs_second, &mut child_dir)?;
                 *bx -= hw4;
             }
@@ -2810,7 +2833,7 @@ pub fn decode_sb(
                 unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
             } else { BlockSize::Invalid };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       child_lbs, child_cbs_first, &mut child_dir)?;
             if *by + hh4 >= fi.bh { /* done */ }
             else {
@@ -2819,7 +2842,7 @@ pub fn decode_sb(
                     unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
                 } else { cbs };
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                           child_lbs, child_cbs_second, &mut child_dir)?;
                 *by -= hh4;
             }
@@ -2828,20 +2851,20 @@ pub fn decode_sb(
             assert!(have_v_split && have_h_split && cbs == lbs);
             let sbs = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][3]) };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       sbs, sbs, &mut child_dir)?;
             *bx += hw4;
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       sbs, sbs, &mut child_dir)?;
             *bx -= hw4;
             *by += hh4;
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       sbs, sbs, &mut child_dir)?;
             *bx += hw4;
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       sbs, sbs, &mut child_dir)?;
             *bx -= hw4;
             *by -= hh4;
@@ -2856,7 +2879,7 @@ pub fn decode_sb(
             let lbs_child = if pl != 0 { BlockSize::Invalid } else { p1_1 };
             let cbs_first = if i_3only { BlockSize::Invalid } else { p1_1 };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       lbs_child, cbs_first, &mut child_dir)?;
             if *bx + qw4 >= fi.bw { /* done */ }
             else {
@@ -2865,7 +2888,7 @@ pub fn decode_sb(
                 let lbs_mid = if pl != 0 { BlockSize::Invalid } else { p1_3 };
                 let cbs_mid = if sub4 { p1_3 } else { BlockSize::Invalid };
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                           lbs_mid, cbs_mid, &mut child_dir)?;
                 if *by + hh4 < fi.bh {
                     *by += hh4;
@@ -2873,7 +2896,7 @@ pub fn decode_sb(
                         unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
                     };
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                               lbs_mid, cbs_mid2, &mut child_dir)?;
                     *by -= hh4;
                 }
@@ -2882,7 +2905,7 @@ pub fn decode_sb(
                     *bx += hw4;
                     let cbs_last = if i_3only { cbs } else { p1_1 };
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                               lbs_child, cbs_last, &mut child_dir)?;
                     *bx -= 3 * qw4;
                 }
@@ -2898,7 +2921,7 @@ pub fn decode_sb(
             let lbs_child = if pl != 0 { BlockSize::Invalid } else { p0_1 };
             let cbs_first = if i_3only { BlockSize::Invalid } else { p0_1 };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       lbs_child, cbs_first, &mut child_dir)?;
             if *by + qh4 >= fi.bh { /* done */ }
             else {
@@ -2907,7 +2930,7 @@ pub fn decode_sb(
                 let lbs_mid = if pl != 0 { BlockSize::Invalid } else { p0_3 };
                 let cbs_mid = if sub4 { p0_3 } else { BlockSize::Invalid };
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                           lbs_mid, cbs_mid, &mut child_dir)?;
                 if *bx + hw4 < fi.bw {
                     *bx += hw4;
@@ -2915,7 +2938,7 @@ pub fn decode_sb(
                         unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
                     };
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                               lbs_mid, cbs_mid2, &mut child_dir)?;
                     *bx -= hw4;
                 }
@@ -2924,7 +2947,7 @@ pub fn decode_sb(
                     *by += hh4;
                     let cbs_last = if i_3only { cbs } else { p0_1 };
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                               lbs_child, cbs_last, &mut child_dir)?;
                     *by -= 3 * qh4;
                 }
@@ -2944,14 +2967,14 @@ pub fn decode_sb(
             let lbs_var = if pl != 0 { BlockSize::Invalid } else { p1_var };
 
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       lbs_edge, if sub4 { p1_2 } else { BlockSize::Invalid },
                       &mut child_dir)?;
             if *bx + ew4 >= fi.bw { /* done */ }
             else {
                 *bx += ew4;
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                           lbs_nvar, if sub4 { p1_nvar } else { BlockSize::Invalid },
                           &mut child_dir)?;
                 let w4a = qw4 << var;
@@ -2960,14 +2983,14 @@ pub fn decode_sb(
                 else {
                     *bx += w4a;
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                               lbs_var, if sub4 { p1_var } else { BlockSize::Invalid },
                               &mut child_dir)?;
                     if *bx + w4b >= fi.bw { *bx -= ew4 + w4a; }
                     else {
                         *bx += w4b;
                         decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                                  pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                                  pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                                   lbs_edge, if sub4 { p1_2 } else { cbs },
                                   &mut child_dir)?;
                         *bx -= 7 * ew4;
@@ -2989,14 +3012,14 @@ pub fn decode_sb(
             let lbs_var = if pl != 0 { BlockSize::Invalid } else { p0_var };
 
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       lbs_edge, if sub4 { p0_2 } else { BlockSize::Invalid },
                       &mut child_dir)?;
             if *by + eh4 >= fi.bh { /* done */ }
             else {
                 *by += eh4;
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                           lbs_nvar, if sub4 { p0_nvar } else { BlockSize::Invalid },
                           &mut child_dir)?;
                 let h4a = qh4 << var;
@@ -3005,14 +3028,14 @@ pub fn decode_sb(
                 else {
                     *by += h4a;
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                               lbs_var, if sub4 { p0_var } else { BlockSize::Invalid },
                               &mut child_dir)?;
                     if *by + h4b >= fi.bh { *by -= eh4 + h4a; }
                     else {
                         *by += h4b;
                         decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                                  pass, a, l, msac, cdf_m, part_w, part_w_idx, part_r, part_r_idx,
+                                  pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                                   lbs_edge, if sub4 { p0_2 } else { cbs },
                                   &mut child_dir)?;
                         *by -= 7 * eh4;
@@ -3029,7 +3052,7 @@ pub fn decode_sb(
         *cbx = *bx;
         *cby = *by;
         let _b = decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
-                 *sdp_cfl_disallowed, pass, a, l, msac, cdf_m,
+                 *sdp_cfl_disallowed, pass, a, l, msac, cdf_m, cdf_dmv,
                  BlockSize::Invalid, cbs_orig)?;
         *intra_region = 0;
     }
@@ -4220,6 +4243,7 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, false);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
         let mut part_w = Vec::new();
@@ -4238,7 +4262,7 @@ mod tests {
         let result = decode_sb(
             &fi, &mut bx, &mut by, &mut cbx, &mut cby,
             &mut intra_region, &mut sdp_cfl_disallowed, pass,
-            &mut a, &mut l, &mut msac, &mut cdf_m,
+            &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
             &mut part_w, &mut part_w_idx, part_r, &mut part_r_idx,
             BlockSize::Bs4x4, BlockSize::Bs4x4, &mut dir,
         );
@@ -4268,6 +4292,7 @@ mod tests {
         let data = vec![0xFF; 256];
         let mut msac = MsacContext::new(&data, false);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
         let mut part_w = Vec::new();
@@ -4286,7 +4311,7 @@ mod tests {
         let result = decode_sb(
             &fi, &mut bx, &mut by, &mut cbx, &mut cby,
             &mut intra_region, &mut sdp_cfl_disallowed, pass,
-            &mut a, &mut l, &mut msac, &mut cdf_m,
+            &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
             &mut part_w, &mut part_w_idx, part_r, &mut part_r_idx,
             BlockSize::Bs32x32, BlockSize::Bs32x32, &mut dir,
         );
@@ -4314,11 +4339,12 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
         assert_eq!(b.is_intra, 1);
         assert_eq!(b.skip_mode, 0);
@@ -4346,11 +4372,12 @@ mod tests {
         let data = vec![0x00; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
         // skip_mode decoded (block is 2x2=4 > 2, inter frame, skip_mode_enabled)
         // With all-zero data and default CDFs, skip_mode will be decoded
@@ -4376,11 +4403,12 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
         // seg_skip_mask bit 0 set, seg_id=0 → skip_txfm forced to 1
         assert_eq!(b.skip_txfm, 1);
@@ -4405,11 +4433,12 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
         assert_eq!(b.is_intra, 1);
         // y_mode should be a valid intra prediction mode (0-12)
@@ -4436,6 +4465,7 @@ mod tests {
         let data = vec![0xAA; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
         // Set neighbour midx to directional mode 17 (VERT_PRED centre)
@@ -4443,7 +4473,7 @@ mod tests {
         l.midx[9] = 17;
 
         let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
         assert_eq!(b.is_intra, 1);
         let y_mode = unsafe { b.data.intra.y_mode };
@@ -4469,11 +4499,12 @@ mod tests {
         let data = vec![0x55; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
         assert_eq!(b.is_intra, 1);
         // FSC decoded (8x8 block, idtx_intra=true)
@@ -4503,12 +4534,13 @@ mod tests {
         let data = vec![0xAA; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         // Decode with both luma and chroma
         let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs4x4).unwrap();
         assert_eq!(b.is_intra, 1);
         let uv_mode = unsafe { b.data.intra.uv_mode };
@@ -4539,11 +4571,12 @@ mod tests {
         let data = vec![0xFF; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs4x4, BlockSize::Bs4x4).unwrap();
         assert_eq!(b.is_intra, 1);
         let dpcm_chroma = unsafe { b.data.intra.dpcm[1] };
@@ -4575,12 +4608,13 @@ mod tests {
         let data = vec![0x40; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
         // Decode 8x8 block at (4,4); keyframe → always intra
         let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
                          BlockSize::Bs8x8, BlockSize::Bs4x4).unwrap();
         assert_eq!(b.is_intra, 1);
 
