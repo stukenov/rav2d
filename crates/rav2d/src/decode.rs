@@ -2684,11 +2684,20 @@ fn decode_b(
             }
             unsafe { b.data.inter.mv_prec = mv_prec as i8; }
 
-            // --- MV residuals ---
+            // --- MV residuals + sign derivation ---
             if final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8 {
                 let is_joint = final_inter_mode == CompInterPredMode::JointNewMv as u8
                     || final_inter_mode == CompInterPredMode::OpflJointNewMv as u8;
-                let (start, end) = if is_joint { (0, 1) } else { (0, 2) };
+                let (start, end) = if is_joint {
+                    let rd0 = fi.absrefdist[ref0 as usize] as i32;
+                    let rd1 = fi.absrefdist[ref1 as usize] as i32;
+                    let s = (rd0 < rd1) as usize;
+                    (s, s + 1)
+                } else {
+                    (0usize, 2usize)
+                };
+                let mut sum_mvd = 0i32;
+                let mut nnzc = 0i32;
                 for n in start..end {
                     if m_pair.get(n).copied() != Some(InterPredMode::NewMv as u8) { continue; }
                     let mv = if amvd_val != 0 {
@@ -2699,6 +2708,53 @@ fn decode_b(
                     unsafe {
                         b.data.inter.mv[n].c.x = mv.c.x;
                         b.data.inter.mv[n].c.y = mv.c.y;
+                    }
+                    if amvd_val == 0 {
+                        unsafe {
+                            sum_mvd += b.data.inter.mv[n].c.y + b.data.inter.mv[n].c.x;
+                            nnzc += (b.data.inter.mv[n].c.y != 0) as i32
+                                + (b.data.inter.mv[n].c.x != 0) as i32;
+                        }
+                    }
+                }
+
+                // sign derivation
+                if final_inter_mode != CompInterPredMode::NearMvNearMv as u8
+                    && final_inter_mode != CompInterPredMode::OpflNearMvNearMv as u8
+                {
+                    let bidir_newmv = final_inter_mode == CompInterPredMode::NewMvNewMv as u8
+                        || final_inter_mode == CompInterPredMode::OpflNewMvNewMv as u8
+                        || final_inter_mode == CompInterPredMode::JointNewMv as u8
+                        || final_inter_mode == CompInterPredMode::OpflJointNewMv as u8;
+                    let drl0 = unsafe { b.data.inter.drl_idx[0] };
+                    let drl1 = unsafe { b.data.inter.drl_idx[1] };
+                    if !fi.mvd_sign_derive || drl0 != 0 || drl1 != 0
+                        || nnzc < 3 * (end as i32 - start as i32) - 2
+                        || fi.allow_screen_content_tools
+                        || fi.mv_precision == 3 || mv_prec >= 5
+                        || !bidir_newmv
+                        || unsafe { b.data.inter.motion_mode } != MotionMode::Translation as u8
+                    {
+                        nnzc = 5; // disable sign derivation
+                    }
+                    sum_mvd >>= 6 - mv_prec;
+                    let mut nnzc2 = 0i32;
+                    for n in start..end {
+                        if m_pair.get(n).copied() != Some(InterPredMode::NewMv as u8) { continue; }
+                        let cur_y = unsafe { b.data.inter.mv[n].c.y };
+                        if cur_y != 0 {
+                            nnzc2 += 1;
+                            let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
+                                    else { msac.decode_bool_bypass() != 0 };
+                            if s { unsafe { b.data.inter.mv[n].c.y = -cur_y; } }
+                        }
+                        let cur_x = unsafe { b.data.inter.mv[n].c.x };
+                        if cur_x != 0 {
+                            nnzc2 += 1;
+                            let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
+                                    else { msac.decode_bool_bypass() != 0 };
+                            if s { unsafe { b.data.inter.mv[n].c.x = -cur_x; } }
+                        }
                     }
                 }
             }
