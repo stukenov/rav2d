@@ -11,7 +11,7 @@ use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
 use crate::levels::{
     Av2Block, BlockPartition, BlockSize, CFL_PRED, Mv, MvXY, RefPair,
-    TxPartition, N_BS_SIZES, INVALID_MV,
+    TxPartition, N_BS_SIZES, INVALID_MV, InterPredMode, MotionMode, TIP_FRAME,
 };
 use crate::pal::pal_idx_finish;
 use crate::msac::MsacContext;
@@ -1668,6 +1668,16 @@ pub struct SbFrameInfo {
     pub bawp: bool,
     pub txfm_switchable: bool,
     pub skip_mode_refs: RefPair,
+    pub n_ref_frames: u8,
+    pub warp_motion: bool,
+    pub motion_modes: u8,
+    pub adaptive_mvd: bool,
+    pub flex_mvres: bool,
+    pub mv_precision: u8,
+    pub mvd_sign_derive: bool,
+    pub tip_frame_mode: u8,
+    pub six_param_warp_delta: bool,
+    pub subpel_filter_mode: u8,
     // Tile bounds
     pub tile_col_start: i32,
     pub tile_col_end: i32,
@@ -1694,8 +1704,9 @@ fn decode_b(
 ) -> Result<Av2Block, ()> {
     let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
     debug_assert!(bs != BlockSize::Invalid);
+    let bs_idx = bs as u8 as usize;
 
-    let b_dim = &BLOCK_DIMENSIONS[bs as u8 as usize];
+    let b_dim = &BLOCK_DIMENSIONS[bs_idx];
     let bx4 = (bx & 63) as usize;
     let by4 = (by & 63) as usize;
     let bw4 = b_dim[0] as i32;
@@ -1715,12 +1726,16 @@ fn decode_b(
     // Pre-compute cross-SB boundary neighbour context values.
     // The C code uses nx[2] pointers into a/l; here we read out
     // the values we need before any mutable operations.
-    let (nx_skip_mode, nx_skip_txfm, nx_intra, nx_intrabc, nx_xoff, n_ctx) = {
+    let (nx_skip_mode, nx_skip_txfm, nx_intra, nx_intrabc, nx_xoff, n_ctx,
+         nx_ref0, nx_ref1, nx_amvd) = {
         let mut sm = [0u8; 2];
         let mut st = [0u8; 2];
         let mut intra_vals = [0u8; 2];
         let mut ibc_vals = [0u8; 2];
         let mut xoff = [0usize; 2];
+        let mut r0 = [0i8; 2];
+        let mut r1 = [0i8; 2];
+        let mut amvd_v = [0u8; 2];
         let mut idx = 0usize;
 
         if have_left && by + bh4 <= fi.tile_row_end {
@@ -1729,6 +1744,9 @@ fn decode_b(
             st[0] = l.skip_txfm[off];
             intra_vals[0] = if l.intra[off] != 0 && l.intrabc[off] == 0 { 1 } else { 0 };
             ibc_vals[0] = l.intrabc[off];
+            r0[0] = l.r#ref[0][off] as i8;
+            r1[0] = l.r#ref[1][off] as i8;
+            amvd_v[0] = l.amvd[off];
             xoff[0] = off;
             idx += 1;
         }
@@ -1738,6 +1756,9 @@ fn decode_b(
             st[idx] = a.skip_txfm[off];
             intra_vals[idx] = if a.intra[off] != 0 && a.intrabc[off] == 0 { 1 } else { 0 };
             ibc_vals[idx] = a.intrabc[off];
+            r0[idx] = a.r#ref[0][off] as i8;
+            r1[idx] = a.r#ref[1][off] as i8;
+            amvd_v[idx] = a.amvd[off];
             xoff[idx] = off;
             idx += 1;
         }
@@ -1746,6 +1767,9 @@ fn decode_b(
             st[idx] = l.skip_txfm[by4];
             intra_vals[idx] = if l.intra[by4] != 0 && l.intrabc[by4] == 0 { 1 } else { 0 };
             ibc_vals[idx] = l.intrabc[by4];
+            r0[idx] = l.r#ref[0][by4] as i8;
+            r1[idx] = l.r#ref[1][by4] as i8;
+            amvd_v[idx] = l.amvd[by4];
             xoff[idx] = by4;
             idx += 1;
         }
@@ -1754,17 +1778,21 @@ fn decode_b(
             st[idx] = a.skip_txfm[bx4];
             intra_vals[idx] = if a.intra[bx4] != 0 && a.intrabc[bx4] == 0 { 1 } else { 0 };
             ibc_vals[idx] = a.intrabc[bx4];
+            r0[idx] = a.r#ref[0][bx4] as i8;
+            r1[idx] = a.r#ref[1][bx4] as i8;
+            amvd_v[idx] = a.amvd[bx4];
             xoff[idx] = bx4;
             if idx == 0 {
                 sm[1] = sm[0];
                 st[1] = st[0];
                 intra_vals[1] = intra_vals[0];
                 ibc_vals[1] = ibc_vals[0];
+                r0[1] = r0[0]; r1[1] = r1[0]; amvd_v[1] = amvd_v[0];
                 xoff[1] = xoff[0];
             }
             if have_top { idx += 1; }
         }
-        (sm, st, intra_vals, ibc_vals, xoff, idx)
+        (sm, st, intra_vals, ibc_vals, xoff, idx, r0, r1, amvd_v)
     };
 
     // Segmentation (simplified: seg_id = 0 when not enabled)
@@ -1800,12 +1828,14 @@ fn decode_b(
     // These are used by intrabc, FSC, MRL, multi_mrl, DIP, morph_pred.
     // boff[i] = -1 means unavailable.
     let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
-    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx) = if has_luma {
+    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_boff) = if has_luma {
         let mut fsc = [0u8; 2];
         let mut mrl = [0u8; 2];
         let mut mmrl = [0u8; 2];
         let mut ibc = [0u8; 2];
         let mut mid = [0xffu8; 2];
+        let mut mvp = [0u8; 2];
+        let mut mm = [0u8; 2];
         let mut boff = [-1i32; 2];
         let mut idx = 0usize;
 
@@ -1813,29 +1843,34 @@ fn decode_b(
             let off = (by4 + bh4 as usize).saturating_sub(1);
             fsc[0] = l.fsc[off]; mrl[0] = l.mrl[off]; mmrl[0] = l.multi_mrl[off];
             ibc[0] = l.intrabc[off]; mid[0] = l.midx[off];
+            mvp[0] = l.mvprec[off]; mm[0] = l.motion_mode[off];
             boff[0] = off as i32; idx += 1;
         }
         if have_top_in_sb && bw4 == w4 {
             let off = (bx4 + bw4 as usize).saturating_sub(1);
             fsc[idx] = a.fsc[off]; mrl[idx] = a.mrl[off]; mmrl[idx] = a.multi_mrl[off];
             ibc[idx] = a.intrabc[off]; mid[idx] = a.midx[off];
+            mvp[idx] = a.mvprec[off]; mm[idx] = a.motion_mode[off];
             boff[idx] = off as i32; idx += 1;
         }
         if have_left && idx < 2 {
             fsc[idx] = l.fsc[by4]; mrl[idx] = l.mrl[by4]; mmrl[idx] = l.multi_mrl[by4];
             ibc[idx] = l.intrabc[by4]; mid[idx] = l.midx[by4];
+            mvp[idx] = l.mvprec[by4]; mm[idx] = l.motion_mode[by4];
             boff[idx] = by4 as i32; idx += 1;
         }
         if have_top_in_sb && idx < 2 {
             fsc[idx] = a.fsc[bx4]; mrl[idx] = a.mrl[bx4]; mmrl[idx] = a.multi_mrl[bx4];
             ibc[idx] = a.intrabc[bx4]; mid[idx] = a.midx[bx4];
+            mvp[idx] = a.mvprec[bx4]; mm[idx] = a.motion_mode[bx4];
             boff[idx] = bx4 as i32;
             if idx == 0 { fsc[1] = fsc[0]; mrl[1] = mrl[0]; mmrl[1] = mmrl[0];
-                          ibc[1] = ibc[0]; mid[1] = mid[0]; }
+                          ibc[1] = ibc[0]; mid[1] = mid[0];
+                          mvp[1] = mvp[0]; mm[1] = mm[0]; }
         }
-        (fsc, mrl, mmrl, ibc, mid)
+        (fsc, mrl, mmrl, ibc, mid, mvp, mm, boff)
     } else {
-        ([0u8; 2], [0u8; 2], [0u8; 2], [0u8; 2], [0xffu8; 2])
+        ([0u8; 2], [0u8; 2], [0u8; 2], [0u8; 2], [0xffu8; 2], [0u8; 2], [0u8; 2], [-1i32; 2])
     };
 
     // intrabc
@@ -2407,6 +2442,7 @@ fn decode_b(
     }
 
     // Inter mode path
+    let mut mvprec_def = 1u8;
     if b.is_intra == 0 && !intrabc {
         unsafe {
             b.data.inter.amvd = 0;
@@ -2431,11 +2467,375 @@ fn decode_b(
                 b.data.inter.inter_mode = 0; // NEARESTMV_NEARESTMV-like
             }
         } else {
-            // TODO: full inter mode decoding (TIP, comp, ref frames, inter_mode, MVs, etc.)
-            b.ref_pair = RefPair::default();
+            unsafe { b.data.inter.comp_type = 0; } // COMP_INTER_NONE
+            let is_tip = fi.tip_frame_mode == 2;
+
+            // --- single ref selection ---
+            let ref0: i8;
+            if (fi.seg_globalmv_mask | fi.seg_skip_mask) & (1 << b.seg_id) != 0 {
+                ref0 = 0;
+            } else if is_tip {
+                ref0 = TIP_FRAME as i8;
+            } else {
+                let n_refs = fi.n_ref_frames as i32;
+                let mut i = 0i32;
+                if n_refs > 1 {
+                    let mut cnt = [0u8; 9];
+                    if n_ctx > 0 {
+                        cnt[(nx_ref0[0] + 1) as usize] += 1;
+                        cnt[(nx_ref1[0] + 1) as usize] += 1;
+                        if n_ctx > 1 {
+                            cnt[(nx_ref0[1] + 1) as usize] += 1;
+                            cnt[(nx_ref1[1] + 1) as usize] += 1;
+                        }
+                    }
+                    let mut cnt_rem = (n_ctx as i32) * 2
+                        - cnt[0] as i32 - cnt[8] as i32;
+                    loop {
+                        let cnt_cur = cnt[i as usize + 1] as i32;
+                        cnt_rem -= cnt_cur;
+                        let ctx = (cnt_cur - cnt_rem + 1).clamp(0, 2) as usize;
+                        if msac.decode_bool_adapt(cdf_m.single_ref(ctx, i as usize)) != 0 {
+                            break;
+                        }
+                        i += 1;
+                        if i >= n_refs - 1 { break; }
+                    }
+                }
+                ref0 = i as i8;
+            }
             unsafe {
-                b.data.inter.comp_type = 0; // COMP_INTER_NONE
-                b.data.inter.inter_mode = 0;
+                b.ref_pair.r[0] = ref0;
+                b.ref_pair.r[1] = -1;
+            }
+
+            // --- sngl_ctx (simplified: count matching refs in neighbours) ---
+            let sngl_ctx = {
+                let mut c = 0usize;
+                if n_ctx > 0 && nx_ref0[0] == ref0 { c += 1; }
+                if n_ctx > 1 && nx_ref0[1] == ref0 { c += 1; }
+                c.min(4)
+            };
+
+            // --- inter_mode ---
+            let inter_mode: u8;
+            if (fi.seg_globalmv_mask | fi.seg_skip_mask) & (1 << b.seg_id) != 0 {
+                inter_mode = InterPredMode::GlobalMv as u8;
+            } else if is_tip {
+                inter_mode = InterPredMode::NearMv as u8
+                    + 2 * msac.decode_bool_adapt(cdf_m.tip_mode()) as u8;
+            } else {
+                let mut allow_warp = false;
+                if imin(bw4, bh4) >= 2 && fi.warp_motion {
+                    let warp_ctx = sngl_ctx.min(4);
+                    allow_warp = msac.decode_bool_adapt(cdf_m.warp(warp_ctx)) != 0;
+                }
+                if allow_warp {
+                    if !fi.force_integer_mv
+                        && msac.decode_bool_adapt(cdf_m.warp_newmv()) == 0
+                    {
+                        inter_mode = InterPredMode::WarpNewMv as u8;
+                    } else {
+                        inter_mode = InterPredMode::WarpMv as u8;
+                    }
+                } else {
+                    inter_mode = InterPredMode::NearMv as u8
+                        + msac.decode_symbol_adapt(cdf_m.inter_mode(sngl_ctx), 2) as u8;
+                }
+            };
+            unsafe { b.data.inter.inter_mode = inter_mode; }
+
+            // --- AMVD ---
+            if fi.adaptive_mvd && inter_mode == InterPredMode::NewMv as u8 {
+                let ctx = (nx_ref0[0] == ref0 && nx_amvd[0] != 0) as usize
+                    + (if n_ctx > 1 { nx_ref0[1] == ref0 && nx_amvd[1] != 0 } else { false }) as usize;
+                unsafe {
+                    b.data.inter.amvd = msac.decode_bool_adapt(cdf_m.amvd(4, ctx)) as i8;
+                }
+            }
+            let amvd_val = unsafe { b.data.inter.amvd };
+
+            // --- warp_ref_idx, warpmv_with_mvd, bawp defaults ---
+            unsafe {
+                b.data.inter.warp_ref_idx = 0;
+                b.data.inter.warpmv_with_mvd = 0;
+                b.data.inter.bawp[0] = 0;
+                b.data.inter.bawp[1] = 0;
+            }
+
+            if !is_tip && inter_mode <= InterPredMode::NewMv as u8 {
+                // --- BAWP (block-adaptive weighted prediction) ---
+                if fi.bawp
+                    && inter_mode != InterPredMode::GlobalMv as u8
+                    && imin(bw4, bh4) >= 2
+                {
+                    let bawp0 = msac.decode_bool_adapt(cdf_m.bawp(0)) as u8;
+                    if bawp0 != 0 {
+                        let ctx = if inter_mode == InterPredMode::NewMv as u8 {
+                            2 - amvd_val as usize
+                        } else { 0 };
+                        let explicit = msac.decode_bool_adapt(cdf_m.bawp_explicit(ctx)) as u8;
+                        let mut val = bawp0 + explicit;
+                        if val == 2 {
+                            val += msac.decode_bool_adapt(cdf_m.bawp_explicit_scale()) as u8;
+                            val |= (ctx as u8) << 2;
+                        }
+                        unsafe { b.data.inter.bawp[0] = val; }
+                        if has_chroma {
+                            unsafe {
+                                b.data.inter.bawp[1] =
+                                    msac.decode_bool_adapt(cdf_m.bawp(1)) as u8;
+                            }
+                        }
+                    }
+                }
+
+                // --- inter-intra (motion mode) ---
+                let bawp0 = unsafe { b.data.inter.bawp[0] };
+                if fi.motion_modes & (1 << MotionMode::InterIntra as u8) != 0
+                    && bawp0 == 0
+                    && bw4 * bh4 > 2
+                    && imax(bw4, bh4) <= 16
+                    && inter_mode >= InterPredMode::NearMv as u8
+                    && inter_mode <= InterPredMode::NewMv as u8
+                {
+                    let ctx = SIZE_GROUP[bs_idx] as usize;
+                    if msac.decode_bool_adapt(cdf_m.interintra(ctx)) != 0 {
+                        unsafe {
+                            b.data.inter.motion_mode = MotionMode::InterIntra as u8;
+                            b.data.inter.interintra_mode =
+                                msac.decode_symbol_adapt(cdf_m.interintra_mode(ctx), 3) as u8;
+                            b.data.inter.wedge_idx = -1;
+                        }
+                        if imin(bw4, bh4) > 1
+                            && msac.decode_bool_adapt(cdf_m.interintra_wedge()) != 0
+                        {
+                            // TODO: read_wedge_idx
+                            unsafe { b.data.inter.wedge_idx = 0; }
+                        }
+                    }
+                }
+            } else if !is_tip {
+                // --- warp motion mode for WARPMV/WARPNEWMV ---
+                unsafe { b.data.inter.motion_mode = MotionMode::WarpDelta as u8; }
+
+                if inter_mode == InterPredMode::WarpNewMv as u8 {
+                    // warp extend / causal decision
+                    let x1 = if nb_boff[0] == -1 { 0 } else { nb_motion_mode[0] };
+                    let x2 = if nb_boff[1] == -1 { 0 } else { nb_motion_mode[1] };
+                    let ext_ctx = (x1 >= MotionMode::WarpCausal as u8) as usize
+                        + (x2 >= MotionMode::WarpCausal as u8) as usize;
+                    let mm_flags = fi.motion_modes;
+                    if mm_flags & (1 << MotionMode::WarpExtend as u8) != 0
+                        && msac.decode_bool_adapt(cdf_m.warp_extend(ext_ctx)) != 0
+                    {
+                        unsafe { b.data.inter.motion_mode = MotionMode::WarpExtend as u8; }
+                    } else if (mm_flags & (3 << MotionMode::WarpCausal as u8))
+                        == (3 << MotionMode::WarpCausal as u8)
+                    {
+                        let cs_ctx = (ext_ctx > 0) as usize
+                            + (x1 == MotionMode::WarpCausal as u8) as usize
+                            + (x2 == MotionMode::WarpCausal as u8) as usize;
+                        if msac.decode_bool_adapt(cdf_m.warp_causal(cs_ctx)) != 0 {
+                            unsafe { b.data.inter.motion_mode = MotionMode::WarpCausal as u8; }
+                        }
+                    } else if mm_flags & (1 << MotionMode::WarpCausal as u8) != 0 {
+                        unsafe { b.data.inter.motion_mode = MotionMode::WarpCausal as u8; }
+                    }
+                }
+
+                // warp_ref_idx
+                let motion_mode_val = unsafe { b.data.inter.motion_mode };
+                if motion_mode_val == MotionMode::WarpDelta as u8 {
+                    let mut wri = 0u8;
+                    while wri < 3 {
+                        if msac.decode_bool_adapt(cdf_m.warp_ref_idx(wri as usize)) == 0 {
+                            break;
+                        }
+                        wri += 1;
+                    }
+                    unsafe { b.data.inter.warp_ref_idx = wri; }
+                }
+
+                // warpmv_with_mvd
+                let warp_ref_idx = unsafe { b.data.inter.warp_ref_idx };
+                if inter_mode == InterPredMode::WarpMv as u8 && warp_ref_idx < 2 {
+                    unsafe {
+                        b.data.inter.warpmv_with_mvd =
+                            msac.decode_bool_adapt(cdf_m.warpmv_with_mvd()) as u8;
+                    }
+                }
+            }
+
+            // --- DRL index ---
+            unsafe { b.data.inter.drl_idx[0] = 0; }
+            if inter_mode != InterPredMode::WarpMv as u8
+                && inter_mode != InterPredMode::GlobalMv as u8
+            {
+                let max_drl = fi.max_drl_bits as i32;
+                let mut n = 0i32;
+                let mut ctx = 0usize;
+                while n < max_drl {
+                    let cdf = if is_tip {
+                        cdf_m.tip_drl_idx(ctx)
+                    } else {
+                        cdf_m.drl_idx(ctx, sngl_ctx)
+                    };
+                    if msac.decode_bool_adapt(cdf) == 0 { break; }
+                    n += 1;
+                    if ctx < 2 { ctx += 1; }
+                }
+                unsafe { b.data.inter.drl_idx[0] = n as u8; }
+            }
+
+            // --- MV precision ---
+            let mut mv_prec = 3i32 + fi.mv_precision as i32;
+            if mv_prec > 3 && amvd_val == 0 && fi.flex_mvres
+                && (inter_mode == InterPredMode::NewMv as u8
+                    || inter_mode == InterPredMode::WarpNewMv as u8)
+            {
+                let mvprec1 = if nb_boff[0] == -1 { 0u8 } else { nb_mvprec[0] };
+                let mvprec2 = if nb_boff[1] == -1 { 0u8 } else { nb_mvprec[1] };
+                let ctx1 = ((mvprec1 & 1) + (mvprec2 & 1)) as usize;
+                if msac.decode_bool_adapt(cdf_m.mvprec_def(ctx1)) == 0 {
+                    let ctx2 = ((mvprec1 | mvprec2) >> 1) as usize;
+                    let idx = msac.decode_symbol_adapt(
+                        cdf_m.mvprec_rem(ctx2, (mv_prec - 4) as usize), 2) as usize;
+                    mv_prec = MV_PREC_TBL[(mv_prec == 6) as usize][idx] as i32;
+                    mvprec_def = 2;
+                }
+            }
+            unsafe { b.data.inter.mv_prec = mv_prec as i8; }
+
+            // --- MV residual ---
+            let warpmv_with_mvd = unsafe { b.data.inter.warpmv_with_mvd };
+            if inter_mode == InterPredMode::NewMv as u8
+                || inter_mode == InterPredMode::WarpNewMv as u8
+                || (inter_mode == InterPredMode::WarpMv as u8 && warpmv_with_mvd != 0)
+            {
+                let mv = if amvd_val != 0 {
+                    // TODO: read_amvd
+                    Mv::default()
+                } else {
+                    read_mv_full(msac, cdf_dmv, mv_prec)
+                };
+                unsafe {
+                    b.data.inter.mv[0].c.x = mv.c.x;
+                    b.data.inter.mv[0].c.y = mv.c.y;
+                }
+
+                // sign derivation
+                let nnzc;
+                let sum_mvd;
+                unsafe {
+                    if amvd_val != 0 {
+                        nnzc = 3;
+                        sum_mvd = 0;
+                    } else {
+                        let nx = (mv.c.x != 0) as i32 + (mv.c.y != 0) as i32;
+                        sum_mvd = (mv.c.x + mv.c.y) >> (6 - mv_prec);
+                        if inter_mode == InterPredMode::WarpMv as u8 || nx == 0
+                            || !fi.mvd_sign_derive
+                            || b.data.inter.motion_mode != MotionMode::Translation as u8
+                            || fi.allow_screen_content_tools
+                            || fi.mv_precision == 3 || mv_prec >= 5
+                        {
+                            nnzc = 3;
+                        } else {
+                            nnzc = nx;
+                        }
+                    }
+                }
+                let mut nnzc2 = 0i32;
+                let cur_mv_y = unsafe { b.data.inter.mv[0].c.y };
+                if cur_mv_y != 0 {
+                    nnzc2 += 1;
+                    let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
+                            else { msac.decode_bool_bypass() != 0 };
+                    if s { unsafe { b.data.inter.mv[0].c.y = -cur_mv_y; } }
+                }
+                let cur_mv_x = unsafe { b.data.inter.mv[0].c.x };
+                if cur_mv_x != 0 {
+                    nnzc2 += 1;
+                    let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
+                            else { msac.decode_bool_bypass() != 0 };
+                    if s { unsafe { b.data.inter.mv[0].c.x = -cur_mv_x; } }
+                }
+            }
+
+            // --- warp delta parameters ---
+            let motion_mode_val = unsafe { b.data.inter.motion_mode };
+            let warp_ref_idx = unsafe { b.data.inter.warp_ref_idx };
+            if inter_mode == InterPredMode::WarpNewMv as u8
+                && motion_mode_val == MotionMode::WarpDelta as u8
+                && ((fi.six_param_warp_delta && warp_ref_idx == 1) || warp_ref_idx == 0)
+            {
+                let prec = msac.decode_bool_adapt(cdf_m.warp_delta_prec(bs_idx));
+                let np = if fi.six_param_warp_delta && warp_ref_idx == 1 { 4 } else { 2 };
+                let step = 2i8 >> prec;
+                for n in 0..np {
+                    let ctx = if n == 0 || n == 3 { 1 } else { 0 };
+                    let mut val = msac.decode_symbol_adapt(
+                        cdf_m.warp_delta_param(0, ctx), 7) as i8;
+                    if val == 7 && prec != 0 {
+                        val += msac.decode_symbol_adapt(
+                            cdf_m.warp_delta_param(1, ctx), 7) as i8;
+                    }
+                    if val != 0 {
+                        if msac.decode_bool_adapt(cdf_m.warp_delta_sign()) != 0 {
+                            val = -val;
+                        }
+                        val *= step;
+                    }
+                    unsafe { b.data.inter.matrix[n] = val; }
+                }
+                if np == 2 {
+                    unsafe { b.data.inter.matrix[2] = -0x80; }
+                }
+            } else if motion_mode_val == MotionMode::WarpDelta as u8 {
+                unsafe {
+                    b.data.inter.matrix = [0; 4];
+                }
+            }
+
+            // --- warp_ii ---
+            unsafe { b.data.inter.warp_ii = 0; }
+            if inter_mode == InterPredMode::WarpMv as u8
+                && imin(bw4, bh4) >= 2 && imax(bw4, bh4) <= 16
+            {
+                let ctx = SIZE_GROUP[bs_idx] as usize;
+                if msac.decode_bool_adapt(cdf_m.warp_interintra(ctx)) != 0 {
+                    unsafe {
+                        b.data.inter.warp_ii = 1;
+                        b.data.inter.interintra_mode =
+                            msac.decode_symbol_adapt(cdf_m.interintra_mode(ctx), 3) as u8;
+                        b.data.inter.wedge_idx =
+                            if msac.decode_bool_adapt(cdf_m.interintra_wedge()) != 0 { 0 }
+                            else { -1 };
+                    }
+                }
+            }
+
+            // --- subpel filter ---
+            let has_subpel_filter = !is_tip
+                && inter_mode <= InterPredMode::NewMv as u8
+                && (inter_mode != InterPredMode::GlobalMv as u8 || imin(bw4, bh4) == 1);
+            if b.skip_mode != 0 || ref0 == TIP_FRAME as i8 {
+                unsafe { b.data.inter.filter = 2; } // SHARP
+            } else if fi.subpel_filter_mode == 4 {
+                // SWITCHABLE
+                if has_subpel_filter {
+                    // simplified filter context
+                    let fctx = 0usize;
+                    unsafe {
+                        b.data.inter.filter =
+                            msac.decode_symbol_adapt(cdf_m.filter(fctx), 2) as u8;
+                    }
+                } else {
+                    unsafe { b.data.inter.filter = 0; } // REGULAR
+                }
+            } else {
+                unsafe { b.data.inter.filter = fi.subpel_filter_mode; }
             }
         }
 
@@ -2474,7 +2874,7 @@ fn decode_b(
             a.r#ref[1][bx4..bx4 + aw].fill(refs[1]);
             a.motion_mode[bx4..bx4 + aw].fill(motion_mode);
             a.amvd[bx4..bx4 + aw].fill(amvd as u8);
-            a.mvprec[bx4..bx4 + aw].fill(1); // mvprec_def=1
+            a.mvprec[bx4..bx4 + aw].fill(mvprec_def);
 
             l.seg_pred[by4..by4 + lh].fill(0);
             l.skip_mode[by4..by4 + lh].fill(b.skip_mode);
@@ -2495,7 +2895,7 @@ fn decode_b(
             l.r#ref[1][by4..by4 + lh].fill(refs[1]);
             l.motion_mode[by4..by4 + lh].fill(motion_mode);
             l.amvd[by4..by4 + lh].fill(amvd as u8);
-            l.mvprec[by4..by4 + lh].fill(1);
+            l.mvprec[by4..by4 + lh].fill(mvprec_def);
         }
         if has_chroma {
             let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
@@ -4237,6 +4637,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4286,6 +4687,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
             sb_step: 16,
         };
@@ -4333,6 +4735,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4365,6 +4768,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4397,6 +4801,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 1,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4427,6 +4832,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4459,6 +4865,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4493,6 +4900,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4528,6 +4936,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4564,6 +4973,7 @@ mod tests {
             seg_globalmv_mask: 0, seg_skip_mask: 0,
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: true,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4602,6 +5012,7 @@ mod tests {
             skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
             has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
             allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
             tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
             sb_step: 16,
         };
@@ -4633,5 +5044,52 @@ mod tests {
         let uv_mode = unsafe { b.data.intra.uv_mode };
         assert_eq!(a.uvmode[4], uv_mode);
         assert_eq!(l.uvmode[4], uv_mode);
+    }
+
+    #[test]
+    fn test_decode_b_single_ref_inter() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: true,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0x80; 512];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut cdf_dmv = CdfMvContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
+                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+
+        // In inter frame, block may be inter or intra depending on bitstream
+        if b.is_intra == 0 {
+            let comp_type = unsafe { b.data.inter.comp_type };
+            let inter_mode = unsafe { b.data.inter.inter_mode };
+            let refs = unsafe { b.ref_pair.r };
+            // Non-skip-mode single ref: comp_type=0, ref[1]=-1
+            if b.skip_mode == 0 {
+                assert_eq!(comp_type, 0);
+                assert_eq!(refs[1], -1);
+                // inter_mode should be NEARMV(13), GLOBALMV(14), or NEWMV(15)
+                assert!(inter_mode >= 13 && inter_mode <= 17,
+                    "inter_mode {} out of range", inter_mode);
+            }
+            // Context writeback: intra=0 in both a and l
+            assert_eq!(a.intra[1], 0); // bx4=1 (bx=4, &63=4, /4=1)
+            assert_eq!(l.intra[1], 0);
+        }
     }
 }
