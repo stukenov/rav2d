@@ -2189,7 +2189,77 @@ fn decode_b(
         }
     }
 
-    // TODO: continue porting decode_b (inter mode, transform, context update)
+    // Intra context update
+    if b.is_intra != 0 && !intrabc && has_luma {
+        let y_mode = unsafe { b.data.intra.y_mode };
+        let mrl_idx = unsafe { b.data.intra.mrl_index };
+        let multi_mrl = unsafe { b.data.intra.multi_mrl };
+        let dip_val = unsafe { b.data.intra.dip };
+        let pal_sz_val = unsafe { b.data.intra.pal_sz };
+
+        let aw = 1usize << b_dim[2];
+        let lh = 1usize << b_dim[3];
+
+        // Above context (a)
+        a.fsc[bx4..bx4 + aw].fill(b.fsc);
+        a.mode[bx4..bx4 + aw].fill(y_mode);
+        a.midx[bx4..bx4 + aw].fill(luma_midx);
+        a.mrl[bx4..bx4 + aw].fill((mrl_idx != 0) as u8);
+        a.multi_mrl[bx4..bx4 + aw].fill(multi_mrl);
+        a.dip[bx4..bx4 + aw].fill((dip_val != 0) as u8);
+        a.pal_sz[bx4..bx4 + aw].fill(pal_sz_val);
+        a.seg_pred[bx4..bx4 + aw].fill(0);
+        a.skip_mode[bx4..bx4 + aw].fill(0);
+        a.intra[bx4..bx4 + aw].fill(1);
+        a.intrabc[bx4..bx4 + aw].fill(0);
+        a.morph_pred[bx4..bx4 + aw].fill(0);
+        a.skip_txfm[bx4..bx4 + aw].fill(b.skip_txfm);
+        if fi.is_inter_or_switch {
+            a.amvd[bx4..bx4 + aw].fill(0);
+            a.mvprec[bx4..bx4 + aw].fill(0);
+            a.motion_mode[bx4..bx4 + aw].fill(0);
+            a.comp_type[bx4..bx4 + aw].fill(0);
+            a.r#ref[0][bx4..bx4 + aw].fill(-1);
+            a.r#ref[1][bx4..bx4 + aw].fill(-1);
+        }
+
+        // Left context (l)
+        l.fsc[by4..by4 + lh].fill(b.fsc);
+        l.mode[by4..by4 + lh].fill(y_mode);
+        l.midx[by4..by4 + lh].fill(luma_midx);
+        l.mrl[by4..by4 + lh].fill((mrl_idx != 0) as u8);
+        l.multi_mrl[by4..by4 + lh].fill(multi_mrl);
+        l.dip[by4..by4 + lh].fill((dip_val != 0) as u8);
+        l.pal_sz[by4..by4 + lh].fill(pal_sz_val);
+        l.seg_pred[by4..by4 + lh].fill(0);
+        l.skip_mode[by4..by4 + lh].fill(0);
+        l.intra[by4..by4 + lh].fill(1);
+        l.intrabc[by4..by4 + lh].fill(0);
+        l.morph_pred[by4..by4 + lh].fill(0);
+        l.skip_txfm[by4..by4 + lh].fill(b.skip_txfm);
+        if fi.is_inter_or_switch {
+            l.amvd[by4..by4 + lh].fill(0);
+            l.mvprec[by4..by4 + lh].fill(0);
+            l.motion_mode[by4..by4 + lh].fill(0);
+            l.comp_type[by4..by4 + lh].fill(0);
+            l.r#ref[0][by4..by4 + lh].fill(-1);
+            l.r#ref[1][by4..by4 + lh].fill(-1);
+        }
+    }
+
+    // Chroma context update (uvmode)
+    if b.is_intra != 0 && !intrabc && has_chroma {
+        let uv_mode = unsafe { b.data.intra.uv_mode };
+        let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
+        let cbx4 = (cbx & 63) as usize;
+        let cby4 = (cby & 63) as usize;
+        let cbw4 = 1usize << cb_dim[2];
+        let cbh4 = 1usize << cb_dim[3];
+        a.uvmode[cbx4..cbx4 + cbw4].fill(uv_mode);
+        l.uvmode[cby4..cby4 + cbh4].fill(uv_mode);
+    }
+
+    // TODO: continue porting decode_b (inter mode, transform)
     Ok(b)
 }
 
@@ -4257,5 +4327,51 @@ mod tests {
             // DPCM chroma: uv_mode is VERT(1) or HOR(2)
             assert!(uv_mode == 1 || uv_mode == 2);
         }
+    }
+
+    #[test]
+    fn test_decode_b_context_writeback() {
+        let fi = SbFrameInfo {
+            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            root_bs: BlockSize::Bs64x64,
+            is_inter_or_switch: false,
+            sdp: false, ext_sdp: false, ext_partitions: false,
+            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
+            seg_enabled: false, seg_update_map: false, seg_temporal: false,
+            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
+            seg_globalmv_mask: 0, seg_skip_mask: 0,
+            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
+            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
+            allow_screen_content_tools: false, intra_dip: false,
+            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sb_step: 16,
+        };
+        let data = vec![0x40; 256];
+        let mut msac = MsacContext::new(&data, true);
+        let mut cdf_m = CdfModeContext::default();
+        let mut a = BlockContext::default();
+        let mut l = BlockContext::default();
+
+        // Decode 8x8 block at (4,4); keyframe → always intra
+        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
+                         &mut a, &mut l, &mut msac, &mut cdf_m,
+                         BlockSize::Bs8x8, BlockSize::Bs4x4).unwrap();
+        assert_eq!(b.is_intra, 1);
+
+        // Verify above context written for bw4=2 positions starting at bx4=4
+        assert_eq!(a.intra[4], 1);
+        assert_eq!(a.intra[5], 1);
+        assert_eq!(a.intrabc[4], 0);
+        assert_eq!(a.skip_mode[4], 0);
+
+        // Verify left context written for bh4=2 positions starting at by4=4
+        assert_eq!(l.intra[4], 1);
+        assert_eq!(l.intra[5], 1);
+        assert_eq!(l.intrabc[4], 0);
+
+        // Verify uvmode written for chroma (cbs=Bs4x4 → cbw4=cbh4=1 at cbx4=4, cby4=4)
+        let uv_mode = unsafe { b.data.intra.uv_mode };
+        assert_eq!(a.uvmode[4], uv_mode);
+        assert_eq!(l.uvmode[4], uv_mode);
     }
 }
