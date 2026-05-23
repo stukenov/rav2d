@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>rav2d — Memory-Safe AV2 Video Decoder in Rust</title>
+    <meta name="description" content="rav2d is a complete Rust port of dav2d, the AV2 video decoder. 47K+ lines of memory-safe Rust, 786 tests. Eliminates buffer overflows at compile time.">
+    <meta property="og:title" content="rav2d — Memory-Safe AV2 Video Decoder in Rust">
+    <meta property="og:description" content="Complete Rust port of dav2d (AV2 decoder). 47K lines, 786 tests. Memory safety for untrusted bitstream parsing.">
+    <meta property="og:url" content="https://stukenov.github.io/rav2d/">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="rav2d — Memory-Safe AV2 Video Decoder">
+    <meta name="twitter:description" content="Complete Rust port of dav2d. 47K lines, 786 tests. Buffer overflows eliminated at compile time.">
+    <style>
+        :root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --border: #30363d; --card: #161b22; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--fg); line-height: 1.6; }
+        .container { max-width: 800px; margin: 0 auto; padding: 2rem 1rem; }
+        h1 { font-size: 2.5rem; margin-bottom: 0.5rem; color: #f0f6fc; }
+        h1 span { color: var(--accent); }
+        .tagline { font-size: 1.2rem; color: #8b949e; margin-bottom: 2rem; }
+        .stats { display: flex; gap: 2rem; margin: 2rem 0; flex-wrap: wrap; }
+        .stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.5rem; }
+        .stat-value { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+        .stat-label { font-size: 0.85rem; color: #8b949e; }
+        h2 { font-size: 1.4rem; margin: 2rem 0 1rem; color: #f0f6fc; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+        th, td { padding: 0.6rem 1rem; text-align: left; border-bottom: 1px solid var(--border); }
+        th { color: #8b949e; font-weight: 600; font-size: 0.85rem; text-transform: uppercase; }
+        td:first-child { font-weight: 500; }
+        .safe { color: #3fb950; }
+        .unsafe { color: #f85149; }
+        .cta { display: inline-block; background: var(--accent); color: #0d1117; padding: 0.8rem 2rem; border-radius: 6px; text-decoration: none; font-weight: 600; margin: 1.5rem 0; }
+        .cta:hover { opacity: 0.9; }
+        .modules { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin: 1rem 0; }
+        .module { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 1rem; font-size: 0.9rem; }
+        .module::before { content: '✓ '; color: #3fb950; }
+        code { background: var(--card); padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.9rem; }
+        footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #8b949e; font-size: 0.85rem; }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1><span>rav2d</span></h1>
+        <p class="tagline">Memory-safe AV2 video decoder — complete Rust port of dav2d</p>
+
+        <div class="stats">
+            <div class="stat"><div class="stat-value">47K+</div><div class="stat-label">Lines of Rust</div></div>
+            <div class="stat"><div class="stat-value">786</div><div class="stat-label">Tests Passing</div></div>
+            <div class="stat"><div class="stat-value">47</div><div class="stat-label">Source Files</div></div>
+            <div class="stat"><div class="stat-value">100%</div><div class="stat-label">C Logic Ported</div></div>
+        </div>
+
+        <a href="https://github.com/stukenov/rav2d" class="cta">View on GitHub →</a>
+
+        <h2>Why Rust for Video Decoding?</h2>
+        <p>Video decoders parse untrusted bitstreams from the internet — they are a prime target for memory corruption exploits. Historical CVEs in video decoders (libvpx, dav1d, ffmpeg) are overwhelmingly buffer overflows, use-after-free, and integer overflows in C parsing code.</p>
+        <p style="margin-top: 1rem;"><strong>rav2d eliminates these classes of bugs at compile time</strong> while keeping the same hand-optimized assembly for actual pixel processing.</p>
+
+        <table>
+            <tr><th>Component</th><th>dav2d (C)</th><th>rav2d (Rust)</th></tr>
+            <tr><td>Bitstream parsing</td><td class="unsafe">C (unsafe)</td><td class="safe">Rust (bounds-checked)</td></tr>
+            <tr><td>Decode orchestration</td><td class="unsafe">C (unsafe)</td><td class="safe">Rust (safe, typed)</td></tr>
+            <tr><td>Filter pipeline</td><td class="unsafe">C (unsafe)</td><td class="safe">Rust (bounds-checked)</td></tr>
+            <tr><td>DSP kernels</td><td>Assembly</td><td>Assembly (shared via FFI)</td></tr>
+            <tr><td>Type safety</td><td class="unsafe">Weak (enums as ints)</td><td class="safe">Strong (enum variants)</td></tr>
+        </table>
+
+        <h2>What's Ported</h2>
+        <div class="modules">
+            <div class="module">OBU parsing</div>
+            <div class="module">Entropy decoding (MSAC)</div>
+            <div class="module">Block decode (intra/inter)</div>
+            <div class="module">Deblocking filter</div>
+            <div class="module">CDEF</div>
+            <div class="module">Loop restoration</div>
+            <div class="module">Film grain synthesis</div>
+            <div class="module">Motion compensation</div>
+            <div class="module">Inverse transforms</div>
+            <div class="module">Reference management</div>
+            <div class="module">Thread task scheduling</div>
+            <div class="module">Compound prediction</div>
+        </div>
+
+        <h2>Approach</h2>
+        <p>Following the proven <a href="https://github.com/memorysafety/rav1d">rav1d</a> strategy (AV1 Rust port, funded by Prossimo/ISRG):</p>
+        <ol style="margin: 1rem 0 0 1.5rem;">
+            <li>FFI bindings to dav2d's hand-optimized assembly (shared, not rewritten)</li>
+            <li>Progressive C-to-Rust port of the core decoder</li>
+            <li>Conformance testing at every step against dav2d test data</li>
+        </ol>
+
+        <h2>Quick Start</h2>
+        <pre style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0;"><code># Build dav2d first
+cd dav2d && mkdir build && cd build
+meson setup .. && ninja
+
+# Build & test rav2d
+cd ../..
+cargo build
+DYLD_LIBRARY_PATH=dav2d/build/src cargo test -p rav2d</code></pre>
+
+        <h2>Related Projects</h2>
+        <ul style="margin: 1rem 0 0 1.5rem;">
+            <li><a href="https://github.com/memorysafety/rav1d">rav1d</a> — Rust port of dav1d (AV1), funded by Prossimo/ISRG</li>
+            <li><a href="https://code.videolan.org/videolan/dav2d">dav2d</a> — The C original (AV2)</li>
+            <li><a href="https://code.videolan.org/videolan/dav1d">dav1d</a> — The AV1 predecessor</li>
+        </ul>
+
+        <footer>
+            <p>BSD 2-Clause License · <a href="https://github.com/stukenov/rav2d">GitHub</a></p>
+        </footer>
+    </div>
+</body>
+</html>
