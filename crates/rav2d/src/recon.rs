@@ -1,6 +1,6 @@
 use crate::intops::{apply_sign, iclip, imax, imin, umin, ulog2};
 use crate::headers::PixelLayout;
-use crate::levels::{IntraPredMode, Mv, RefPair, N_BS_SIZES, txtp};
+use crate::levels::{Av2Block, BlockSize, IntraPredMode, Mv, RefPair, N_BS_SIZES, txtp};
 use crate::refmvs::{self, TemporalBlock, INVALID_TRAJ};
 use crate::mc::OpflRegressionData;
 use crate::msac::MsacContext;
@@ -1256,6 +1256,737 @@ pub fn decode_coefs(
 
     *res_ctx = (cul_level.min(63) | dc_sign_level) as u8;
     eob
+}
+
+pub struct McParams {
+    pub bw4: i32,
+    pub bh4: i32,
+    pub bx: i32,
+    pub by: i32,
+    pub pl: usize,
+    pub mvx: i32,
+    pub mvy: i32,
+    pub filter: usize,
+    pub ss_hor: i32,
+    pub ss_ver: i32,
+    pub left: i32,
+    pub right: i32,
+    pub top: i32,
+    pub bottom: i32,
+}
+
+pub fn mc_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    ref_data: &[u8],
+    ref_stride: usize,
+    ref_w: i32,
+    ref_h: i32,
+    cur_w: i32,
+    cur_h: i32,
+    p: &McParams,
+    emu_edge_buf: &mut [u8],
+    is_compound: bool,
+    dst16: Option<&mut [i16]>,
+) {
+    let h_mul = 4 >> p.ss_hor;
+    let v_mul = 4 >> p.ss_ver;
+
+    if ref_w == cur_w && ref_h == cur_h {
+        let mx = p.mvx & (15 >> (p.ss_hor == 0) as i32);
+        let my = p.mvy & (15 >> (p.ss_ver == 0) as i32);
+        let dx = p.bx * h_mul + (p.mvx >> (3 + p.ss_hor));
+        let dy = p.by * v_mul + (p.mvy >> (3 + p.ss_ver));
+
+        let need_emu = dx - (mx != 0) as i32 * 3 < p.left
+            || dy - (my != 0) as i32 * 3 < p.top
+            || dx + p.bw4 * h_mul + (mx != 0) as i32 * 4 > p.right
+            || dy + p.bh4 * v_mul + (my != 0) as i32 * 4 > p.bottom;
+
+        let (src, src_stride) = if need_emu {
+            let emu_w = (p.bw4 * h_mul + (mx != 0) as i32 * 7) as usize;
+            let emu_h = (p.bh4 * v_mul + (my != 0) as i32 * 7) as usize;
+            let emu_stride = 192usize;
+            emu_edge(
+                emu_edge_buf, emu_stride,
+                ref_data, ref_stride,
+                emu_w, emu_h,
+                (p.right - p.left) as usize, (p.bottom - p.top) as usize,
+                dx - (mx != 0) as i32 * 3 - p.left,
+                dy - (my != 0) as i32 * 3 - p.top,
+            );
+            let ref_off = emu_stride * (my != 0) as usize * 3 + (mx != 0) as usize * 3;
+            (ref_off, emu_stride)
+        } else {
+            let ref_off = (dy as usize) * ref_stride + dx as usize;
+            (ref_off, ref_stride)
+        };
+
+        let w = p.bw4 * h_mul;
+        let h = p.bh4 * v_mul;
+
+        if !is_compound {
+            mc_subpel_8bpc(
+                dst, dst_stride,
+                if need_emu { emu_edge_buf } else { ref_data },
+                src, src_stride,
+                w as usize, h as usize,
+                mx << (p.ss_hor == 0) as i32,
+                my << (p.ss_ver == 0) as i32,
+                p.filter,
+            );
+        } else if let Some(d16) = dst16 {
+            mct_subpel_8bpc(
+                d16, dst_stride,
+                if need_emu { emu_edge_buf } else { ref_data },
+                src, src_stride,
+                w as usize, h as usize,
+                mx << (p.ss_hor == 0) as i32,
+                my << (p.ss_ver == 0) as i32,
+                p.filter,
+            );
+        }
+    }
+}
+
+fn emu_edge(
+    dst: &mut [u8], dst_stride: usize,
+    src: &[u8], src_stride: usize,
+    bw: usize, bh: usize,
+    iw: usize, ih: usize,
+    x: i32, y: i32,
+) {
+    let mut src_y = y.max(0) as usize;
+    for dst_y in 0..bh {
+        let actual_y = ((y + dst_y as i32).max(0) as usize).min(ih.saturating_sub(1));
+        let dst_row = dst_y * dst_stride;
+        let src_row = actual_y * src_stride;
+        for dst_x in 0..bw {
+            let actual_x = ((x + dst_x as i32).max(0) as usize).min(iw.saturating_sub(1));
+            dst[dst_row + dst_x] = if src_row + actual_x < src.len() {
+                src[src_row + actual_x]
+            } else {
+                128
+            };
+        }
+    }
+}
+
+fn mc_subpel_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    src: &[u8], src_off: usize, src_stride: usize,
+    w: usize, h: usize,
+    mx: i32, my: i32,
+    filter: usize,
+) {
+    if mx == 0 && my == 0 {
+        for y in 0..h {
+            let d = y * dst_stride;
+            let s = src_off + y * src_stride;
+            for x in 0..w {
+                if s + x < src.len() && d + x < dst.len() {
+                    dst[d + x] = src[s + x];
+                }
+            }
+        }
+        return;
+    }
+
+    let filter_taps = get_subpel_filter(filter, mx, my);
+
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0i32;
+            for ky in 0..8i32 {
+                for kx in 0..8i32 {
+                    let sy = (y as i32 + ky - 3) as usize;
+                    let sx = (x as i32 + kx - 3) as usize;
+                    let idx = src_off + sy * src_stride + sx;
+                    let pix = if idx < src.len() { src[idx] as i32 } else { 128 };
+                    sum += pix * filter_taps[ky as usize] as i32 * filter_taps[kx as usize] as i32 / 128;
+                }
+            }
+            let d = y * dst_stride + x;
+            if d < dst.len() {
+                dst[d] = iclip((sum + (1 << 13)) >> 14, 0, 255) as u8;
+            }
+        }
+    }
+}
+
+fn mct_subpel_8bpc(
+    dst: &mut [i16], dst_stride: usize,
+    src: &[u8], src_off: usize, src_stride: usize,
+    w: usize, h: usize,
+    mx: i32, my: i32,
+    filter: usize,
+) {
+    let filter_taps = get_subpel_filter(filter, mx, my);
+
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0i32;
+            for ky in 0..8i32 {
+                for kx in 0..8i32 {
+                    let sy = (y as i32 + ky - 3) as usize;
+                    let sx = (x as i32 + kx - 3) as usize;
+                    let idx = src_off + sy * src_stride + sx;
+                    let pix = if idx < src.len() { src[idx] as i32 } else { 128 };
+                    sum += pix * filter_taps[ky as usize] as i32 * filter_taps[kx as usize] as i32 / 128;
+                }
+            }
+            let d = y * dst_stride + x;
+            if d < dst.len() {
+                dst[d] = ((sum + (1 << 6)) >> 7) as i16;
+            }
+        }
+    }
+}
+
+fn get_subpel_filter(filter: usize, mx: i32, my: i32) -> [i16; 8] {
+    static BILINEAR_FILTER: [[i16; 8]; 16] = [
+        [0, 0, 0, 128, 0, 0, 0, 0],
+        [0, 0, 0, 120, 8, 0, 0, 0],
+        [0, 0, 0, 112, 16, 0, 0, 0],
+        [0, 0, 0, 104, 24, 0, 0, 0],
+        [0, 0, 0, 96, 32, 0, 0, 0],
+        [0, 0, 0, 88, 40, 0, 0, 0],
+        [0, 0, 0, 80, 48, 0, 0, 0],
+        [0, 0, 0, 72, 56, 0, 0, 0],
+        [0, 0, 0, 64, 64, 0, 0, 0],
+        [0, 0, 0, 56, 72, 0, 0, 0],
+        [0, 0, 0, 48, 80, 0, 0, 0],
+        [0, 0, 0, 40, 88, 0, 0, 0],
+        [0, 0, 0, 32, 96, 0, 0, 0],
+        [0, 0, 0, 24, 104, 0, 0, 0],
+        [0, 0, 0, 16, 112, 0, 0, 0],
+        [0, 0, 0, 8, 120, 0, 0, 0],
+    ];
+
+    static REGULAR_FILTER: [[i16; 8]; 16] = [
+        [0, 0, 0, 128, 0, 0, 0, 0],
+        [0, 1, -3, 126, 5, -1, 0, 0],
+        [0, 1, -5, 123, 11, -3, 1, 0],
+        [0, 2, -8, 119, 18, -5, 2, 0],
+        [0, 2, -10, 114, 25, -7, 3, 1],
+        [-1, 3, -12, 108, 32, -8, 3, 3],
+        [-1, 3, -13, 101, 40, -10, 4, 4],
+        [-1, 4, -15, 94, 48, -11, 4, 5],
+        [-1, 4, -16, 86, 56, -12, 4, 7],
+        [-1, 4, -16, 78, 64, -12, 4, 7],
+        [-1, 4, -15, 69, 71, -12, 4, 8],
+        [-1, 4, -14, 60, 78, -11, 3, 9],
+        [-1, 3, -12, 51, 85, -10, 3, 9],
+        [-1, 3, -10, 42, 90, -8, 2, 10],
+        [-1, 2, -8, 33, 95, -6, 1, 12],
+        [0, 2, -6, 24, 99, -4, 1, 12],
+    ];
+
+    let idx = if my != 0 { my } else { mx } as usize;
+    if filter == 0 {
+        REGULAR_FILTER[idx & 15]
+    } else {
+        BILINEAR_FILTER[idx & 15]
+    }
+}
+
+pub fn warp_affine_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    ref_data: &[u8], ref_stride: usize,
+    ref_w: i32, ref_h: i32,
+    bw4: i32, bh4: i32,
+    mat: &[i32; 6],
+    pl: usize,
+    ss_hor: i32, ss_ver: i32,
+    emu_edge_buf: &mut [u8],
+) {
+    let h_mul = 4 >> ss_hor;
+    let v_mul = 4 >> ss_ver;
+    let w = bw4 * h_mul;
+    let h = bh4 * v_mul;
+
+    for y in 0..h {
+        for x in 0..w {
+            let src_x = mat[0] * x + mat[1] * y + mat[2];
+            let src_y = mat[3] * x + mat[4] * y + mat[5];
+
+            let ix = src_x >> 16;
+            let iy = src_y >> 16;
+
+            let cx = ix.max(0).min(ref_w - 1) as usize;
+            let cy = iy.max(0).min(ref_h - 1) as usize;
+
+            let d = y as usize * dst_stride + x as usize;
+            let s = cy * ref_stride + cx;
+            if d < dst.len() && s < ref_data.len() {
+                dst[d] = ref_data[s];
+            }
+        }
+    }
+}
+
+pub struct BawpContext {
+    pub alpha: i32,
+    pub beta: i32,
+}
+
+pub fn bawp_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    src: &[u8], src_stride: usize,
+    w: usize, h: usize,
+    ctx: &BawpContext,
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let d = y * dst_stride + x;
+            let s = y * src_stride + x;
+            if d < dst.len() && s < src.len() {
+                let p = dst[d] as i32;
+                let q = src[s] as i32;
+                let alpha = ctx.alpha;
+                let beta = ctx.beta;
+                let val = (alpha * p + beta * q + (1 << 5)) >> 6;
+                dst[d] = iclip(val, 0, 255) as u8;
+            }
+        }
+    }
+}
+
+pub fn iiblend_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    inter_pred: &[u8], inter_stride: usize,
+    intra_pred: &[u8], intra_stride: usize,
+    w: usize, h: usize,
+    mask: &[u8],
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let d = y * dst_stride + x;
+            let ip = y * inter_stride + x;
+            let ia = y * intra_stride + x;
+            if d < dst.len() && ip < inter_pred.len() && ia < intra_pred.len() {
+                let m_idx = y * w + x;
+                let m = if m_idx < mask.len() { mask[m_idx] as i32 } else { 32 };
+                let val = (m * intra_pred[ia] as i32 + (64 - m) * inter_pred[ip] as i32 + 32) >> 6;
+                dst[d] = iclip(val, 0, 255) as u8;
+            }
+        }
+    }
+}
+
+pub fn avg_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    tmp1: &[i16], tmp2: &[i16],
+    w: usize, h: usize,
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let d = y * dst_stride + x;
+            let s = y * w + x;
+            if d < dst.len() && s < tmp1.len() && s < tmp2.len() {
+                let val = ((tmp1[s] as i32 + tmp2[s] as i32 + (1 << 4)) >> 5).max(0).min(255);
+                dst[d] = val as u8;
+            }
+        }
+    }
+}
+
+pub fn w_avg_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    tmp1: &[i16], tmp2: &[i16],
+    w: usize, h: usize,
+    weight: i32,
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let d = y * dst_stride + x;
+            let s = y * w + x;
+            if d < dst.len() && s < tmp1.len() && s < tmp2.len() {
+                let val = (tmp1[s] as i32 * weight + tmp2[s] as i32 * (16 - weight)
+                    + (1 << 8)) >> 9;
+                dst[d] = iclip(val, 0, 255) as u8;
+            }
+        }
+    }
+}
+
+pub fn mask_blend_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    tmp1: &[i16], tmp2: &[i16],
+    w: usize, h: usize,
+    mask: &[u8],
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let d = y * dst_stride + x;
+            let s = y * w + x;
+            if d < dst.len() && s < tmp1.len() && s < tmp2.len() && s < mask.len() {
+                let m = mask[s] as i32;
+                let val = (tmp1[s] as i32 * m + tmp2[s] as i32 * (64 - m)
+                    + (1 << 9)) >> 10;
+                dst[d] = iclip(val, 0, 255) as u8;
+            }
+        }
+    }
+}
+
+pub fn opfl_mv_refinement(
+    tmp1: &[i16], tmp2: &[i16],
+    w: usize, h: usize,
+    dx: &mut [i32], dy: &mut [i32],
+    n_blocks: usize,
+) {
+    let blk_w = w / n_blocks.max(1);
+    let blk_h = h;
+    for blk in 0..n_blocks {
+        let off_x = blk * blk_w;
+        let mut sum_dx = 0i64;
+        let mut sum_dy = 0i64;
+        let mut sum_d = 0i64;
+
+        for y in 1..blk_h.saturating_sub(1) {
+            for x in 1..blk_w.saturating_sub(1) {
+                let px = off_x + x;
+                let idx = y * w + px;
+                if idx < tmp1.len() && idx < tmp2.len() {
+                    let diff = tmp1[idx] as i64 - tmp2[idx] as i64;
+                    let gx = (tmp1[idx + 1] as i64 - tmp1[idx - 1] as i64
+                        + tmp2[idx + 1] as i64 - tmp2[idx - 1] as i64) >> 1;
+                    let gy = (tmp1[idx + w] as i64 - tmp1[idx - w] as i64
+                        + tmp2[idx + w] as i64 - tmp2[idx - w] as i64) >> 1;
+                    sum_dx += gx * diff;
+                    sum_dy += gy * diff;
+                    sum_d += gx * gx + gy * gy;
+                }
+            }
+        }
+
+        if sum_d != 0 {
+            dx[blk] = ((-sum_dx * 64) / sum_d) as i32;
+            dy[blk] = ((-sum_dy * 64) / sum_d) as i32;
+        } else {
+            dx[blk] = 0;
+            dy[blk] = 0;
+        }
+    }
+}
+
+pub struct ReconLumaTxParams {
+    pub tx: usize,
+    pub bx4: i32,
+    pub by4: i32,
+    pub tw: i32,
+    pub th: i32,
+}
+
+pub fn recon_b_luma_tx_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    cf: &[i32],
+    eob: i32,
+    txtp: u16,
+    tx: usize,
+    qm: Option<&[u8]>,
+    dq: &[u32; 2],
+    bitdepth_max: i32,
+    p: &ReconLumaTxParams,
+) {
+    if eob < 0 {
+        return;
+    }
+
+    let tw = p.tw as usize;
+    let th = p.th as usize;
+
+    if eob > 0 || cf[0] != 0 {
+        let mut dequant = vec![0i32; tw * th];
+        dequant_coeffs(cf, &mut dequant, tw, th, eob as usize, dq, qm, bitdepth_max);
+        itxfm_add_8bpc(dst, dst_stride, &dequant, tw, th, txtp, bitdepth_max);
+    }
+}
+
+fn dequant_coeffs(
+    cf: &[i32], out: &mut [i32],
+    w: usize, h: usize,
+    eob: usize,
+    dq: &[u32; 2],
+    qm: Option<&[u8]>,
+    bitdepth_max: i32,
+) {
+    let dc_q = dq[0] as i32;
+    let ac_q = dq[1] as i32;
+
+    for i in 0..=eob.min(w * h - 1) {
+        let q = if i == 0 { dc_q } else { ac_q };
+        let qm_val = qm.map_or(1 << 5, |m| {
+            if i < m.len() { m[i] as i32 } else { 1 << 5 }
+        });
+        let val = (cf[i] * q * qm_val + (1 << 4)) >> 5;
+        out[i] = iclip(val, -(bitdepth_max + 1) * (1 << 6), bitdepth_max * (1 << 6));
+    }
+}
+
+fn itxfm_add_8bpc(
+    dst: &mut [u8], dst_stride: usize,
+    cf: &[i32],
+    w: usize, h: usize,
+    _txtp: u16,
+    _bitdepth_max: i32,
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let d = y * dst_stride + x;
+            let c = y * w + x;
+            if d < dst.len() && c < cf.len() {
+                let val = dst[d] as i32 + ((cf[c] + (1 << 3)) >> 4);
+                dst[d] = iclip(val, 0, 255) as u8;
+            }
+        }
+    }
+}
+
+pub struct ReadCoefBlocksParams {
+    pub has_luma: bool,
+    pub has_chroma: bool,
+    pub skip_txfm: bool,
+    pub tx_part: u8,
+    pub bw4: i32,
+    pub bh4: i32,
+    pub ss_hor: i32,
+    pub ss_ver: i32,
+}
+
+pub fn read_coef_blocks(
+    msac: &mut MsacContext,
+    coef_cdf: &mut CdfCoefContext,
+    mode_cdf: &mut CdfModeContext,
+    cf_buf: &mut [i32],
+    cbi_out: &mut [(i16, u16)],
+    a_coef: &mut [u8],
+    l_coef: &mut [u8],
+    rp: &ReadCoefBlocksParams,
+    decode_p: &DecodeCoefParams,
+) -> i32 {
+    if rp.skip_txfm {
+        return 0;
+    }
+
+    let mut txtp = 0u16;
+    let mut res_ctx = 0u8;
+    let eob = decode_coefs(
+        msac, coef_cdf, mode_cdf,
+        a_coef, l_coef,
+        decode_p, cf_buf, &mut txtp, &mut res_ctx,
+    );
+
+    if eob == i32::MIN {
+        return -1;
+    }
+
+    if !cbi_out.is_empty() {
+        cbi_out[0] = (eob as i16, txtp);
+    }
+
+    0
+}
+
+pub enum PredictionMode {
+    Intra,
+    Inter,
+    IntraBC,
+    Compound,
+    Palette,
+}
+
+pub struct ReconBlockContext {
+    pub bx: i32,
+    pub by: i32,
+    pub bw4: i32,
+    pub bh4: i32,
+    pub bs: BlockSize,
+    pub intra: bool,
+    pub intrabc: bool,
+    pub skip_txfm: bool,
+    pub y_mode: u8,
+    pub uv_mode: u8,
+    pub comp_type: u8,
+    pub ref_idx: [i8; 2],
+    pub motion_mode: u8,
+    pub fsc: u8,
+}
+
+pub fn recon_b_8bpc(
+    dst_y: &mut [u8], y_stride: usize,
+    dst_u: &mut [u8], dst_v: &mut [u8], uv_stride: usize,
+    ctx: &ReconBlockContext,
+    cf: &[i32],
+    cbi: &[(i16, u16)],
+    ref_planes: &[&[u8]; 7],
+    ref_strides: &[usize; 7],
+    ref_w: &[i32; 7],
+    ref_h: &[i32; 7],
+    cur_w: i32, cur_h: i32,
+    dq: &[u32; 2],
+    ss_hor: i32, ss_ver: i32,
+    bitdepth_max: i32,
+) {
+    let w = ctx.bw4 * 4;
+    let h = ctx.bh4 * 4;
+    let cw = w >> ss_hor;
+    let ch = h >> ss_ver;
+
+    if ctx.skip_txfm {
+        return;
+    }
+
+    if ctx.intra && !ctx.intrabc {
+        if !cbi.is_empty() && cbi[0].0 >= 0 {
+            let tx_w = w as usize;
+            let tx_h = h as usize;
+            let txtp = cbi[0].1;
+            let eob = cbi[0].0 as i32;
+
+            let off = ctx.by as usize * y_stride + ctx.bx as usize * 4;
+            if off < dst_y.len() {
+                let params = ReconLumaTxParams {
+                    tx: 0,
+                    bx4: ctx.bx,
+                    by4: ctx.by,
+                    tw: w,
+                    th: h,
+                };
+                recon_b_luma_tx_8bpc(
+                    &mut dst_y[off..], y_stride,
+                    cf, eob, txtp, 0, None, dq, bitdepth_max, &params,
+                );
+            }
+        }
+        return;
+    }
+
+    if ctx.intrabc {
+        return;
+    }
+
+    let ref0 = ctx.ref_idx[0] as usize;
+    if ctx.comp_type == 0 {
+        let mut emu_buf = vec![0u8; 192 * 192];
+        let mc_params = McParams {
+            bw4: ctx.bw4,
+            bh4: ctx.bh4,
+            bx: ctx.bx,
+            by: ctx.by,
+            pl: 0,
+            mvx: 0,
+            mvy: 0,
+            filter: 0,
+            ss_hor: 0,
+            ss_ver: 0,
+            left: 0,
+            right: cur_w * 4,
+            top: 0,
+            bottom: cur_h * 4,
+        };
+
+        mc_8bpc(
+            &mut dst_y[ctx.by as usize * y_stride + ctx.bx as usize * 4..],
+            y_stride,
+            ref_planes[ref0],
+            ref_strides[ref0],
+            ref_w[ref0], ref_h[ref0],
+            cur_w, cur_h,
+            &mc_params,
+            &mut emu_buf,
+            false,
+            None,
+        );
+
+        if !cbi.is_empty() && cbi[0].0 > 0 {
+            let off = ctx.by as usize * y_stride + ctx.bx as usize * 4;
+            if off < dst_y.len() {
+                let params = ReconLumaTxParams {
+                    tx: 0,
+                    bx4: ctx.bx,
+                    by4: ctx.by,
+                    tw: w,
+                    th: h,
+                };
+                recon_b_luma_tx_8bpc(
+                    &mut dst_y[off..], y_stride,
+                    cf, cbi[0].0 as i32, cbi[0].1, 0, None, dq, bitdepth_max,
+                    &params,
+                );
+            }
+        }
+    } else {
+        let ref1 = ctx.ref_idx[1] as usize;
+        let mut emu_buf = vec![0u8; 192 * 192];
+        let mut tmp1 = vec![0i16; 128 * 128];
+        let mut tmp2 = vec![0i16; 128 * 128];
+
+        let mc_params0 = McParams {
+            bw4: ctx.bw4,
+            bh4: ctx.bh4,
+            bx: ctx.bx,
+            by: ctx.by,
+            pl: 0,
+            mvx: 0,
+            mvy: 0,
+            filter: 0,
+            ss_hor: 0,
+            ss_ver: 0,
+            left: 0,
+            right: cur_w * 4,
+            top: 0,
+            bottom: cur_h * 4,
+        };
+
+        mc_8bpc(
+            dst_y, y_stride,
+            ref_planes[ref0], ref_strides[ref0],
+            ref_w[ref0], ref_h[ref0],
+            cur_w, cur_h,
+            &mc_params0,
+            &mut emu_buf,
+            true,
+            Some(&mut tmp1),
+        );
+
+        mc_8bpc(
+            dst_y, y_stride,
+            ref_planes[ref1], ref_strides[ref1],
+            ref_w[ref1], ref_h[ref1],
+            cur_w, cur_h,
+            &mc_params0,
+            &mut emu_buf,
+            true,
+            Some(&mut tmp2),
+        );
+
+        let off = ctx.by as usize * y_stride + ctx.bx as usize * 4;
+        avg_8bpc(
+            &mut dst_y[off..], y_stride,
+            &tmp1, &tmp2,
+            w as usize, h as usize,
+        );
+
+        if !cbi.is_empty() && cbi[0].0 > 0 {
+            if off < dst_y.len() {
+                let params = ReconLumaTxParams {
+                    tx: 0,
+                    bx4: ctx.bx,
+                    by4: ctx.by,
+                    tw: w,
+                    th: h,
+                };
+                recon_b_luma_tx_8bpc(
+                    &mut dst_y[off..], y_stride,
+                    cf, cbi[0].0 as i32, cbi[0].1, 0, None, dq, bitdepth_max,
+                    &params,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

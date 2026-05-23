@@ -550,6 +550,240 @@ pub fn fguv_32x32xn_8bpc(
     }
 }
 
+pub struct GrainLut {
+    pub y: [[i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
+    pub u: [[i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
+    pub v: [[i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
+}
+
+impl GrainLut {
+    pub fn new() -> Self {
+        Self {
+            y: [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
+            u: [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
+            v: [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
+        }
+    }
+}
+
+impl Default for GrainLut {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn prep_grain_8bpc(
+    fgd: &FilmGrainData,
+    grain_lut: &mut GrainLut,
+    scaling: &mut [Vec<u8>; 3],
+    seed: u32,
+) {
+    if fgd.num_points[0] > 0 || fgd.chroma_scaling_from_luma {
+        generate_grain_y(
+            &mut grain_lut.y,
+            fgd,
+            seed,
+        );
+    }
+
+    if fgd.num_points[0] > 0 {
+        scaling[0].resize(256, 0);
+        generate_scaling_8bpc(
+            &fgd.points[0][..fgd.num_points[0] as usize],
+            scaling[0].as_mut_slice().try_into().unwrap(),
+        );
+    }
+
+    for uv in 0..2 {
+        if fgd.num_points[uv + 1] > 0 || fgd.chroma_scaling_from_luma {
+            let lut = if uv == 0 {
+                &mut grain_lut.u
+            } else {
+                &mut grain_lut.v
+            };
+            generate_grain_uv(
+                lut,
+                &grain_lut.y,
+                fgd,
+                seed,
+                uv,
+                false,
+                false,
+            );
+        }
+
+        if fgd.num_points[uv + 1] > 0 && !fgd.chroma_scaling_from_luma {
+            scaling[uv + 1].resize(256, 0);
+            generate_scaling_8bpc(
+                &fgd.points[uv + 1][..fgd.num_points[uv + 1] as usize],
+                scaling[uv + 1].as_mut_slice().try_into().unwrap(),
+            );
+        }
+    }
+}
+
+pub fn apply_grain_row_8bpc(
+    dst_y: &mut [u8],
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    src_y: &[u8],
+    src_u: &[u8],
+    src_v: &[u8],
+    y_stride: isize,
+    uv_stride: isize,
+    fgd: &FilmGrainData,
+    grain_lut: &GrainLut,
+    scaling: &[Vec<u8>; 3],
+    w: usize,
+    row: usize,
+    seed: u32,
+    ss_x: bool,
+    ss_y: bool,
+) {
+    let bh = 32usize;
+    let row_start = row * bh;
+
+    if fgd.num_points[0] > 0 && !scaling[0].is_empty() {
+        let y_off = row_start * y_stride.unsigned_abs();
+        let src_slice = if y_off < src_y.len() {
+            &src_y[y_off..]
+        } else {
+            return;
+        };
+        let dst_slice = if y_off < dst_y.len() {
+            &mut dst_y[y_off..]
+        } else {
+            return;
+        };
+
+        fgy_32x32xn_8bpc(
+            dst_slice,
+            src_slice,
+            y_stride.unsigned_abs(),
+            fgd,
+            seed,
+            w,
+            scaling[0].as_slice().try_into().unwrap(),
+            &grain_lut.y,
+            bh as i32,
+            row as i32,
+        );
+    }
+
+    let has_uv = |uv: usize| -> bool {
+        (fgd.num_points[uv + 1] > 0 || fgd.chroma_scaling_from_luma)
+            && !scaling_for_uv(scaling, fgd, uv).is_empty()
+    };
+
+    if has_uv(0) {
+        let cw = if ss_x { w / 2 } else { w };
+        let ch = bh >> (ss_y as usize);
+        let uv_off = (row_start >> (ss_y as usize)) * uv_stride.unsigned_abs();
+        if uv_off < src_u.len() && uv_off < dst_u.len() {
+            let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 0).try_into().unwrap();
+            fguv_32x32xn_8bpc(
+                &mut dst_u[uv_off..],
+                &src_u[uv_off..],
+                uv_stride.unsigned_abs(),
+                fgd,
+                seed,
+                cw,
+                uv_scaling,
+                &grain_lut.u,
+                ch as i32,
+                row as i32,
+                &src_y[row_start * y_stride.unsigned_abs()..],
+                y_stride.unsigned_abs(),
+                0,
+                fgd.mc_identity,
+                ss_x as usize,
+                ss_y as usize,
+            );
+        }
+    }
+
+    if has_uv(1) {
+        let cw = if ss_x { w / 2 } else { w };
+        let ch = bh >> (ss_y as usize);
+        let uv_off = (row_start >> (ss_y as usize)) * uv_stride.unsigned_abs();
+        if uv_off < src_v.len() && uv_off < dst_v.len() {
+            let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 1).try_into().unwrap();
+            fguv_32x32xn_8bpc(
+                &mut dst_v[uv_off..],
+                &src_v[uv_off..],
+                uv_stride.unsigned_abs(),
+                fgd,
+                seed,
+                cw,
+                uv_scaling,
+                &grain_lut.v,
+                ch as i32,
+                row as i32,
+                &src_y[row_start * y_stride.unsigned_abs()..],
+                y_stride.unsigned_abs(),
+                1,
+                fgd.mc_identity,
+                ss_x as usize,
+                ss_y as usize,
+            );
+        }
+    }
+}
+
+fn scaling_for_uv<'a>(scaling: &'a [Vec<u8>; 3], fgd: &FilmGrainData, uv: usize) -> &'a [u8] {
+    if fgd.chroma_scaling_from_luma {
+        &scaling[0]
+    } else {
+        &scaling[uv + 1]
+    }
+}
+
+pub fn apply_grain_8bpc(
+    dst_y: &mut [u8],
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    src_y: &[u8],
+    src_u: &[u8],
+    src_v: &[u8],
+    y_stride: isize,
+    uv_stride: isize,
+    fgd: &FilmGrainData,
+    w: usize,
+    h: usize,
+    seed: u32,
+    ss_x: bool,
+    ss_y: bool,
+) {
+    let mut grain_lut = GrainLut::new();
+    let mut scaling = [Vec::new(), Vec::new(), Vec::new()];
+
+    prep_grain_8bpc(fgd, &mut grain_lut, &mut scaling, seed);
+
+    let bh = 32usize;
+    let rows = (h + bh - 1) / bh;
+
+    for row in 0..rows {
+        apply_grain_row_8bpc(
+            dst_y,
+            dst_u,
+            dst_v,
+            src_y,
+            src_u,
+            src_v,
+            y_stride,
+            uv_stride,
+            fgd,
+            &grain_lut,
+            &scaling,
+            w,
+            row,
+            seed,
+            ss_x,
+            ss_y,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

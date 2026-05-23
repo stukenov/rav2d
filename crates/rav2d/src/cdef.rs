@@ -367,6 +367,231 @@ pub fn cdef_filter_block_8bpc(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CdefEdgeFlags(pub u8);
+
+impl CdefEdgeFlags {
+    pub const HAVE_LEFT: Self = Self(1 << 0);
+    pub const HAVE_RIGHT: Self = Self(1 << 1);
+    pub const HAVE_TOP: Self = Self(1 << 2);
+    pub const HAVE_BOTTOM: Self = Self(1 << 3);
+    pub const HAVE_ALL: Self = Self(0xf);
+
+    pub fn has(self, flag: Self) -> bool {
+        self.0 & flag.0 != 0
+    }
+
+    pub fn with(self, flag: Self) -> Self {
+        Self(self.0 | flag.0)
+    }
+
+    pub fn without(self, flag: Self) -> Self {
+        Self(self.0 & !flag.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backup2x8Flags {
+    Y = 1,
+    Uv = 2,
+    Both = 3,
+}
+
+pub fn backup2lines_8bpc(
+    dst: &mut [Vec<u8>; 3],
+    src: &[&[u8]; 3],
+    strides: &[isize; 2],
+    layout: crate::headers::PixelLayout,
+    row: usize,
+) {
+    let y_stride = strides[0] as usize;
+    let uv_stride = strides[1] as usize;
+    let src_off_y = row * y_stride;
+
+    for i in 0..2 {
+        let off = src_off_y + i * y_stride;
+        if off + y_stride <= src[0].len() {
+            let w = dst[0].len() / 2;
+            if w > 0 {
+                let dst_off = i * w;
+                let copy_len = w.min(src[0].len() - off);
+                dst[0][dst_off..dst_off + copy_len]
+                    .copy_from_slice(&src[0][off..off + copy_len]);
+            }
+        }
+    }
+
+    if layout != crate::headers::PixelLayout::I400 && uv_stride > 0 {
+        let ss_ver = layout == crate::headers::PixelLayout::I420;
+        let crow = if ss_ver { row / 2 } else { row };
+
+        for plane in 1..3 {
+            let src_off = crow * uv_stride;
+            for i in 0..2 {
+                let off = src_off + i * uv_stride;
+                if off + uv_stride <= src[plane].len() {
+                    let w = dst[plane].len() / 2;
+                    if w > 0 {
+                        let dst_off = i * w;
+                        let copy_len = w.min(src[plane].len() - off);
+                        dst[plane][dst_off..dst_off + copy_len]
+                            .copy_from_slice(&src[plane][off..off + copy_len]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub struct CdefApplyParams {
+    pub bw: usize,
+    pub bh: usize,
+    pub sb128: bool,
+    pub ss_hor: bool,
+    pub ss_ver: bool,
+    pub damping: i32,
+    pub n_bits: i32,
+    pub have_chroma: bool,
+}
+
+pub fn cdef_brow_8bpc(
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+    params: &CdefApplyParams,
+    y_stride: isize,
+    uv_stride: isize,
+    cdef_idx: &[u8],
+    cdef_y_strengths: &[[i32; 2]],
+    cdef_uv_strengths: &[[i32; 2]],
+    by_start: i32,
+    by_end: i32,
+    _sby: i32,
+) {
+    let damping = params.damping + params.n_bits - 8;
+    let y_ls = y_stride.unsigned_abs();
+    let uv_ls = uv_stride.unsigned_abs();
+    let ss_hor = params.ss_hor as usize;
+    let ss_ver = params.ss_ver as usize;
+
+    let mut by = by_start;
+    while by < by_end {
+        let sb64_idx = (by as usize / 16) * ((params.bw + 15) / 16);
+
+        let mut bx = 0i32;
+        while bx < params.bw as i32 {
+            let sbx = bx as usize / 16;
+            let idx_off = sb64_idx + sbx;
+
+            if idx_off < cdef_idx.len() {
+                let cdef_i = cdef_idx[idx_off] as usize;
+
+                if cdef_i < cdef_y_strengths.len() {
+                    let pri_y = cdef_y_strengths[cdef_i][0];
+                    let sec_y = cdef_y_strengths[cdef_i][1];
+
+                    if pri_y > 0 || sec_y > 0 {
+                        let y_off = by as usize * 4 * y_ls + bx as usize * 4;
+                        let mut variance = 0u32;
+                        let dir = if y_off < y.len() {
+                            cdef_find_dir(&y[y_off..], y_ls, &mut variance)
+                        } else {
+                            0
+                        };
+                        let adj_pri = adjust_strength(pri_y, variance);
+
+                        if (adj_pri > 0 || sec_y > 0) && y_off + 8 * y_ls + 8 <= y.len() {
+                            let empty_left = [[0u8; 2]; 8];
+                            let top_off = if y_off >= y_ls { y_off - y_ls } else { y_off };
+                            let bot_off = y_off + 8 * y_ls;
+                            let mut edges = CdefEdgeFlags::HAVE_TOP.0
+                                | CdefEdgeFlags::HAVE_BOTTOM.0
+                                | CdefEdgeFlags::HAVE_LEFT.0
+                                | CdefEdgeFlags::HAVE_RIGHT.0;
+                            if by == by_start { edges &= !CdefEdgeFlags::HAVE_TOP.0; }
+                            if by + 2 >= by_end { edges &= !CdefEdgeFlags::HAVE_BOTTOM.0; }
+                            if bx == 0 { edges &= !CdefEdgeFlags::HAVE_LEFT.0; }
+                            if bx + 2 >= params.bw as i32 { edges &= !CdefEdgeFlags::HAVE_RIGHT.0; }
+
+                            let y_alias = unsafe {
+                                std::slice::from_raw_parts(y.as_ptr(), y.len())
+                            };
+                            cdef_filter_block_8bpc(
+                                y, y_ls, y_off,
+                                &empty_left,
+                                y_alias, top_off,
+                                y_alias, bot_off,
+                                adj_pri, sec_y,
+                                dir as usize, damping,
+                                8, 8, edges,
+                            );
+                        }
+                    }
+                }
+
+                if params.have_chroma && cdef_i < cdef_uv_strengths.len() {
+                    let pri_uv = cdef_uv_strengths[cdef_i][0];
+                    let sec_uv = cdef_uv_strengths[cdef_i][1];
+
+                    if pri_uv > 0 || sec_uv > 0 {
+                        let cw = 8 >> ss_hor;
+                        let ch = 8 >> ss_ver;
+                        let empty_left = [[0u8; 2]; 8];
+                        let mut edges = CdefEdgeFlags::HAVE_TOP.0
+                            | CdefEdgeFlags::HAVE_BOTTOM.0
+                            | CdefEdgeFlags::HAVE_LEFT.0
+                            | CdefEdgeFlags::HAVE_RIGHT.0;
+                        if by == by_start { edges &= !CdefEdgeFlags::HAVE_TOP.0; }
+                        if by + 2 >= by_end { edges &= !CdefEdgeFlags::HAVE_BOTTOM.0; }
+                        if bx == 0 { edges &= !CdefEdgeFlags::HAVE_LEFT.0; }
+                        if bx + 2 >= params.bw as i32 { edges &= !CdefEdgeFlags::HAVE_RIGHT.0; }
+
+                        let uv_off = (by as usize * 4 >> ss_ver) * uv_ls
+                            + (bx as usize * 4 >> ss_hor);
+
+                        if uv_off + ch * uv_ls + cw <= u.len() {
+                            let top_off = if uv_off >= uv_ls { uv_off - uv_ls } else { uv_off };
+                            let bot_off = uv_off + ch * uv_ls;
+                            let u_alias = unsafe {
+                                std::slice::from_raw_parts(u.as_ptr(), u.len())
+                            };
+                            cdef_filter_block_8bpc(
+                                u, uv_ls, uv_off,
+                                &empty_left,
+                                u_alias, top_off,
+                                u_alias, bot_off,
+                                pri_uv, sec_uv,
+                                0, damping - 1,
+                                cw, ch, edges,
+                            );
+                        }
+
+                        if uv_off + ch * uv_ls + cw <= v.len() {
+                            let top_off = if uv_off >= uv_ls { uv_off - uv_ls } else { uv_off };
+                            let bot_off = uv_off + ch * uv_ls;
+                            let v_alias = unsafe {
+                                std::slice::from_raw_parts(v.as_ptr(), v.len())
+                            };
+                            cdef_filter_block_8bpc(
+                                v, uv_ls, uv_off,
+                                &empty_left,
+                                v_alias, top_off,
+                                v_alias, bot_off,
+                                pri_uv, sec_uv,
+                                0, damping - 1,
+                                cw, ch, edges,
+                            );
+                        }
+                    }
+                }
+            }
+
+            bx += 2;
+        }
+        by += 2;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
