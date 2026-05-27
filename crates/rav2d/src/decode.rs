@@ -334,6 +334,7 @@ pub fn setup_tile(
     bw: i32,
     bh: i32,
     n_tc: i32,
+    tile_start_off: u32,
 ) {
     if let Some(cdf) = in_cdf {
         ts.cdf = cdf.clone();
@@ -342,6 +343,7 @@ pub fn setup_tile(
     }
     ts.last_qidx = frame_hdr.quant.yac as i32;
     ts.msac_buf = data.to_vec();
+    ts.tile_start_off = tile_start_off;
 
     setup_tile_bounds(ts, tile_row, tile_col, col_start_sb, row_start_sb, sb_shift, bw, bh, n_tc);
     setup_tile_wiener_banks(ts, frame_hdr);
@@ -396,7 +398,6 @@ pub fn decode_frame_init_cdf(
             } else {
                 0
             };
-            let _ = start_off;
 
             setup_tile(
                 &mut ts[j as usize],
@@ -412,6 +413,7 @@ pub fn decode_frame_init_cdf(
                 bw,
                 bh,
                 n_tc,
+                start_off,
             );
 
             tile_col += 1;
@@ -1711,6 +1713,78 @@ pub struct SbFrameInfo {
     pub sb_step: i32,
 }
 
+fn get_snglref_ctx(
+    a: &BlockContext, l: &BlockContext,
+    yb4: usize, xb4: usize,
+    have_top: bool, have_left: bool,
+    have_top_right: bool, have_bottom_left: bool,
+    b_dim: &[u8], ref_idx: i8,
+) -> usize {
+    const NEWMV0_MASK: u32 = (1 << 15) | (1 << 20) | (1 << 22) | (1 << 23)
+        | (1 << 26) | (1 << 27) | (1 << 28);
+    const NEWMV1_MASK: u32 = (1 << 19) | (1 << 22) | (1 << 25) | (1 << 27);
+
+    let mut row = 0i32;
+    let mut col = 0i32;
+    let mut newmv = 0i32;
+
+    macro_rules! add_matching {
+        ($ctx:expr, $cnt:ident, $idx:expr) => {
+            if $ctx.r#ref[0][$idx] as i8 == ref_idx {
+                $cnt += 1;
+                newmv += (((1u32 << $ctx.mode[$idx]) & NEWMV0_MASK) != 0) as i32;
+            } else if $ctx.r#ref[1][$idx] as i8 == ref_idx {
+                $cnt += 1;
+                newmv += (((1u32 << $ctx.mode[$idx]) & NEWMV1_MASK) != 0) as i32;
+            }
+        };
+    }
+    if have_top {
+        add_matching!(a, col, xb4);
+        if have_top_right {
+            add_matching!(a, col, xb4 + b_dim[0] as usize - 1);
+        }
+    }
+    if have_left {
+        add_matching!(l, row, yb4);
+        if have_bottom_left {
+            add_matching!(l, row, yb4 + b_dim[1] as usize - 1);
+        }
+    }
+
+    ((row != 0) as usize) + ((col != 0) as usize) + 2 * ((newmv != 0) as usize)
+}
+
+fn get_filter_ctx(
+    a: &BlockContext, l: &BlockContext,
+    nb_boff: &[i32; 2], ref0: i8, is_comp: bool,
+) -> usize {
+    const N_SWITCHABLE: u8 = 3;
+    let comp_val = is_comp as usize * 4;
+
+    let flt0 = if nb_boff[0] != -1 {
+        let off = nb_boff[0] as usize;
+        if l.r#ref[0][off] as i8 == ref0 || l.r#ref[1][off] as i8 == ref0 {
+            l.filter[off]
+        } else { N_SWITCHABLE }
+    } else { N_SWITCHABLE };
+
+    let flt1 = if nb_boff[1] != -1 {
+        let off = nb_boff[1] as usize;
+        if a.r#ref[0][off] as i8 == ref0 || a.r#ref[1][off] as i8 == ref0 {
+            a.filter[off]
+        } else { N_SWITCHABLE }
+    } else { N_SWITCHABLE };
+
+    if flt0 == flt1 || flt1 == N_SWITCHABLE {
+        comp_val + flt0 as usize
+    } else if flt0 == N_SWITCHABLE {
+        comp_val + flt1 as usize
+    } else {
+        comp_val + N_SWITCHABLE as usize
+    }
+}
+
 #[allow(unused)]
 fn decode_b(
     fi: &SbFrameInfo,
@@ -1741,6 +1815,8 @@ fn decode_b(
     let h4 = imin(bh4, fi.bh - by);
     let have_left = bx > fi.tile_col_start;
     let have_top = by > fi.tile_row_start;
+    let have_top_right = bx + bw4 <= fi.tile_col_end;
+    let have_bottom_left = by + bh4 <= fi.tile_row_end;
     let has_luma = lbs != BlockSize::Invalid;
     let has_chroma = cbs != BlockSize::Invalid;
 
@@ -2911,13 +2987,11 @@ fn decode_b(
                 b.ref_pair.r[1] = -1;
             }
 
-            // --- sngl_ctx (simplified: count matching refs in neighbours) ---
-            let sngl_ctx = {
-                let mut c = 0usize;
-                if n_ctx > 0 && nx_ref0[0] == ref0 { c += 1; }
-                if n_ctx > 1 && nx_ref0[1] == ref0 { c += 1; }
-                c.min(4)
-            };
+            // --- sngl_ctx ---
+            let sngl_ctx = get_snglref_ctx(
+                a, l, by4, bx4, have_top, have_left,
+                have_top_right, have_bottom_left, b_dim, ref0,
+            );
 
             // --- inter_mode ---
             let inter_mode: u8;
@@ -3560,8 +3634,6 @@ pub fn decode_sb(
             *part_w_idx += 1;
         }
     } else {
-        let pass_idx = (pass == Pass::MvRes as u8) as usize;
-        let _ = pass_idx;
         let val = part_r[*part_r_idx];
         *part_r_idx += 1;
         if val & 0x80 != 0 {
@@ -4403,22 +4475,7 @@ mod tests {
     }
 
     fn make_lf_state() -> LoopFilterState {
-        LoopFilterState {
-            mask: Vec::new(),
-            lr_mask: Vec::new(),
-            segmap_uv: Vec::new(),
-            uv_segmap_stride: 0,
-            cdef_buf_plane_sz: [0; 2],
-            cdef_buf_sbh: 0,
-            lr_buf_plane_sz: [0; 4],
-            re_sz: 0,
-            base_q: 0,
-            gdf_ref_dst_idx: 0,
-            start_of_tile_row: Vec::new(),
-            restore_planes: 0,
-            wiener_idx: 0,
-            ns_subclass_class_idx: None,
-        }
+        LoopFilterState::default()
     }
 
     #[test]
@@ -4823,7 +4880,7 @@ mod tests {
             0, 0,
             hdr.tiling.t.col_start_sb.as_ref(),
             hdr.tiling.t.row_start_sb.as_ref(),
-            2, 32, 32, 1,
+            2, 32, 32, 1, 0,
         );
 
         assert_eq!(ts.last_qidx, 128);
@@ -4841,7 +4898,7 @@ mod tests {
 
         setup_tile(
             &mut ts, &[0; 8], &hdr, Some(&cdf), 0,
-            0, 0, &[0, 1], &[0, 1], 2, 16, 16, 1,
+            0, 0, &[0, 1], &[0, 1], 2, 16, 16, 1, 0,
         );
 
         assert_eq!(ts.cdf.m.data[0], 12345);

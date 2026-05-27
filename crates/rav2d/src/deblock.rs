@@ -527,6 +527,649 @@ pub fn backup_db(
     }
 }
 
+pub struct DeblockApplyParams {
+    pub y_stride: isize,
+    pub uv_stride: isize,
+    pub bw: usize,
+    pub bh: usize,
+    pub sb128: bool,
+    pub ss_hor: bool,
+    pub ss_ver: bool,
+    pub level_y: [i32; 2],
+    pub level_u: i32,
+    pub level_v: i32,
+    pub have_chroma: bool,
+}
+
+pub fn deblock_sbrow_cols_8bpc(
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+    params: &DeblockApplyParams,
+    masks: &[[[u16; 4]; 5]],
+    segmap: &[u8],
+    thr_lut_y: &[[u8; 16]; 2],
+    thr_lut_uv: &[[[u8; 16]; 2]; 2],
+    sby: i32,
+    start_of_tile_row: bool,
+) {
+    if params.level_y[0] == 0 && params.level_y[1] == 0 {
+        return;
+    }
+
+    let sb_size = if params.sb128 { 128 } else { 64 };
+    let y64_start = (sby as usize * sb_size) / 64;
+    let y64_end = ((sby as usize + 1) * sb_size).min(params.bh * 4) / 64;
+
+    for _y64 in y64_start..y64_end {
+        deblock_sbrow64_cols_8bpc(
+            y,
+            u,
+            v,
+            params,
+            masks,
+            segmap,
+            thr_lut_y,
+            thr_lut_uv,
+            _y64,
+            start_of_tile_row && _y64 == y64_start,
+        );
+    }
+}
+
+fn deblock_sbrow64_cols_8bpc(
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+    params: &DeblockApplyParams,
+    masks: &[[[u16; 4]; 5]],
+    segmap: &[u8],
+    thr_lut_y: &[[u8; 16]; 2],
+    _thr_lut_uv: &[[[u8; 16]; 2]; 2],
+    y64: usize,
+    _start_of_tile_row: bool,
+) {
+    let h4 = imin(16, params.bh as i32 - y64 as i32 * 16);
+    if h4 <= 0 {
+        return;
+    }
+
+    let sb64w = (params.bw + 15) / 16;
+    for sbx in 0..sb64w {
+        let have_left = sbx > 0;
+        let w4 = imin(16, params.bw as i32 - sbx as i32 * 16);
+
+        if params.level_y[0] > 0 && have_left {
+            filter_plane_cols_y_8bpc(
+                y,
+                params.y_stride,
+                masks,
+                thr_lut_y,
+                sbx,
+                y64,
+                w4,
+                h4,
+            );
+        }
+
+        if params.have_chroma && have_left {
+            filter_plane_cols_uv_8bpc(
+                u,
+                v,
+                params.uv_stride,
+                masks,
+                sbx,
+                y64,
+                w4,
+                h4,
+                params.ss_hor,
+                params.ss_ver,
+            );
+        }
+    }
+}
+
+fn filter_choice(
+    s: &[u8], s_off: usize,
+    t: &[u8], t_off: usize,
+    stride: isize,
+    max_width_neg: i32, max_width_pos: i32,
+    q_thr: u32, side_thr: u32,
+) -> i32 {
+    let st = stride;
+    let at = |buf: &[u8], off: usize, i: isize| -> i32 {
+        buf[(off as isize + i * st) as usize] as i32
+    };
+
+    let mut second_derivs = [0u32; 4];
+    let mut deriv_s = (at(s, s_off, 0) - at(s, s_off, -1)).unsigned_abs()
+        + (at(s, s_off, 1) - at(s, s_off, 0)).unsigned_abs();
+    let mut deriv_t = (at(t, t_off, 0) - at(t, t_off, -1)).unsigned_abs()
+        + (at(t, t_off, 1) - at(t, t_off, 0)).unsigned_abs();
+    second_derivs[0] = deriv_s + deriv_t;
+
+    deriv_s = (at(s, s_off, 2) - at(s, s_off, 1)).unsigned_abs()
+        + (at(s, s_off, 3) - at(s, s_off, 2)).unsigned_abs();
+    deriv_t = (at(t, t_off, 2) - at(t, t_off, 1)).unsigned_abs()
+        + (at(t, t_off, 3) - at(t, t_off, 2)).unsigned_abs();
+    second_derivs[1] = deriv_s + deriv_t;
+
+    deriv_s = (at(s, s_off, -2) - at(s, s_off, -3)).unsigned_abs()
+        + (at(s, s_off, -1) - at(s, s_off, -2)).unsigned_abs();
+    deriv_t = (at(t, t_off, -2) - at(t, t_off, -3)).unsigned_abs()
+        + (at(t, t_off, -1) - at(t, t_off, -2)).unsigned_abs();
+    second_derivs[2] = deriv_s + deriv_t;
+
+    deriv_s = (at(s, s_off, -4) - at(s, s_off, -5)).unsigned_abs()
+        + (at(s, s_off, -3) - at(s, s_off, -4)).unsigned_abs();
+    deriv_t = (at(t, t_off, -4) - at(t, t_off, -5)).unsigned_abs()
+        + (at(t, t_off, -3) - at(t, t_off, -4)).unsigned_abs();
+    second_derivs[3] = deriv_s + deriv_t;
+
+    let q_thr_val = q_thr * Q_FIRST[0] as u32;
+    if ((second_derivs[0] + second_derivs[1] + 1) >> 1) > q_thr_val {
+        return 0;
+    }
+    let side_thr_val = side_thr * Q_FIRST[0] as u32;
+    if ((second_derivs[2] + second_derivs[3] + 1) >> 1) > side_thr_val {
+        return 0;
+    }
+
+    let mut prev_dist = 1;
+    for dist in 2..=max_width_pos {
+        let idx = dist as usize - 1;
+        if idx >= Q_THRESH_MULTS.len() || Q_THRESH_MULTS[idx] == 0 {
+            break;
+        }
+        let end_thr4 = q_thr * Q_THRESH_MULTS[idx] as u32;
+        let dist2 = dist - 1;
+
+        let ds = (at(s, s_off, 0) - at(s, s_off, dist2 as isize) - dist2 as i32 * (at(s, s_off, 0) - at(s, s_off, 1))).unsigned_abs();
+        let dt = (at(t, t_off, 0) - at(t, t_off, dist2 as isize) - dist2 as i32 * (at(t, t_off, 0) - at(t, t_off, 1))).unsigned_abs();
+        if ((ds + dt + 1) >> 1) > end_thr4 {
+            return prev_dist;
+        }
+
+        let side_end_thr4 = side_thr * Q_THRESH_MULTS[idx] as u32;
+        let ds = (at(s, s_off, 0) - at(s, s_off, -(dist2 as isize)) - dist2 as i32 * (at(s, s_off, 0) - at(s, s_off, -1))).unsigned_abs();
+        let dt = (at(t, t_off, 0) - at(t, t_off, -(dist2 as isize)) - dist2 as i32 * (at(t, t_off, 0) - at(t, t_off, -1))).unsigned_abs();
+        if ((ds + dt + 1) >> 1) > side_end_thr4 {
+            return prev_dist;
+        }
+        prev_dist = dist;
+    }
+
+    max_width_pos
+}
+
+fn deblock_pixel(
+    dst: &mut [u8], off: usize,
+    q_thr: u32, side_thr: u32,
+    stridea: isize, strideb: isize,
+    max_width_pos: i32, max_width_neg: i32,
+    pos_lossless: bool, neg_lossless: bool,
+) {
+    let s_off = off;
+    let t_off = (off as isize + 3 * stridea) as usize;
+    let width = filter_choice(dst, s_off, dst, t_off, strideb,
+                              max_width_neg, max_width_pos, q_thr, side_thr);
+    let width_neg = imin(width, max_width_neg);
+    let width_pos = width;
+
+    if width_pos < 1 {
+        return;
+    }
+
+    let q_thr_clamp = (q_thr * Q_THRESH_MULTS[0] as u32) as i32;
+
+    for i in 0..4 {
+        let base = (off as isize + i * strideb) as usize;
+        let d0 = dst[base] as i32;
+        let dm1 = dst[(base as isize - stridea) as usize] as i32;
+        let d1 = dst[(base as isize + stridea) as usize] as i32;
+        let dm2 = dst[(base as isize - 2 * stridea) as usize] as i32;
+
+        let delta_m2 = iclip(4 * (3 * (d0 - dm1) - (d1 - dm2)), -q_thr_clamp, q_thr_clamp);
+
+        if !neg_lossless {
+            let delta_m2_neg = delta_m2 * W_MULT[width_neg as usize - 1] as i32;
+            for j in 0..width_neg {
+                let pix = (base as isize + (-j - 1) as isize * stridea) as usize;
+                let diff = (delta_m2_neg * (width_neg - j) + (1 << 10)) >> 11;
+                dst[pix] = iclip(dst[pix] as i32 + diff, 0, 255) as u8;
+            }
+        }
+
+        if !pos_lossless {
+            let delta_m2_pos = delta_m2 * W_MULT[width_pos as usize - 1] as i32;
+            for j in 0..width_pos {
+                let pix = (base as isize + j as isize * stridea) as usize;
+                let diff = (delta_m2_pos * (width_pos - j) + (1 << 10)) >> 11;
+                dst[pix] = iclip(dst[pix] as i32 - diff, 0, 255) as u8;
+            }
+        }
+    }
+}
+
+fn deblock_h_sb64y(
+    dst: &mut [u8], dst_off: usize, stride: isize,
+    vmask: &[u16], ll_mask: &[u16],
+    q_thr: &[u32], side_thr: &[u32],
+    tile_edge: bool, h4: i32,
+) {
+    let ls = stride.unsigned_abs();
+    for y in 0..h4 as u16 {
+        let mask = vmask[0] | vmask[1] | vmask[2] | vmask[3];
+        if mask & (1 << y) == 0 {
+            continue;
+        }
+        let level = if vmask[3] & (1 << y) != 0 { 3 }
+            else if vmask[2] & (1 << y) != 0 { 2 }
+            else if vmask[1] & (1 << y) != 0 { 1 }
+            else { 0 };
+        let max_width_pos = MAX_WIDTH_Y[level] as i32;
+        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_Y[level] as i32 };
+        let pos_lossless = ll_mask[1] & (1 << y) != 0;
+        let neg_lossless = ll_mask[0] & (1 << y) != 0;
+        let off = dst_off + y as usize * ls;
+        deblock_pixel(dst, off, q_thr[y as usize], side_thr[y as usize],
+                      1, stride, max_width_pos, max_width_neg,
+                      pos_lossless, neg_lossless);
+    }
+}
+
+fn deblock_v_sb64y(
+    dst: &mut [u8], dst_off: usize, stride: isize,
+    vmask: &[u16], ll_mask: &[u16],
+    q_thr: &[u32], side_thr: &[u32],
+    tile_edge: bool, w4: i32,
+) {
+    let ls = stride.unsigned_abs();
+    for x in 0..w4 as u16 {
+        let mask = vmask[0] | vmask[1] | vmask[2] | vmask[3];
+        if mask & (1 << x) == 0 {
+            continue;
+        }
+        let level = if vmask[3] & (1 << x) != 0 { 3 }
+            else if vmask[2] & (1 << x) != 0 { 2 }
+            else if vmask[1] & (1 << x) != 0 { 1 }
+            else { 0 };
+        let max_width_pos = MAX_WIDTH_Y[level] as i32;
+        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_Y[level] as i32 };
+        let pos_lossless = ll_mask[1] & (1 << x) != 0;
+        let neg_lossless = ll_mask[0] & (1 << x) != 0;
+        let off = dst_off + x as usize;
+        deblock_pixel(dst, off, q_thr[x as usize], side_thr[x as usize],
+                      stride, 1, max_width_pos, max_width_neg,
+                      pos_lossless, neg_lossless);
+    }
+}
+
+fn deblock_h_sb64uv(
+    dst: &mut [u8], dst_off: usize, stride: isize,
+    vmask: &[u16], ll_mask: &[u16],
+    q_thr: &[u32], side_thr: &[u32],
+    tile_edge: bool, h4: i32,
+) {
+    let ls = stride.unsigned_abs();
+    for y in 0..h4 as u16 {
+        let mask = vmask[0] | vmask[1] | vmask[2];
+        if mask & (1 << y) == 0 {
+            continue;
+        }
+        let level = if vmask[2] & (1 << y) != 0 { 2 }
+            else if vmask[1] & (1 << y) != 0 { 1 }
+            else { 0 };
+        let max_width_pos = MAX_WIDTH_UV[level] as i32;
+        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_UV[level] as i32 };
+        let pos_lossless = ll_mask[1] & (1 << y) != 0;
+        let neg_lossless = ll_mask[0] & (1 << y) != 0;
+        let off = dst_off + y as usize * ls;
+        deblock_pixel(dst, off, q_thr[y as usize], side_thr[y as usize],
+                      1, stride, max_width_pos, max_width_neg,
+                      pos_lossless, neg_lossless);
+    }
+}
+
+fn deblock_v_sb64uv(
+    dst: &mut [u8], dst_off: usize, stride: isize,
+    vmask: &[u16], ll_mask: &[u16],
+    q_thr: &[u32], side_thr: &[u32],
+    tile_edge: bool, w4: i32,
+) {
+    let ls = stride.unsigned_abs();
+    for x in 0..w4 as u16 {
+        let mask = vmask[0] | vmask[1] | vmask[2];
+        if mask & (1 << x) == 0 {
+            continue;
+        }
+        let level = if vmask[2] & (1 << x) != 0 { 2 }
+            else if vmask[1] & (1 << x) != 0 { 1 }
+            else { 0 };
+        let max_width_pos = MAX_WIDTH_UV[level] as i32;
+        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_UV[level] as i32 };
+        let pos_lossless = ll_mask[1] & (1 << x) != 0;
+        let neg_lossless = ll_mask[0] & (1 << x) != 0;
+        let off = dst_off + x as usize;
+        deblock_pixel(dst, off, q_thr[x as usize], side_thr[x as usize],
+                      stride, 1, max_width_pos, max_width_neg,
+                      pos_lossless, neg_lossless);
+    }
+}
+
+fn filter_plane_cols_y_8bpc(
+    dst: &mut [u8],
+    stride: isize,
+    masks: &[[[u16; 4]; 5]],
+    thr_lut: &[[u8; 16]; 2],
+    sbx: usize,
+    _y64: usize,
+    w4: i32,
+    h4: i32,
+) {
+    let ls = stride.unsigned_abs();
+    let mut tile_edge = sbx == 0;
+    for x in 0..w4 {
+        let mask_idx = sbx * 16 + x as usize;
+        if mask_idx >= masks.len() {
+            break;
+        }
+        let hmask = &masks[mask_idx];
+        let vmask = &hmask[0];
+        let ll_mask_raw = &hmask[4];
+        let ll_slice = [ll_mask_raw[0], ll_mask_raw[1]];
+        let mut q_thr_arr = [0u32; 16];
+        let mut side_thr_arr = [0u32; 16];
+        for y in 0..h4 as usize {
+            q_thr_arr[y] = thr_lut[0][0] as u32;
+            side_thr_arr[y] = thr_lut[1][0] as u32;
+        }
+        let off = x as usize * 4;
+        deblock_h_sb64y(dst, off, stride, &vmask[..4], &ll_slice,
+                        &q_thr_arr, &side_thr_arr, tile_edge, h4);
+        tile_edge = false;
+    }
+}
+
+fn filter_plane_cols_uv_8bpc(
+    u: &mut [u8],
+    v: &mut [u8],
+    stride: isize,
+    masks: &[[[u16; 4]; 5]],
+    sbx: usize,
+    _y64: usize,
+    w4: i32,
+    h4: i32,
+    ss_hor: bool,
+    ss_ver: bool,
+) {
+    let ls = stride.unsigned_abs();
+    let cw4 = w4 >> ss_hor as i32;
+    let ch4 = h4 >> ss_ver as i32;
+    let mut tile_edge = sbx == 0;
+    for x in 0..cw4 {
+        let mask_idx = sbx * (16 >> ss_hor as usize) + x as usize;
+        if mask_idx >= masks.len() {
+            break;
+        }
+        let hmask = &masks[mask_idx];
+        let vmask = &hmask[0];
+        let ll_mask_raw = &hmask[4];
+        let ll_slice = [ll_mask_raw[0], ll_mask_raw[1]];
+        let mut q_thr_arr = [0u32; 16];
+        let mut side_thr_arr = [0u32; 16];
+        for y in 0..ch4 as usize {
+            q_thr_arr[y] = 1;
+            side_thr_arr[y] = 1;
+        }
+        let off = x as usize * 4;
+        deblock_h_sb64uv(u, off, stride, &vmask[..3], &ll_slice,
+                         &q_thr_arr, &side_thr_arr, tile_edge, ch4);
+        deblock_h_sb64uv(v, off, stride, &vmask[..3], &ll_slice,
+                         &q_thr_arr, &side_thr_arr, tile_edge, ch4);
+        tile_edge = false;
+    }
+}
+
+pub fn deblock_sbrow_rows_8bpc(
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+    params: &DeblockApplyParams,
+    masks: &[[[u16; 4]; 5]],
+    segmap: &[u8],
+    thr_lut_y: &[[u8; 16]; 2],
+    thr_lut_uv: &[[[u8; 16]; 2]; 2],
+    sby: i32,
+) {
+    if params.level_y[0] == 0 && params.level_y[1] == 0 {
+        return;
+    }
+
+    let sb_size = if params.sb128 { 128 } else { 64 };
+    let y64_start = (sby as usize * sb_size) / 64;
+    let y64_end = ((sby as usize + 1) * sb_size).min(params.bh * 4) / 64;
+
+    for _y64 in y64_start..y64_end {
+        deblock_sbrow64_rows_8bpc(
+            y,
+            u,
+            v,
+            params,
+            masks,
+            segmap,
+            thr_lut_y,
+            thr_lut_uv,
+            _y64,
+        );
+    }
+}
+
+fn deblock_sbrow64_rows_8bpc(
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+    params: &DeblockApplyParams,
+    masks: &[[[u16; 4]; 5]],
+    segmap: &[u8],
+    _thr_lut_y: &[[u8; 16]; 2],
+    _thr_lut_uv: &[[[u8; 16]; 2]; 2],
+    y64: usize,
+) {
+    let h4 = imin(16, params.bh as i32 - y64 as i32 * 16);
+    if h4 <= 0 {
+        return;
+    }
+
+    let sb64w = (params.bw + 15) / 16;
+    for sbx in 0..sb64w {
+        let have_top = y64 > 0;
+        let w4 = imin(16, params.bw as i32 - sbx as i32 * 16);
+
+        if params.level_y[1] > 0 && have_top {
+            filter_plane_rows_y_8bpc(
+                y,
+                params.y_stride,
+                masks,
+                sbx,
+                y64,
+                w4,
+                h4,
+            );
+        }
+
+        if params.have_chroma && have_top {
+            filter_plane_rows_uv_8bpc(
+                u,
+                v,
+                params.uv_stride,
+                masks,
+                sbx,
+                y64,
+                w4,
+                h4,
+                params.ss_hor,
+                params.ss_ver,
+            );
+        }
+    }
+}
+
+fn filter_plane_rows_y_8bpc(
+    dst: &mut [u8],
+    stride: isize,
+    masks: &[[[u16; 4]; 5]],
+    sbx: usize,
+    _y64: usize,
+    w4: i32,
+    h4: i32,
+) {
+    let ls = stride.unsigned_abs();
+    for y in 0..h4 {
+        let mask_idx = sbx * 16 + y as usize;
+        if mask_idx >= masks.len() {
+            break;
+        }
+        let row_mask = &masks[mask_idx];
+        let vmask = &row_mask[0];
+        let ll_mask_raw = &row_mask[4];
+        let ll_slice = [ll_mask_raw[0], ll_mask_raw[1]];
+        let mut q_thr_arr = [0u32; 16];
+        let mut side_thr_arr = [0u32; 16];
+        for x in 0..w4 as usize {
+            q_thr_arr[x] = 1;
+            side_thr_arr[x] = 1;
+        }
+        let off = y as usize * ls;
+        deblock_v_sb64y(dst, off, stride, &vmask[..4], &ll_slice,
+                        &q_thr_arr, &side_thr_arr, y == 0, w4);
+    }
+}
+
+fn filter_plane_rows_uv_8bpc(
+    u: &mut [u8],
+    v: &mut [u8],
+    stride: isize,
+    masks: &[[[u16; 4]; 5]],
+    sbx: usize,
+    _y64: usize,
+    w4: i32,
+    h4: i32,
+    ss_hor: bool,
+    ss_ver: bool,
+) {
+    let ls = stride.unsigned_abs();
+    let cw4 = w4 >> ss_hor as i32;
+    let ch4 = h4 >> ss_ver as i32;
+    for y in 0..ch4 {
+        let mask_idx = sbx * (16 >> ss_ver as usize) + y as usize;
+        if mask_idx >= masks.len() {
+            break;
+        }
+        let row_mask = &masks[mask_idx];
+        let vmask = &row_mask[0];
+        let ll_mask_raw = &row_mask[4];
+        let ll_slice = [ll_mask_raw[0], ll_mask_raw[1]];
+        let mut q_thr_arr = [0u32; 16];
+        let mut side_thr_arr = [0u32; 16];
+        for x in 0..cw4 as usize {
+            q_thr_arr[x] = 1;
+            side_thr_arr[x] = 1;
+        }
+        let off = y as usize * ls;
+        deblock_v_sb64uv(u, off, stride, &vmask[..3], &ll_slice,
+                         &q_thr_arr, &side_thr_arr, y == 0, cw4);
+        deblock_v_sb64uv(v, off, stride, &vmask[..3], &ll_slice,
+                         &q_thr_arr, &side_thr_arr, y == 0, cw4);
+    }
+}
+
+pub fn copy_db_8bpc(
+    lr_db: &mut [Vec<u8>; 3],
+    src: &[&[u8]; 3],
+    strides: &[isize; 2],
+    bw: usize,
+    bh: usize,
+    sby: i32,
+    sb128: bool,
+    ss_hor: bool,
+    ss_ver: bool,
+    lr_backup: bool,
+) {
+    let sb_size = if sb128 { 128 } else { 64 };
+    let row = sby as usize * sb_size;
+    let row_h = (row + sb_size).min(bh * 4);
+
+    if row >= row_h {
+        return;
+    }
+
+    let w = bw * 4;
+    let h = bh * 4;
+
+    backup_db(
+        &mut lr_db[0],
+        src[0],
+        strides[0] as usize,
+        0,
+        sb128,
+        row as i32,
+        row_h as i32,
+        w,
+        lr_backup,
+        1,
+    );
+
+    if strides[1] != 0 {
+        let cw = w >> (ss_hor as usize);
+        let ch = h >> (ss_ver as usize);
+        let crow = row >> (ss_ver as usize);
+        let crow_h = row_h >> (ss_ver as usize);
+
+        backup_db(
+            &mut lr_db[1],
+            src[1],
+            strides[1] as usize,
+            ss_ver as i32,
+            sb128,
+            crow as i32,
+            crow_h as i32,
+            cw,
+            lr_backup,
+            1,
+        );
+        backup_db(
+            &mut lr_db[2],
+            src[2],
+            strides[1] as usize,
+            ss_ver as i32,
+            sb128,
+            crow as i32,
+            crow_h as i32,
+            cw,
+            lr_backup,
+            1,
+        );
+    }
+}
+
+fn backup_db_apply(
+    dst: &mut [u8],
+    src: &[u8],
+    stride: usize,
+    w: usize,
+    n_lines: usize,
+    src_row: usize,
+) {
+    for i in 0..n_lines {
+        let src_off = (src_row + i) * stride;
+        let dst_off = i * w;
+        if src_off + w <= src.len() && dst_off + w <= dst.len() {
+            dst[dst_off..dst_off + w].copy_from_slice(&src[src_off..src_off + w]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

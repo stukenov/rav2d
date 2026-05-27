@@ -85,6 +85,8 @@ pub struct TileState {
     pub lr_ref: [Vec<Av2RestorationUnit>; 3],
 
     pub ns_wiener_bank: [NsWienerBank; 3],
+
+    pub tile_start_off: u32,
 }
 
 impl Default for TileState {
@@ -100,6 +102,7 @@ impl Default for TileState {
             last_qidx: 0,
             lr_ref: Default::default(),
             ns_wiener_bank: Default::default(),
+            tile_start_off: 0,
         }
     }
 }
@@ -169,6 +172,12 @@ pub struct LoopFilterState {
     pub restore_planes: i32,
     pub wiener_idx: usize,
     pub ns_subclass_class_idx: Option<usize>,
+    pub lr_db_line: [Vec<u8>; 3],
+    pub lr_cdef_line: [Vec<u8>; 3],
+    pub p: [Vec<u8>; 3],
+    pub ns_subclass_lut: Vec<u8>,
+    pub pc_subclass_lut: Vec<u8>,
+    pub pc_filters: Vec<[i16; 13]>,
 }
 
 impl Default for LoopFilterState {
@@ -188,6 +197,12 @@ impl Default for LoopFilterState {
             restore_planes: 0,
             wiener_idx: 0,
             ns_subclass_class_idx: None,
+            lr_db_line: Default::default(),
+            lr_cdef_line: Default::default(),
+            p: Default::default(),
+            ns_subclass_lut: Vec::new(),
+            pc_subclass_lut: Vec::new(),
+            pc_filters: Vec::new(),
         }
     }
 }
