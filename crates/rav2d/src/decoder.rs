@@ -1,25 +1,26 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once};
 
 use crate::cpu;
 use crate::data::Data;
-use crate::headers::{FrameHeader, PixelLayout, SequenceHeader};
-use crate::log::{rav2d_log, Logger};
+use crate::dsp::{DSPContext, PalDSPContext, RefmvsDSPContext};
+use crate::error::Rav2dError;
+use crate::internal::DecoderContext;
+use crate::log::Logger;
 use crate::mem::MemPool;
+use crate::obu;
 use crate::picture::{
-    DefaultPicAllocator, EventFlags, PicAllocator, Picture, ThreadPicture,
-    PICTURE_FLAG_NEW_OP_PARAMS_INFO, PICTURE_FLAG_NEW_SEQUENCE,
+    DefaultPicAllocator, PicAllocator, Picture, ThreadPicture,
 };
 
 pub const MAX_THREADS: u32 = 256;
 pub const MAX_FRAME_DELAY: u32 = 256;
-pub const EOF: i32 = -1;
-pub const EAGAIN: i32 = -2;
-pub const EINVAL: i32 = -3;
-pub const ENOMEM: i32 = -4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+/// Which in-loop filters to apply during decoding.
+#[non_exhaustive]
+#[derive(Default)]
 pub enum InloopFilterType {
     None = 0,
     Deblock = 1,
@@ -27,41 +28,47 @@ pub enum InloopFilterType {
     Restoration = 4,
     Wiener = 8,
     Gdf = 16,
+    #[default]
     All = 31,
 }
 
-impl Default for InloopFilterType {
-    fn default() -> Self {
-        Self::All
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+/// Which frame types to decode.
+#[non_exhaustive]
+#[derive(Default)]
 pub enum DecodeFrameType {
+    #[default]
     All = 0,
     Reference = 1,
     Intra = 2,
     Key = 3,
 }
 
-impl Default for DecodeFrameType {
-    fn default() -> Self {
-        Self::All
-    }
-}
 
+/// Decoder configuration. Use `Settings::default()` for sensible defaults.
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// Number of worker threads. 0 = auto-detect from CPU count.
     pub n_threads: u32,
+    /// Maximum frame delay for pipelining. 0 = auto based on thread count.
     pub max_frame_delay: u32,
+    /// Apply film grain synthesis to decoded output.
     pub apply_grain: bool,
+    /// Scalability operating point index (0–31).
     pub operating_point: u32,
+    /// Output all temporal/spatial layers.
     pub all_layers: bool,
+    /// Maximum frame size in pixels (width × height). 0 = unlimited.
     pub frame_size_limit: u32,
+    /// Abort on spec-violating bitstreams instead of best-effort.
     pub strict_std_compliance: bool,
+    /// Output frames not marked for display.
     pub output_invisible_frames: bool,
+    /// Which in-loop filters to apply.
     pub inloop_filters: InloopFilterType,
+    /// Which frame types to decode.
     pub decode_frame_type: DecodeFrameType,
 }
 
@@ -111,9 +118,9 @@ fn get_num_threads(s: &Settings) -> (u32, u32) {
     (n_tc, n_fc)
 }
 
-pub fn get_frame_delay(s: &Settings) -> Result<u32, i32> {
+pub fn get_frame_delay(s: &Settings) -> Result<u32, Rav2dError> {
     if s.n_threads > MAX_THREADS || s.max_frame_delay > MAX_FRAME_DELAY {
-        return Err(EINVAL);
+        return Err(Rav2dError::InvalidParam);
     }
     let (_, n_fc) = get_num_threads(s);
     Ok(n_fc)
@@ -132,45 +139,24 @@ struct OutputQueue {
     res: i32,
 }
 
-struct RefEntry {
-    p: ThreadPicture,
-    segmap: Option<Vec<u8>>,
-    refmvs: Option<Vec<u8>>,
-}
-
-impl RefEntry {
-    fn new() -> Self {
-        Self {
-            p: ThreadPicture::new(),
-            segmap: None,
-            refmvs: None,
-        }
-    }
-}
-
+/// AV2 bitstream decoder.
+///
+/// Feed compressed OBU data with [`send_data`](Self::send_data), then
+/// pull decoded frames with [`get_picture`](Self::get_picture).
 pub struct Decoder {
     logger: Logger,
     allocator: Arc<dyn PicAllocator>,
-    apply_grain: bool,
-    operating_point: u32,
-    all_layers: bool,
-    frame_size_limit: u32,
-    strict_std_compliance: bool,
-    output_invisible_frames: bool,
     inloop_filters: InloopFilterType,
     decode_frame_type: DecodeFrameType,
 
     n_tc: u32,
     n_fc: u32,
 
-    seq_hdr: Option<Arc<SequenceHeader>>,
-    frame_hdr: Option<Arc<FrameHeader>>,
+    ctx: DecoderContext,
 
     input: Data,
     drain: bool,
     flush: AtomicBool,
-
-    refs: [RefEntry; 8],
 
     dpb: Vec<OutputQueue>,
     dpb_in: usize,
@@ -200,14 +186,15 @@ struct TaskThread {
 }
 
 impl Decoder {
-    pub fn open(s: &Settings) -> Result<Self, i32> {
+    /// Create a new decoder with the given settings.
+    pub fn open(s: &Settings) -> Result<Self, Rav2dError> {
         init_internal();
 
         if s.n_threads > MAX_THREADS || s.max_frame_delay > MAX_FRAME_DELAY {
-            return Err(EINVAL);
+            return Err(Rav2dError::InvalidParam);
         }
         if s.operating_point > 31 {
-            return Err(EINVAL);
+            return Err(Rav2dError::InvalidParam);
         }
 
         let (n_tc, n_fc) = get_num_threads(s);
@@ -235,27 +222,43 @@ impl Decoder {
             None
         };
 
-        let refs = std::array::from_fn(|_| RefEntry::new());
+        let ctx = DecoderContext {
+            seq_hdr: None,
+            frame_hdr: None,
+            tile: Vec::new(),
+            n_tile_data: 0,
+            n_tiles: 0,
+            refs: Default::default(),
+            cdf: Vec::new(),
+            dsp: Arc::new(std::array::from_fn(|_| DSPContext::default())),
+            pal_dsp: PalDSPContext::default(),
+            refmvs_dsp: RefmvsDSPContext::default(),
+            content_light: None,
+            mastering_display: None,
+            ci: None,
+            fgm: Default::default(),
+            apply_grain: s.apply_grain,
+            operating_point: s.operating_point as i32,
+            operating_point_idc: 0,
+            all_layers: s.all_layers,
+            max_spatial_id: 0,
+            frame_size_limit: s.frame_size_limit,
+            strict_std_compliance: s.strict_std_compliance,
+            output_invisible_frames: s.output_invisible_frames,
+            n_passes: 1,
+        };
 
         Ok(Self {
             logger,
             allocator,
-            apply_grain: s.apply_grain,
-            operating_point: s.operating_point,
-            all_layers: s.all_layers,
-            frame_size_limit: s.frame_size_limit,
-            strict_std_compliance: s.strict_std_compliance,
-            output_invisible_frames: s.output_invisible_frames,
             inloop_filters: s.inloop_filters,
             decode_frame_type: s.decode_frame_type,
             n_tc,
             n_fc,
-            seq_hdr: None,
-            frame_hdr: None,
+            ctx,
             input: Data::new(),
             drain: false,
             flush: AtomicBool::new(false),
-            refs,
             dpb,
             dpb_in: 0,
             dpb_out: 0,
@@ -275,7 +278,11 @@ impl Decoder {
         })
     }
 
-    pub fn send_data(&mut self, data: Option<Data>) -> Result<(), i32> {
+    /// Feed compressed data to the decoder. Pass `None` to signal end-of-stream.
+    ///
+    /// Returns `Err(Again)` if the decoder hasn't consumed previous data yet;
+    /// call `get_picture` to drain output before sending more.
+    pub fn send_data(&mut self, data: Option<Data>) -> Result<(), Rav2dError> {
         match data {
             None => {
                 self.drain = true;
@@ -283,13 +290,13 @@ impl Decoder {
             }
             Some(d) => {
                 if self.drain {
-                    return Err(EOF);
+                    return Err(Rav2dError::Eof);
                 }
                 if d.is_empty() || d.len() > usize::MAX / 2 {
-                    return Err(EINVAL);
+                    return Err(Rav2dError::InvalidParam);
                 }
                 if self.input.has_data() {
-                    return Err(EAGAIN);
+                    return Err(Rav2dError::Again);
                 }
                 self.input = d;
                 Ok(())
@@ -297,7 +304,11 @@ impl Decoder {
         }
     }
 
-    pub fn get_picture(&mut self) -> Result<Picture, i32> {
+    /// Retrieve a decoded picture from the output queue.
+    ///
+    /// Returns `Err(Again)` when no picture is available yet (send more data).
+    /// Returns `Err(Eof)` when the stream has been fully drained.
+    pub fn get_picture(&mut self) -> Result<Picture, Rav2dError> {
         self.gen_picture()?;
 
         if self.drain {
@@ -314,16 +325,29 @@ impl Decoder {
         true
     }
 
-    fn gen_picture(&mut self) -> Result<(), i32> {
+    fn gen_picture(&mut self) -> Result<(), Rav2dError> {
         if self.output_picture_ready() {
             return Ok(());
         }
 
         while !self.input.is_empty() {
-            // In full implementation, would call obu::parse_obus here
-            // For now, consume all input
-            let len = self.input.len();
-            self.input.consume(len);
+            let data = match self.input.data() {
+                Some(d) => d,
+                None => break,
+            };
+            match obu::parse_obus(&mut self.ctx, data) {
+                Ok(consumed) => {
+                    assert!(consumed <= self.input.len());
+                    self.input.consume(consumed);
+                    if self.input.is_empty() {
+                        self.input.unref();
+                    }
+                }
+                Err(_e) => {
+                    self.input.unref();
+                    return Err(Rav2dError::InvalidData);
+                }
+            }
 
             if self.output_picture_ready() {
                 break;
@@ -333,13 +357,13 @@ impl Decoder {
         Ok(())
     }
 
-    fn output_image(&mut self) -> Result<Picture, i32> {
+    fn output_image(&mut self) -> Result<Picture, Rav2dError> {
         if self.dpb_in == self.dpb_out {
             if !self.drain {
-                return Err(EAGAIN);
+                return Err(Rav2dError::Again);
             }
             self.drain = false;
-            return Err(EOF);
+            return Err(Rav2dError::Eof);
         }
 
         let q = &mut self.dpb[self.dpb_out];
@@ -359,6 +383,7 @@ impl Decoder {
         // Flush implicit show frames from refs
     }
 
+    /// Reset the decoder state, discarding all buffered data and references.
     pub fn flush(&mut self) {
         self.input.unref();
 
@@ -371,16 +396,19 @@ impl Decoder {
         self.dpb_out = 0;
         self.drain = false;
 
-        for r in &mut self.refs {
-            if r.p.p.has_data() {
-                r.p.unref();
-            }
+        for r in &mut self.ctx.refs {
             r.segmap = None;
             r.refmvs = None;
+            r.ccsomap = None;
+            r.p.frame_hdr = None;
+            r.refpoc = [0; 7];
         }
 
-        self.frame_hdr = None;
-        self.seq_hdr = None;
+        self.ctx.frame_hdr = None;
+        self.ctx.seq_hdr = None;
+        self.ctx.tile.clear();
+        self.ctx.n_tile_data = 0;
+        self.ctx.n_tiles = 0;
 
         self.flush.store(false, Ordering::Release);
     }
@@ -417,7 +445,7 @@ pub fn version() -> &'static str {
 }
 
 pub fn version_api() -> u32 {
-    (0 << 16) | (1 << 8) | 0
+    1 << 8 
 }
 
 #[cfg(test)]
@@ -481,7 +509,7 @@ mod tests {
     fn test_get_frame_delay_invalid() {
         let mut s = Settings::default();
         s.n_threads = MAX_THREADS + 1;
-        assert_eq!(get_frame_delay(&s), Err(EINVAL));
+        assert_eq!(get_frame_delay(&s), Err(Rav2dError::InvalidParam));
     }
 
     #[test]
@@ -523,7 +551,7 @@ mod tests {
         let mut d = Decoder::open(&s).unwrap();
         d.send_data(None).unwrap();
         let data = Data::wrap(vec![1, 2, 3]);
-        assert_eq!(d.send_data(Some(data)), Err(EOF));
+        assert_eq!(d.send_data(Some(data)), Err(Rav2dError::Eof));
     }
 
     #[test]
@@ -531,7 +559,7 @@ mod tests {
         let s = Settings::default();
         let mut d = Decoder::open(&s).unwrap();
         let data = Data::new();
-        assert_eq!(d.send_data(Some(data)), Err(EINVAL));
+        assert_eq!(d.send_data(Some(data)), Err(Rav2dError::InvalidParam));
     }
 
     #[test]
@@ -541,7 +569,7 @@ mod tests {
         d.send_data(Some(Data::wrap(vec![1, 2, 3]))).unwrap();
         assert_eq!(
             d.send_data(Some(Data::wrap(vec![4, 5, 6]))),
-            Err(EAGAIN)
+            Err(Rav2dError::Again)
         );
     }
 
@@ -549,7 +577,7 @@ mod tests {
     fn test_get_picture_no_data() {
         let s = Settings::default();
         let mut d = Decoder::open(&s).unwrap();
-        assert_eq!(d.get_picture().err(), Some(EAGAIN));
+        assert_eq!(d.get_picture().err(), Some(Rav2dError::Again));
     }
 
     #[test]

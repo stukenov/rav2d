@@ -1752,22 +1752,22 @@ pub fn init_qm_tables() -> QmTables {
             let v = subsample(&full_32x32, 32 * 3 + 3, 32, 8, 8);
             tables.qm_tbl_4x4[i][j].copy_from_slice(&v);
 
-            let v = subsample(&QM_TBL_32X16[i][j], 32 * 1 + 1, 16, 4, 4);
+            let v = subsample(&QM_TBL_32X16[i][j], 32 + 1, 16, 4, 4);
             tables.qm_tbl_8x4[i][j].copy_from_slice(&v);
 
-            let v = subsample(&full_32x32, 32 * 1 + 1, 32, 4, 4);
+            let v = subsample(&full_32x32, 32 + 1, 32, 4, 4);
             tables.qm_tbl_8x8[i][j].copy_from_slice(&v);
 
-            let v = subsample(&QM_TBL_32X16[i][j], 32 * 1 + 0, 16, 2, 4);
+            let v = subsample(&QM_TBL_32X16[i][j], 32, 16, 2, 4);
             tables.qm_tbl_16x4[i][j].copy_from_slice(&v);
 
-            let v = subsample(&QM_TBL_32X16[i][j], 32 * 0 + 0, 16, 2, 2);
+            let v = subsample(&QM_TBL_32X16[i][j], 0, 16, 2, 2);
             tables.qm_tbl_16x8[i][j].copy_from_slice(&v);
 
-            let v = subsample(&full_32x32, 32 * 0 + 0, 32, 2, 2);
+            let v = subsample(&full_32x32, 0, 32, 2, 2);
             tables.qm_tbl_16x16[i][j].copy_from_slice(&v);
 
-            let v = subsample(&QM_TBL_32X16[i][j], 32 * 0 + 0, 16, 1, 2);
+            let v = subsample(&QM_TBL_32X16[i][j], 0, 16, 1, 2);
             tables.qm_tbl_32x8[i][j].copy_from_slice(&v);
 
             // Step 3: transpose to get the remaining sizes

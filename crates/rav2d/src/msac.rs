@@ -163,7 +163,7 @@ impl<'a> MsacContext<'a> {
         let dif = self.dif;
         debug_assert!((dif >> 48) < r as u64);
         let p = ((f >> 7) << 4) + 8;
-        let mut v = ((r >> 8) * p >> 7) << 3;
+        let mut v = (((r >> 8) * p) >> 7) << 3;
         let vw = (v as u64) << 48;
         let ret = if dif >= vw { 1 } else { 0 };
         let new_dif = dif - ret as u64 * vw;
@@ -186,7 +186,7 @@ impl<'a> MsacContext<'a> {
             u = v;
             let p_raw = (cdf[val as usize] | 127) as i32 - min_prob[val as usize] as i32;
             let p = p_raw.max(0) as u32;
-            v = (r * p >> 10) << 3;
+            v = ((r * p) >> 10) << 3;
             if c >= v {
                 break;
             }
@@ -204,10 +204,10 @@ impl<'a> MsacContext<'a> {
             let rate = MSAC_RATE[(pc >> 8) as usize][(count >> 4) as usize]
                 + if n_symbols > 2 { 1 } else { 0 };
             for i in 0..val as usize {
-                cdf[i] += ((32768 - cdf[i]) >> rate) as u16;
+                cdf[i] += (32768 - cdf[i]) >> rate ;
             }
             for i in val as usize..n_symbols {
-                cdf[i] -= (cdf[i] >> rate) as u16;
+                cdf[i] -= cdf[i] >> rate ;
             }
             cdf[n_symbols] = pc + if count < 32 { 1 } else { 0 };
         }
@@ -223,9 +223,9 @@ impl<'a> MsacContext<'a> {
             let count = (pc & 0xFF) as u8;
             let rate = MSAC_RATE[(pc >> 8) as usize][(count >> 4) as usize];
             if bit != 0 {
-                cdf[0] += ((32768 - cdf[0]) >> rate) as u16;
+                cdf[0] += (32768 - cdf[0]) >> rate ;
             } else {
-                cdf[0] -= (cdf[0] >> rate) as u16;
+                cdf[0] -= cdf[0] >> rate ;
             }
             cdf[1] = pc + if count < 32 { 1 } else { 0 };
         }

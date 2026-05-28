@@ -9,7 +9,7 @@ pub const SUB_GRAIN_HEIGHT: usize = 38;
 
 pub fn get_random_number(bits: u32, state: &mut u32) -> u32 {
     let r = *state;
-    let bit = ((r >> 0) ^ (r >> 1) ^ (r >> 3) ^ (r >> 12)) & 1;
+    let bit = (r ^ (r >> 1) ^ (r >> 3) ^ (r >> 12)) & 1;
     *state = (r >> 1) | (bit << 15);
     (*state >> (16 - bits)) & ((1 << bits) - 1)
 }
@@ -126,7 +126,7 @@ pub fn generate_grain_y(
             let mut sum = 0i32;
             let mut ci = 0usize;
             for dy in (y.wrapping_sub(ar_lag))..=y {
-                let dx_start = if dy == y { x.wrapping_sub(ar_lag) } else { x.wrapping_sub(ar_lag) };
+                let dx_start = x.wrapping_sub(ar_lag);
                 let dx_end = if dy == y { x } else { x + ar_lag + 1 };
                 for dx in dx_start..dx_end {
                     if dy == y && dx == x {
@@ -273,9 +273,8 @@ pub fn fgy_32x32xn_8bpc(
 
         for i in 0..rows {
             for n in 0..2 {
-                offsets[0][i][n] = ((3 - data.block_size) as u32
-                    * get_random_number(9, &mut seed[i])
-                    >> 6) as i32;
+                offsets[0][i][n] = (((3 - data.block_size) as u32
+                    * get_random_number(9, &mut seed[i])) >> 6) as i32;
                 for _ in 0..3 {
                     get_random_number(16, &mut seed[i]);
                 }
@@ -431,9 +430,8 @@ pub fn fguv_32x32xn_8bpc(
 
         for i in 0..rows {
             for n in 0..2 {
-                offsets[0][i][n] = ((3 - data.block_size) as u32
-                    * get_random_number(9, &mut seed[i])
-                    >> 6) as i32;
+                offsets[0][i][n] = (((3 - data.block_size) as u32
+                    * get_random_number(9, &mut seed[i])) >> 6) as i32;
                 for _ in 0..3 {
                     get_random_number(16, &mut seed[i]);
                 }
@@ -760,7 +758,7 @@ pub fn apply_grain_8bpc(
     prep_grain_8bpc(fgd, &mut grain_lut, &mut scaling, seed);
 
     let bh = 32usize;
-    let rows = (h + bh - 1) / bh;
+    let rows = h.div_ceil(bh);
 
     for row in 0..rows {
         apply_grain_row_8bpc(

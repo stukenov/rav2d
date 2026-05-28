@@ -291,6 +291,7 @@ impl CdfModeContext {
 
 #[derive(Clone)]
 #[repr(C)]
+#[derive(Default)]
 pub struct CdfContext {
     pub coef: CdfCoefContext,
     pub m: CdfModeContext,
@@ -298,16 +299,6 @@ pub struct CdfContext {
     pub dmv: CdfMvContext,
 }
 
-impl Default for CdfContext {
-    fn default() -> Self {
-        Self {
-            coef: Default::default(),
-            m: Default::default(),
-            mv: Default::default(),
-            dmv: Default::default(),
-        }
-    }
-}
 
 #[repr(C)]
 pub struct CdfDefaultContext {

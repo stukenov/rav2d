@@ -46,12 +46,14 @@ impl fmt::Debug for Logger {
     }
 }
 
+#[allow(unused_macros)]
 macro_rules! rav2d_log {
     ($logger:expr, $($arg:tt)*) => {
         $logger.log(format_args!($($arg)*))
     };
 }
 
+#[allow(unused_imports)]
 pub(crate) use rav2d_log;
 
 #[cfg(test)]

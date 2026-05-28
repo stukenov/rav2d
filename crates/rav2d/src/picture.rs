@@ -1,5 +1,5 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 
 use crate::data::DataProps;
@@ -21,6 +21,7 @@ pub struct PictureData {
     size: usize,
 }
 
+// SAFETY: PictureData owns its allocation exclusively; the NonNull pointer is not aliased.
 unsafe impl Send for PictureData {}
 unsafe impl Sync for PictureData {}
 
@@ -46,11 +47,18 @@ pub struct PictureAllocation {
     pool_size: usize,
 }
 
+// SAFETY: PictureAllocation owns its plane pointers; they are not aliased across threads.
 unsafe impl Send for PictureAllocation {}
 unsafe impl Sync for PictureAllocation {}
 
 pub struct DefaultPicAllocator {
     pool: Arc<MemPool>,
+}
+
+impl Default for DefaultPicAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DefaultPicAllocator {
@@ -123,6 +131,7 @@ impl PicAllocator for DefaultPicAllocator {
     }
 }
 
+/// A decoded video frame with pixel data and associated metadata.
 pub struct Picture {
     pub p: PictureParameters,
     pub data: [Option<NonNull<u8>>; 3],
@@ -134,6 +143,7 @@ pub struct Picture {
     allocator: Option<Arc<dyn PicAllocator>>,
 }
 
+// SAFETY: Picture owns its pixel data via PicAllocator; no mutable aliasing across threads.
 unsafe impl Send for Picture {}
 unsafe impl Sync for Picture {}
 

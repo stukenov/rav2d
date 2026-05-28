@@ -341,7 +341,7 @@ pub fn ipred_smooth(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usize
     for y in 0..h {
         let left = tl[o - 1 - y] as i32;
         let diff_hor = left - right;
-        let off_ver = (h as i32 - 1 - y as i32) as i32;
+        let off_ver = h as i32 - 1 - y as i32 ;
         let w_ver = weights[y] as i32;
         for x in 0..w {
             let above = tl[o + 1 + x] as i32;
@@ -445,7 +445,7 @@ pub fn ipred_z1(
     let dx = DR_INTRA_DERIVATIVE[angle as usize] as i32;
     let max_base_x = (width + height) as i32 - 1 + (mrl_idx as i32 * 2);
 
-    let mut filt = vec![0u8; 136];
+    let mut filt = [0u8; 136];
     let top_off = 2 + mrl_idx;
     let sz = 1 + mrl_idx + width + height + mrl_idx * 2;
     let str = if enable_intra_edge_filter && have_top && mrl_idx == 0 {
@@ -516,6 +516,7 @@ pub fn ipred_z1(
     }
 }
 
+#[allow(clippy::explicit_counter_loop)]
 pub fn ipred_z3(
     dst: &mut [u8],
     stride: usize,
@@ -561,7 +562,7 @@ pub fn ipred_z3(
     let dy = DR_INTRA_DERIVATIVE[(270 - angle) as usize] as i32;
     let max_base_y = (width + height) as i32 - 1 + (mrl_idx as i32 * 2);
 
-    let mut filt = vec![0u8; 136];
+    let mut filt = [0u8; 136];
     let left_off = 1 + width + height + mrl_idx * 2;
     let sz = 1 + mrl_idx + width + height + mrl_idx * 2;
 
@@ -671,7 +672,7 @@ pub fn ipred_z2(
     let dx = DR_INTRA_DERIVATIVE[(180 - angle) as usize] as i32;
 
     // Top filter buffer
-    let mut filt = vec![0u8; 72];
+    let mut filt = [0u8; 72];
     let top_off = mrl_idx;
     let sz_t = 1 + width + mrl_idx;
     let str_t = if enable_intra_edge_filter && have_top && mrl_idx == 0 {
@@ -691,7 +692,7 @@ pub fn ipred_z2(
     filt[sz_t + 1] = filt[sz_t];
 
     // Left filter buffer
-    let mut filt2 = vec![0u8; 72];
+    let mut filt2 = [0u8; 72];
     let left_off: usize = height + 2;
     let sz_l = 1 + height + mrl_idx;
     let str_l = if enable_intra_edge_filter && have_left && mrl_idx == 0 {
@@ -889,12 +890,12 @@ pub fn ipred_dip_8bpc(
 
     let m = (mode & 7) as usize;
 
-    let mut uwl2 = wl2 as i32 - 1;
+    let mut uwl2 = wl2 - 1;
     let mut dwl2 = 0i32;
     if uwl2 < 0 { dwl2 = -uwl2; uwl2 = 0; }
     let step_x = 1usize << uwl2;
     let dw = 1usize << dwl2;
-    let mut uhl2 = hl2 as i32 - 1;
+    let mut uhl2 = hl2 - 1;
     let mut dhl2 = 0i32;
     if uhl2 < 0 { dhl2 = -uhl2; uhl2 = 0; }
     let step_y = 1usize << uhl2;

@@ -583,7 +583,7 @@ fn deblock_sbrow64_cols_8bpc(
     v: &mut [u8],
     params: &DeblockApplyParams,
     masks: &[[[u16; 4]; 5]],
-    segmap: &[u8],
+    _segmap: &[u8],
     thr_lut_y: &[[u8; 16]; 2],
     _thr_lut_uv: &[[[u8; 16]; 2]; 2],
     y64: usize,
@@ -594,7 +594,7 @@ fn deblock_sbrow64_cols_8bpc(
         return;
     }
 
-    let sb64w = (params.bw + 15) / 16;
+    let sb64w = params.bw.div_ceil(16);
     for sbx in 0..sb64w {
         let have_left = sbx > 0;
         let w4 = imin(16, params.bw as i32 - sbx as i32 * 16);
@@ -633,7 +633,7 @@ fn filter_choice(
     s: &[u8], s_off: usize,
     t: &[u8], t_off: usize,
     stride: isize,
-    max_width_neg: i32, max_width_pos: i32,
+    _max_width_neg: i32, max_width_pos: i32,
     q_thr: u32, side_thr: u32,
 ) -> i32 {
     let st = stride;
@@ -684,15 +684,15 @@ fn filter_choice(
         let end_thr4 = q_thr * Q_THRESH_MULTS[idx] as u32;
         let dist2 = dist - 1;
 
-        let ds = (at(s, s_off, 0) - at(s, s_off, dist2 as isize) - dist2 as i32 * (at(s, s_off, 0) - at(s, s_off, 1))).unsigned_abs();
-        let dt = (at(t, t_off, 0) - at(t, t_off, dist2 as isize) - dist2 as i32 * (at(t, t_off, 0) - at(t, t_off, 1))).unsigned_abs();
+        let ds = (at(s, s_off, 0) - at(s, s_off, dist2 as isize) - dist2 * (at(s, s_off, 0) - at(s, s_off, 1))).unsigned_abs();
+        let dt = (at(t, t_off, 0) - at(t, t_off, dist2 as isize) - dist2 * (at(t, t_off, 0) - at(t, t_off, 1))).unsigned_abs();
         if ((ds + dt + 1) >> 1) > end_thr4 {
             return prev_dist;
         }
 
         let side_end_thr4 = side_thr * Q_THRESH_MULTS[idx] as u32;
-        let ds = (at(s, s_off, 0) - at(s, s_off, -(dist2 as isize)) - dist2 as i32 * (at(s, s_off, 0) - at(s, s_off, -1))).unsigned_abs();
-        let dt = (at(t, t_off, 0) - at(t, t_off, -(dist2 as isize)) - dist2 as i32 * (at(t, t_off, 0) - at(t, t_off, -1))).unsigned_abs();
+        let ds = (at(s, s_off, 0) - at(s, s_off, -(dist2 as isize)) - dist2 * (at(s, s_off, 0) - at(s, s_off, -1))).unsigned_abs();
+        let dt = (at(t, t_off, 0) - at(t, t_off, -(dist2 as isize)) - dist2 * (at(t, t_off, 0) - at(t, t_off, -1))).unsigned_abs();
         if ((ds + dt + 1) >> 1) > side_end_thr4 {
             return prev_dist;
         }
@@ -784,7 +784,7 @@ fn deblock_v_sb64y(
     q_thr: &[u32], side_thr: &[u32],
     tile_edge: bool, w4: i32,
 ) {
-    let ls = stride.unsigned_abs();
+    let _ls = stride.unsigned_abs();
     for x in 0..w4 as u16 {
         let mask = vmask[0] | vmask[1] | vmask[2] | vmask[3];
         if mask & (1 << x) == 0 {
@@ -837,7 +837,7 @@ fn deblock_v_sb64uv(
     q_thr: &[u32], side_thr: &[u32],
     tile_edge: bool, w4: i32,
 ) {
-    let ls = stride.unsigned_abs();
+    let _ls = stride.unsigned_abs();
     for x in 0..w4 as u16 {
         let mask = vmask[0] | vmask[1] | vmask[2];
         if mask & (1 << x) == 0 {
@@ -867,7 +867,7 @@ fn filter_plane_cols_y_8bpc(
     w4: i32,
     h4: i32,
 ) {
-    let ls = stride.unsigned_abs();
+    let _ls = stride.unsigned_abs();
     let mut tile_edge = sbx == 0;
     for x in 0..w4 {
         let mask_idx = sbx * 16 + x as usize;
@@ -903,7 +903,7 @@ fn filter_plane_cols_uv_8bpc(
     ss_hor: bool,
     ss_ver: bool,
 ) {
-    let ls = stride.unsigned_abs();
+    let _ls = stride.unsigned_abs();
     let cw4 = w4 >> ss_hor as i32;
     let ch4 = h4 >> ss_ver as i32;
     let mut tile_edge = sbx == 0;
@@ -971,7 +971,7 @@ fn deblock_sbrow64_rows_8bpc(
     v: &mut [u8],
     params: &DeblockApplyParams,
     masks: &[[[u16; 4]; 5]],
-    segmap: &[u8],
+    _segmap: &[u8],
     _thr_lut_y: &[[u8; 16]; 2],
     _thr_lut_uv: &[[[u8; 16]; 2]; 2],
     y64: usize,
@@ -981,7 +981,7 @@ fn deblock_sbrow64_rows_8bpc(
         return;
     }
 
-    let sb64w = (params.bw + 15) / 16;
+    let sb64w = params.bw.div_ceil(16);
     for sbx in 0..sb64w {
         let have_top = y64 > 0;
         let w4 = imin(16, params.bw as i32 - sbx as i32 * 16);
@@ -1122,7 +1122,7 @@ pub fn copy_db_8bpc(
 
     if strides[1] != 0 {
         let cw = w >> (ss_hor as usize);
-        let ch = h >> (ss_ver as usize);
+        let _ch = h >> (ss_ver as usize);
         let crow = row >> (ss_ver as usize);
         let crow_h = row_h >> (ss_ver as usize);
 

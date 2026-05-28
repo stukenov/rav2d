@@ -623,7 +623,7 @@ pub fn mc_lowest_px(
         let dy = mvy & (15 >> (ss_ver == 0) as u32);
         *dst = imax(*dst, (by4 + bh4) * v_mul + my + 4 * (dy != 0) as i32);
     } else {
-        let y = (by4 * v_mul << 4) + mvy * (1 << (ss_ver == 0) as u32);
+        let y = ((by4 * v_mul) << 4) + mvy * (1 << (ss_ver == 0) as u32);
         let tmp = y as i64 * smp.scale as i64 + (smp.scale as i64 - 0x4000) * 8;
         let y = apply_sign64((tmp.unsigned_abs() as i64 + 128) >> 8, tmp) + 32;
         let bottom = ((y + (bh4 * v_mul - 1) * smp.step) >> 10) + 1 + 4;
@@ -1257,8 +1257,8 @@ pub fn read_tx_part(
             b.tx_size_ll =
                 msac.decode_bool_adapt(cdf_m.txsz_lossless(szctx, inter)) as u8;
         }
-    } else if b.skip_txfm == 0 {
-        if txfm_switchable && bs != BlockSize::Bs4x4 && imax(bw4, bh4) <= 16 {
+    } else if b.skip_txfm == 0
+        && txfm_switchable && bs != BlockSize::Bs4x4 && imax(bw4, bh4) <= 16 {
             let inter = (b.is_intra == 0 || b.intrabc != 0) as usize;
             let szctx = TX_PART_GROUP[bs_idx] as usize;
             let is_split = msac.decode_bool_adapt(
@@ -1291,7 +1291,6 @@ pub fn read_tx_part(
                 }
             }
         }
-    }
 }
 
 pub fn read_restoration_info(
@@ -1764,14 +1763,14 @@ fn get_filter_ctx(
 
     let flt0 = if nb_boff[0] != -1 {
         let off = nb_boff[0] as usize;
-        if l.r#ref[0][off] as i8 == ref0 || l.r#ref[1][off] as i8 == ref0 {
+        if l.r#ref[0][off] == ref0 || l.r#ref[1][off] == ref0 {
             l.filter[off]
         } else { N_SWITCHABLE }
     } else { N_SWITCHABLE };
 
     let flt1 = if nb_boff[1] != -1 {
         let off = nb_boff[1] as usize;
-        if a.r#ref[0][off] as i8 == ref0 || a.r#ref[1][off] as i8 == ref0 {
+        if a.r#ref[0][off] == ref0 || a.r#ref[1][off] == ref0 {
             a.filter[off]
         } else { N_SWITCHABLE }
     } else { N_SWITCHABLE };
@@ -1845,8 +1844,8 @@ fn decode_b(
             st[0] = l.skip_txfm[off];
             intra_vals[0] = if l.intra[off] != 0 && l.intrabc[off] == 0 { 1 } else { 0 };
             ibc_vals[0] = l.intrabc[off];
-            r0[0] = l.r#ref[0][off] as i8;
-            r1[0] = l.r#ref[1][off] as i8;
+            r0[0] = l.r#ref[0][off];
+            r1[0] = l.r#ref[1][off];
             amvd_v[0] = l.amvd[off];
             xoff[0] = off;
             idx += 1;
@@ -1857,8 +1856,8 @@ fn decode_b(
             st[idx] = a.skip_txfm[off];
             intra_vals[idx] = if a.intra[off] != 0 && a.intrabc[off] == 0 { 1 } else { 0 };
             ibc_vals[idx] = a.intrabc[off];
-            r0[idx] = a.r#ref[0][off] as i8;
-            r1[idx] = a.r#ref[1][off] as i8;
+            r0[idx] = a.r#ref[0][off];
+            r1[idx] = a.r#ref[1][off];
             amvd_v[idx] = a.amvd[off];
             xoff[idx] = off;
             idx += 1;
@@ -1868,8 +1867,8 @@ fn decode_b(
             st[idx] = l.skip_txfm[by4];
             intra_vals[idx] = if l.intra[by4] != 0 && l.intrabc[by4] == 0 { 1 } else { 0 };
             ibc_vals[idx] = l.intrabc[by4];
-            r0[idx] = l.r#ref[0][by4] as i8;
-            r1[idx] = l.r#ref[1][by4] as i8;
+            r0[idx] = l.r#ref[0][by4];
+            r1[idx] = l.r#ref[1][by4];
             amvd_v[idx] = l.amvd[by4];
             xoff[idx] = by4;
             idx += 1;
@@ -1879,8 +1878,8 @@ fn decode_b(
             st[idx] = a.skip_txfm[bx4];
             intra_vals[idx] = if a.intra[bx4] != 0 && a.intrabc[bx4] == 0 { 1 } else { 0 };
             ibc_vals[idx] = a.intrabc[bx4];
-            r0[idx] = a.r#ref[0][bx4] as i8;
-            r1[idx] = a.r#ref[1][bx4] as i8;
+            r0[idx] = a.r#ref[0][bx4];
+            r1[idx] = a.r#ref[1][bx4];
             amvd_v[idx] = a.amvd[bx4];
             xoff[idx] = bx4;
             if idx == 0 {
@@ -2243,7 +2242,7 @@ fn decode_b(
                     unsafe { b.data.intra.cfl_type = cfl_type; }
                     if cfl_type == CFL_EXPLICIT {
                         let sign = msac.decode_symbol_adapt(cdf_m.cfl_sign(), 7) as i32 + 1;
-                        let sign_u = sign * 0x56 >> 8;
+                        let sign_u = (sign * 0x56) >> 8;
                         let sign_v = sign - sign_u * 3;
                         if sign_u != 0 {
                             let ctx = (sign_u == 2) as usize * 3 + sign_v as usize;
@@ -2314,7 +2313,7 @@ fn decode_b(
         {
             let use_y_pal = msac.decode_bool_adapt(cdf_m.pal_y()) != 0;
             if use_y_pal {
-                // TODO: read_pal_plane (palette color decoding)
+                // STUB: read palette colors from bitstream (AV2 §5.11.15)
                 let pal_sz = msac.decode_symbol_adapt(cdf_m.pal_sz(), 6) as u8 + 2;
                 unsafe { b.data.intra.pal_sz = pal_sz; }
             }
@@ -2659,7 +2658,7 @@ fn decode_b(
             }
 
             // --- compound inter_mode ---
-            let comp_ctx = 0usize; // simplified (TODO: get_compref_ctx)
+            let comp_ctx = 0usize; // STUB: derive compound reference context from neighbors (AV2 §5.11.21)
             let inter_mode: u8;
             if ref0 == ref1 {
                 let sym = msac.decode_symbol_adapt(cdf_m.comp_mode_sameref(comp_ctx), 3) as u8;
@@ -3484,7 +3483,7 @@ pub fn decode_sb(
                 } else {
                     dir = ((*dir_ptr & 0x30003) == 0x10002) as i32;
                     bp = unsafe {
-                        std::mem::transmute::<i8, BlockPartition>(
+                        BlockPartition::from_raw(
                             ((*dir_ptr >> 8) & 0xff) as i8
                         )
                     };
@@ -3588,7 +3587,7 @@ pub fn decode_sb(
                                         if is_4way != 0 {
                                             let is_a_or_b = msac.decode_bool_bypass();
                                             bp = unsafe {
-                                                std::mem::transmute::<i8, BlockPartition>(
+                                                BlockPartition::from_raw(
                                                     BlockPartition::H4A as i8
                                                         + dir as i8 * 2
                                                         + is_a_or_b as i8
@@ -3641,7 +3640,7 @@ pub fn decode_sb(
             *intra_region = 1;
             cbs = BlockSize::Invalid;
         }
-        bp = unsafe { std::mem::transmute::<i8, BlockPartition>((val & 0x7f) as i8) };
+        bp = unsafe { BlockPartition::from_raw((val & 0x7f) as i8) };
     }
 
     if bs == cbs {
@@ -3675,10 +3674,10 @@ pub fn decode_sb(
             let sub4 = bs == cbs && (hw4 >> fi.ss_hor) > 0;
             assert!(sub4 || pl == 0);
             let child_lbs = if pl != 0 { BlockSize::Invalid } else {
-                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+                unsafe { BlockSize::from_raw(pcc.part[1][0]) }
             };
             let child_cbs_first = if sub4 {
-                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+                unsafe { BlockSize::from_raw(pcc.part[1][0]) }
             } else { BlockSize::Invalid };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
                       pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
@@ -3687,7 +3686,7 @@ pub fn decode_sb(
             else {
                 *bx += hw4;
                 let child_cbs_second = if sub4 {
-                    unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+                    unsafe { BlockSize::from_raw(pcc.part[1][0]) }
                 } else { cbs };
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
                           pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
@@ -3700,10 +3699,10 @@ pub fn decode_sb(
             let sub4 = bs == cbs && (hh4 >> fi.ss_ver) > 0;
             assert!(sub4 || pl == 0);
             let child_lbs = if pl != 0 { BlockSize::Invalid } else {
-                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+                unsafe { BlockSize::from_raw(pcc.part[0][0]) }
             };
             let child_cbs_first = if sub4 {
-                unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+                unsafe { BlockSize::from_raw(pcc.part[0][0]) }
             } else { BlockSize::Invalid };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
                       pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
@@ -3712,7 +3711,7 @@ pub fn decode_sb(
             else {
                 *by += hh4;
                 let child_cbs_second = if sub4 {
-                    unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+                    unsafe { BlockSize::from_raw(pcc.part[0][0]) }
                 } else { cbs };
                 decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
                           pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
@@ -3722,7 +3721,7 @@ pub fn decode_sb(
         }
         BlockPartition::Split => {
             assert!(have_v_split && have_h_split && cbs == lbs);
-            let sbs = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][3]) };
+            let sbs = unsafe { BlockSize::from_raw(pcc.part[0][3]) };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
                       pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
                       sbs, sbs, &mut child_dir)?;
@@ -3747,8 +3746,8 @@ pub fn decode_sb(
             let sub4 = bs == cbs && (qw4 >> fi.ss_hor) > 0 && (hh4 >> fi.ss_ver) > 0;
             assert!(sub4 || pl == 0);
             let i_3only = cbs == BlockSize::Invalid || (!sub4 && bs != BlockSize::Bs32x8);
-            let p1_1 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][1]) };
-            let p1_3 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][3]) };
+            let p1_1 = unsafe { BlockSize::from_raw(pcc.part[1][1]) };
+            let p1_3 = unsafe { BlockSize::from_raw(pcc.part[1][3]) };
             let lbs_child = if pl != 0 { BlockSize::Invalid } else { p1_1 };
             let cbs_first = if i_3only { BlockSize::Invalid } else { p1_1 };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
@@ -3766,7 +3765,7 @@ pub fn decode_sb(
                 if *by + hh4 < fi.bh {
                     *by += hh4;
                     let cbs_mid2 = if i_3only { BlockSize::Invalid } else if sub4 { p1_3 } else {
-                        unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][0]) }
+                        unsafe { BlockSize::from_raw(pcc.part[1][0]) }
                     };
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
                               pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
@@ -3789,8 +3788,8 @@ pub fn decode_sb(
             let sub4 = bs == cbs && (qh4 >> fi.ss_ver) > 0 && (hw4 >> fi.ss_hor) > 0;
             assert!(sub4 || pl == 0);
             let i_3only = cbs == BlockSize::Invalid || (!sub4 && bs != BlockSize::Bs8x32);
-            let p0_1 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][1]) };
-            let p0_3 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][3]) };
+            let p0_1 = unsafe { BlockSize::from_raw(pcc.part[0][1]) };
+            let p0_3 = unsafe { BlockSize::from_raw(pcc.part[0][3]) };
             let lbs_child = if pl != 0 { BlockSize::Invalid } else { p0_1 };
             let cbs_first = if i_3only { BlockSize::Invalid } else { p0_1 };
             decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
@@ -3808,7 +3807,7 @@ pub fn decode_sb(
                 if *bx + hw4 < fi.bw {
                     *bx += hw4;
                     let cbs_mid2 = if i_3only { BlockSize::Invalid } else if sub4 { p0_3 } else {
-                        unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][0]) }
+                        unsafe { BlockSize::from_raw(pcc.part[0][0]) }
                     };
                     decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
                               pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
@@ -3831,10 +3830,10 @@ pub fn decode_sb(
             assert!(ew4 > 0);
             let sub4 = bs == cbs && (ew4 >> fi.ss_hor) > 0;
             assert!(sub4 || pl == 0);
-            let p1_2 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][2]) };
+            let p1_2 = unsafe { BlockSize::from_raw(pcc.part[1][2]) };
             let var = bp as i8 - BlockPartition::V4A as i8;
-            let p1_nvar = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][(!var & 1) as usize]) };
-            let p1_var = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[1][var as usize]) };
+            let p1_nvar = unsafe { BlockSize::from_raw(pcc.part[1][(!var & 1) as usize]) };
+            let p1_var = unsafe { BlockSize::from_raw(pcc.part[1][var as usize]) };
             let lbs_edge = if pl != 0 { BlockSize::Invalid } else { p1_2 };
             let lbs_nvar = if pl != 0 { BlockSize::Invalid } else { p1_nvar };
             let lbs_var = if pl != 0 { BlockSize::Invalid } else { p1_var };
@@ -3876,10 +3875,10 @@ pub fn decode_sb(
             assert!(eh4 > 0);
             let sub4 = bs == cbs && (eh4 >> fi.ss_ver) > 0;
             assert!(sub4 || pl == 0);
-            let p0_2 = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][2]) };
+            let p0_2 = unsafe { BlockSize::from_raw(pcc.part[0][2]) };
             let var = bp as i8 - BlockPartition::H4A as i8;
-            let p0_nvar = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][(!var & 1) as usize]) };
-            let p0_var = unsafe { std::mem::transmute::<i8, BlockSize>(pcc.part[0][var as usize]) };
+            let p0_nvar = unsafe { BlockSize::from_raw(pcc.part[0][(!var & 1) as usize]) };
+            let p0_var = unsafe { BlockSize::from_raw(pcc.part[0][var as usize]) };
             let lbs_edge = if pl != 0 { BlockSize::Invalid } else { p0_2 };
             let lbs_nvar = if pl != 0 { BlockSize::Invalid } else { p0_nvar };
             let lbs_var = if pl != 0 { BlockSize::Invalid } else { p0_var };
@@ -5046,7 +5045,7 @@ mod tests {
     #[test]
     fn test_derive_warpmv_single_top_neighbor() {
         use crate::headers::WarpedMotionType;
-        use crate::levels::RefPair;
+        
         let mut rt = make_test_tile();
         let by = 4i32;
         let bx = 4i32;

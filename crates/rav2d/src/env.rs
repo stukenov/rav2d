@@ -200,12 +200,12 @@ pub fn get_warpmv_2d(
 
     let mut res = MvXY {
         y: iclip(
-            apply_sign64(((yc.unsigned_abs() as i64 + rnd) >> shift) << not_epel, yc) as i32,
+            apply_sign64(((yc.unsigned_abs() as i64 + rnd) >> shift) << not_epel, yc),
             -max,
             max,
         ),
         x: iclip(
-            apply_sign64(((xc.unsigned_abs() as i64 + rnd) >> shift) << not_epel, xc) as i32,
+            apply_sign64(((xc.unsigned_abs() as i64 + rnd) >> shift) << not_epel, xc),
             -max,
             max,
         ),

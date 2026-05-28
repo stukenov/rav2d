@@ -102,7 +102,7 @@ pub fn prepare_intra_edges_8bpc(
                     IntraPredMode::HorPred as u8
                 };
             }
-            tl_filter = mode >= Z1_PRED && mode <= Z3_PRED
+            tl_filter = (Z1_PRED..=Z3_PRED).contains(&mode)
                 && have_left && have_top
                 && mrl_idx == 0 && enable_edge_filter
                 && tw4 + th4 >= 6;
@@ -149,7 +149,7 @@ pub fn prepare_intra_edges_8bpc(
 
     let tw = (tw4 as usize) << 2;
     let th = (th4 as usize) << 2;
-    let diag_mrl_idx = if mode >= Z1_PRED && mode <= Z3_PRED { mrl_idx } else { 0 };
+    let diag_mrl_idx = if (Z1_PRED..=Z3_PRED).contains(&mode) { mrl_idx } else { 0 };
     let e_stride = (tw + th) * 2 + diag_mrl_idx * 3 + 1;
     let o = tl_o as isize;
 

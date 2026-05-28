@@ -173,9 +173,9 @@ pub fn get_class_lut_idx_8bpc(
     }
 
     for i in 0..3 {
-        f[i] = (f[i] * PC_WIENER_NORMALIZER[i] as i32 + 0) >> 0;
+        f[i] *= PC_WIENER_NORMALIZER[i] as i32;
     }
-    s = s * PC_WIENER_NORMALIZER[3] as i32;
+    s *= PC_WIENER_NORMALIZER[3] as i32;
 
     let mut qval = (imax(0, get_qval_given_tskip(base_q, s, 0, 0)) + (1 << 13)) >> 14;
     qval = imin(qval, 255) >> 5;
@@ -1120,7 +1120,7 @@ type GdfAddFn = unsafe extern "C" fn(
 );
 
 use crate::dsp::{LoopRestorationDSPContext, PixelFn};
-use crate::headers::{FhRestorationPlane, FrameHeader, NSWienerPlane, PixelLayout, SequenceHeader};
+use crate::headers::{FhRestorationPlane, PixelLayout};
 use crate::lf_mask::{Av2Filter, Av2Restoration};
 
 pub struct LrContext<'a> {
@@ -1258,18 +1258,18 @@ fn lr_stripe_8bpc(
     }
 
     let lstride = ctx.cur_stride[0];
-    let shift_hor = 8 - ss_hor;
+    let _shift_hor = 8 - ss_hor;
 
     let mut gdf_err = [0i8; 64 * 64];
     let mut left_idx = 0usize;
     let mut noskip_offset = 0usize;
 
     while y + stripe_h <= row_h {
-        edges ^= ((-(((sby + 1) as i32 != ctx.sbh) as i32
+        edges ^= ((-(((sby + 1) != ctx.sbh) as i32
             | (y + stripe_h != row_h) as i32)) as u8 ^ edges) & LR_HAVE_BOTTOM;
 
         let inc = if (edges & (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED | LR_HAVE_BOTTOM_INTEGRATED))
-            == LR_HAVE_TOP && y + 8 < (ctx.bh * 4 >> ss_ver) { 8 } else { 0 };
+            == LR_HAVE_TOP && y + 8 < ((ctx.bh * 4) >> ss_ver) { 8 } else { 0 };
 
         let sb256_idx = ctx.sb256w as usize
             * ((((y << ss_ver) + inc) as usize) >> 8)
@@ -1280,8 +1280,9 @@ fn lr_stripe_8bpc(
             && sb256_idx < ctx.mask.len()
             && ctx.mask[sb256_idx].gdf[((((y + inc) >> 4) & 12) + sb64x_idx) as usize] != 0;
 
-        if gdf_enabled {
-            if let Some(gdf_prep) = ctx.dsp_lr.gdf_prep {
+        if gdf_enabled
+            && let Some(gdf_prep) = ctx.dsp_lr.gdf_prep {
+                // SAFETY: gdf_prep is an FFI function pointer with matching calling convention and signature.
                 let gdf_prep_fn: GdfPrepFn = unsafe { std::mem::transmute(gdf_prep) };
                 let lpf_off = have_tt as usize
                     * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
@@ -1292,7 +1293,7 @@ fn lr_stripe_8bpc(
                     gdf_prep_fn(
                         gdf_err.as_mut_ptr(), 64,
                         p.as_ptr().add(p_off), stride,
-                        left.as_ptr().add(left_idx) as *const [u8; 6],
+                        left.as_ptr().add(left_idx),
                         ctx.lr_db_line[plane_u].as_ptr().add(lpf_off),
                         ctx.lr_db_line[plane_u].as_ptr().add(lpf_bottom_off),
                         w, stripe_h,
@@ -1300,11 +1301,11 @@ fn lr_stripe_8bpc(
                     );
                 }
             }
-        }
 
         let y4 = (((y << ss_ver) & 255) >> 2) as usize;
 
         if let Some(wfn) = wiener_fn {
+            // SAFETY: wfn is an FFI function pointer with matching calling convention and signature.
             let wiener_fn_typed: WienerFilterFn = unsafe { std::mem::transmute(wfn) };
             let lpf_off = have_tt as usize
                 * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
@@ -1407,7 +1408,7 @@ fn lr_stripe_8bpc(
             unsafe {
                 wiener_fn_typed(
                     p.as_mut_ptr().add(p_off), stride,
-                    left.as_ptr().add(left_idx) as *const [u8; 6],
+                    left.as_ptr().add(left_idx),
                     top_ptr, bottom_ptr,
                     w, stripe_h,
                     params.as_ptr(),
@@ -1419,8 +1420,9 @@ fn lr_stripe_8bpc(
             }
         }
 
-        if gdf_enabled {
-            if let Some(gdf_add) = ctx.dsp_lr.gdf_add {
+        if gdf_enabled
+            && let Some(gdf_add) = ctx.dsp_lr.gdf_add {
+                // SAFETY: gdf_add is an FFI function pointer with matching calling convention and signature.
                 let gdf_add_fn: GdfAddFn = unsafe { std::mem::transmute(gdf_add) };
                 let ll_mask_ptr: *const [u16; 4] = if sb256_idx < ctx.mask.len() {
                     if plane == 0 {
@@ -1442,7 +1444,6 @@ fn lr_stripe_8bpc(
                     );
                 }
             }
-        }
 
         edges &= !(LR_HAVE_BOTTOM_INTEGRATED | LR_HAVE_TOP_INTEGRATED);
         left_idx += stripe_h as usize;
@@ -1579,8 +1580,8 @@ pub fn lr_sbrow_8bpc(
     if restore_planes & (LR_RESTORE_U | LR_RESTORE_V) != 0 {
         let ss_ver = (ctx.layout == PixelLayout::I420) as i32;
         let ss_hor = (ctx.layout != PixelLayout::I444) as i32;
-        let h = ctx.bh * 4 >> ss_ver;
-        let w = ctx.bw * 4 >> ss_hor;
+        let h = (ctx.bh * 4) >> ss_ver;
+        let w = (ctx.bw * 4) >> ss_hor;
         let next_row_y = (sby + 1) << ((6 - ss_ver) + ctx.sb128 as i32);
         let row_h = imin(next_row_y - (8 >> ss_ver) * not_last, h);
         let mut offset_uv = (8 * (sby != 0) as i32) >> ss_ver;

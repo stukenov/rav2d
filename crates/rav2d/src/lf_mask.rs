@@ -1,17 +1,10 @@
 #[derive(Clone)]
+#[derive(Default)]
 pub struct Av2RestorationUnit {
     pub restoration_type: u8,
     pub ns_filter: [[i8; 32]; 16],
 }
 
-impl Default for Av2RestorationUnit {
-    fn default() -> Self {
-        Self {
-            restoration_type: 0,
-            ns_filter: [[0; 32]; 16],
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct Av2Filter {
@@ -258,8 +251,8 @@ pub fn mask_subpu_edges(
     vsz: i32,
     ds_sub_pu_mask: i32,
 ) {
-    debug_assert!(hsz & (hsz - 1) == 0 && hsz >= 0 && hsz <= 8);
-    debug_assert!(vsz & (vsz - 1) == 0 && vsz >= 0 && vsz <= 8);
+    debug_assert!(hsz & (hsz - 1) == 0 && (0..=8).contains(&hsz));
+    debug_assert!(vsz & (vsz - 1) == 0 && (0..=8).contains(&vsz));
     debug_assert!((thl4c as u32) <= 2 && (twl4c as u32) <= 2);
     debug_assert!(ds_sub_pu_mask == 15 || ds_sub_pu_mask == 0);
 
@@ -427,7 +420,7 @@ pub fn create_db_mask(
         let tx_part = if chroma {
             TxPartition::None
         } else {
-            unsafe { std::mem::transmute::<u8, TxPartition>(b.tx_part) }
+            unsafe { TxPartition::from_raw(b.tx_part) }
         };
         let tx: usize = if lossless != 0 {
             if !chroma && b.tx_size_ll != 0 {

@@ -1,19 +1,14 @@
 use std::sync::Arc;
 
 use crate::env::get_poc_diff;
+use crate::error::Rav2dError;
 use crate::getbits::GetBits;
 use crate::headers::*;
 use crate::internal::{DecoderContext, RefState, TileGroup};
 use crate::intops::{iclip, iclip_u8, imax, imin, ulog2};
 use crate::warpmv::resolve_divisor_32;
 
-#[derive(Debug)]
-pub enum Dav2dError {
-    InvalidData,
-    FrameTooLarge,
-}
-
-pub type Result<T> = std::result::Result<T, Dav2dError>;
+type Result<T> = std::result::Result<T, Rav2dError>;
 
 static LAYOUTS: [PixelLayout; 4] = [
     PixelLayout::I420,
@@ -26,7 +21,7 @@ fn check_trailing_bits(gb: &mut GetBits, strict: bool) -> Result<()> {
     let trailing_one = gb.get_bit();
 
     if gb.has_error() {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
 
     if !strict {
@@ -34,7 +29,7 @@ fn check_trailing_bits(gb: &mut GetBits, strict: bool) -> Result<()> {
     }
 
     if trailing_one == 0 {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
 
     Ok(())
@@ -83,7 +78,7 @@ fn parse_tile_info(
     let max_tile_width_sb = 4096 >> (sbsz_log2 - w_adj);
     let sz_adj = (level >= 14) as i32 + (level >= 18) as i32
         + ((level >= 14 && tier != 0) as i32);
-    let max_tile_area_sb = 4096 * 2304 >> (2 * sbsz_log2 - sz_adj);
+    let max_tile_area_sb = (4096 * 2304) >> (2 * sbsz_log2 - sz_adj);
     thdr.min_log2_cols = tile_log2(max_tile_width_sb, sbw) as u8;
     thdr.max_log2_cols = tile_log2(1, imin(sbw, MAX_TILE_COLS as i32)) as u8;
     thdr.max_log2_rows = tile_log2(1, imin(sbh, MAX_TILE_ROWS as i32)) as u8;
@@ -260,7 +255,7 @@ pub fn parse_film_grain_data(
     for pl in 0..num_pl {
         fgd.num_points[pl] = gb.get_bits(4) as i32;
         if fgd.num_points[pl] > 14 {
-            return Err(Dav2dError::InvalidData);
+            return Err(Rav2dError::InvalidData);
         }
         if fgd.num_points[pl] == 0 {
             continue;
@@ -271,7 +266,7 @@ pub fn parse_film_grain_data(
         for i in 0..fgd.num_points[pl] as usize {
             base += gb.get_bits(index_bits);
             if base > 255 {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
             fgd.points[pl][i][0] = base as u8;
             fgd.points[pl][i][1] = gb.get_bits(scaling_bits) as u8;
@@ -281,7 +276,7 @@ pub fn parse_film_grain_data(
     if layout == PixelLayout::I420
         && (fgd.num_points[1] != 0) != (fgd.num_points[2] != 0)
     {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
 
     fgd.scaling_shift = gb.get_bits(2) as i32 + 8;
@@ -352,7 +347,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     hdr.id = gb.get_vlc() as u8;
     hdr.profile = gb.get_bits(5) as u8;
     if hdr.profile > 2 {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
     hdr.reduced_still_picture_header = gb.get_bit() != 0;
     hdr.level = gb.get_bits(5) as u8;
@@ -362,7 +357,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
 
     let layout_idx = gb.get_vlc();
     if layout_idx > 3 {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
     hdr.layout = LAYOUTS[layout_idx as usize];
     match hdr.layout {
@@ -379,7 +374,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
 
     hdr.hbd = gb.get_vlc() as u8;
     if hdr.hbd > 2 {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
     if hdr.hbd < 2 {
         hdr.hbd ^= 1;
@@ -721,7 +716,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     hdr.film_grain_present = gb.get_bit() != 0;
 
     if gb.has_error() {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
 
     if !strict {
@@ -740,7 +735,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
 
 pub fn parse_sequence_header(data: &[u8]) -> Result<SequenceHeader> {
     if data.is_empty() {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
     let mut gb = GetBits::new(data);
     parse_seq_hdr(&mut gb, false)
@@ -762,23 +757,23 @@ pub fn parse_frame_hdr(
 
     hdr.id = gb.get_vlc() as u8;
     if hdr.id != 0 {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
     let seqhdr_idx = gb.get_vlc() as u8;
     if seqhdr_idx != seqhdr.id {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
 
     hdr.show_existing_frame = (obu_type == ObuType::Sef) as u8;
     if hdr.show_existing_frame != 0 {
         hdr.existing_frame_idx = gb.get_bits(seqhdr.ref_frames_log2 as i32) as i8;
         if hdr.existing_frame_idx as u8 >= seqhdr.ref_frames {
-            return Err(Dav2dError::InvalidData);
+            return Err(Rav2dError::InvalidData);
         }
         if gb.get_bit() != 0 {
-            // FIXME poc
+            // STUB: parse picture_order_count for show_existing_frame (AV2 §5.9.2)
         }
-        // FIXME filmgrain
+        // STUB: parse/copy film grain params for show_existing_frame (AV2 §5.9.31)
         return Ok(hdr);
     }
 
@@ -810,15 +805,14 @@ pub fn parse_frame_hdr(
                 hdr.ltr_id =
                     gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8 - 1;
             }
-        } else if obu_type == ObuType::Ras || obu_type == ObuType::OpenLoopKf {
-            if seqhdr.number_of_bits_for_lt_frame_id > 0 {
+        } else if (obu_type == ObuType::Ras || obu_type == ObuType::OpenLoopKf)
+            && seqhdr.number_of_bits_for_lt_frame_id > 0 {
                 hdr.n_ref_frames = gb.get_bits(3) as u8;
                 for n in 0..hdr.n_ref_frames as usize {
                     hdr.refidx[n] =
                         gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8;
                 }
             }
-        }
         if obu_type != ObuType::Bridge {
             if obu_type != ObuType::OpenLoopKf {
                 hdr.show_immediate = gb.get_bit() as u8;
@@ -862,7 +856,7 @@ pub fn parse_frame_hdr(
         if refresh {
             let refresh_idx = gb.get_bits(seqhdr.ref_frames_log2 as i32);
             if refresh_idx >= seqhdr.ref_frames as u32 {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
             hdr.refresh_frame_flags = 1 << refresh_idx;
         }
@@ -876,12 +870,12 @@ pub fn parse_frame_hdr(
         if hdr.frame_type == FrameType::Switch || seqhdr.explicit_ref_frame_map {
             hdr.n_ref_frames = gb.get_bits(3) as u8;
             if hdr.n_ref_frames as i32 > imin(7, seqhdr.ref_frames as i32) {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
             for n in 0..hdr.n_ref_frames as usize {
                 hdr.refidx[n] = gb.get_bits(seqhdr.ref_frames_log2 as i32) as i8;
                 if hdr.refidx[n] as u8 >= seqhdr.ref_frames {
-                    return Err(Dav2dError::InvalidData);
+                    return Err(Rav2dError::InvalidData);
                 }
             }
         } else {
@@ -893,7 +887,7 @@ pub fn parse_frame_hdr(
                 .p
                 .frame_hdr
                 .as_ref()
-                .ok_or(Dav2dError::InvalidData)?;
+                .ok_or(Rav2dError::InvalidData)?;
             let pocdiff =
                 get_poc_diff(seqhdr.order_hint_n_bits as i32, poc, refhdr.frame_offset as i32);
             hdr.has_future_refs |= (pocdiff < 0) as u8;
@@ -909,7 +903,7 @@ pub fn parse_frame_hdr(
             hdr.n_ref_frames = get_ref_frames(&mut hdr, seqhdr, refs, true) as u8;
         }
 
-        // FIXME bru
+        // STUB: parse base_resolution_update syntax for inter frames (AV2 §5.9.6)
 
         if seqhdr.ref_frame_mvs {
             hdr.use_ref_frame_mvs = gb.get_bit() as u8;
@@ -991,18 +985,18 @@ pub fn parse_frame_hdr(
                 }
             }
             if seqhdr.tip_explicit_qp {
-                // FIXME yac and (sometimes) u/v ac delta
+                // STUB: parse yac_delta and conditional u/v ac delta for TIP explicit QP (AV2 §5.9.17)
             } else {
                 let ref1hdr = refs[hdr.refidx[hdr.tip.r#ref[0] as usize] as usize]
                     .p
                     .frame_hdr
                     .as_ref()
-                    .ok_or(Dav2dError::InvalidData)?;
+                    .ok_or(Rav2dError::InvalidData)?;
                 let ref2hdr = refs[hdr.refidx[hdr.tip.r#ref[1] as usize] as usize]
                     .p
                     .frame_hdr
                     .as_ref()
-                    .ok_or(Dav2dError::InvalidData)?;
+                    .ok_or(Rav2dError::InvalidData)?;
                 hdr.quant.yac = (ref1hdr.quant.yac + ref2hdr.quant.yac + 1) >> 1;
             }
 
@@ -1113,7 +1107,7 @@ pub fn parse_frame_hdr(
                         as u16;
             }
             if hdr.tiling.update >= hdr.tiling.t.cols as u16 * hdr.tiling.t.rows as u16 {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
             hdr.tiling.n_bytes = gb.get_bits(2) as u8 + 1;
         }
@@ -1361,20 +1355,20 @@ pub fn parse_frame_hdr(
                                 r#ref = gb.get_bits(n_bits_ref) as u8;
                                 pd.refidx = r#ref;
                                 if r#ref >= hdr.n_ref_frames {
-                                    return Err(Dav2dError::InvalidData);
+                                    return Err(Rav2dError::InvalidData);
                                 }
                             }
                             let refhdr = refs[hdr.refidx[r#ref as usize] as usize]
                                 .p
                                 .frame_hdr
                                 .as_ref()
-                                .ok_or(Dav2dError::InvalidData)?;
+                                .ok_or(Rav2dError::InvalidData)?;
                             let mut rpd = &refhdr.restoration.p[p].ns;
                             if rpd.frame_filters_on == 0 && p != 0 {
                                 rpd = &refhdr.restoration.p[3 - p].ns;
                             }
                             if rpd.frame_filters_on == 0 {
-                                return Err(Dav2dError::InvalidData);
+                                return Err(Rav2dError::InvalidData);
                             }
                             pd.num_classes_idx = rpd.num_classes_idx;
                             pd.num_classes = rpd.num_classes;
@@ -1414,7 +1408,7 @@ pub fn parse_frame_hdr(
                         2 + (hdr.sb128 == 0 && gb.get_bit() == 0) as u8;
                 }
                 if hdr.restoration.unit_size[1] < 6 - seqhdr.ss_ver {
-                    return Err(Dav2dError::InvalidData);
+                    return Err(Rav2dError::InvalidData);
                 }
             }
 
@@ -1437,7 +1431,7 @@ pub fn parse_frame_hdr(
                         .p
                         .frame_hdr
                         .as_ref()
-                        .ok_or(Dav2dError::InvalidData)?;
+                        .ok_or(Rav2dError::InvalidData)?;
                     let mut rpd = &ref_hdr.restoration.p[p].ns;
                     if rpd.frame_filters_on == 0 {
                         rpd = &ref_hdr.restoration.p[3 - p].ns;
@@ -1456,7 +1450,7 @@ pub fn parse_frame_hdr(
                         .p
                         .frame_hdr
                         .as_ref()
-                        .ok_or(Dav2dError::InvalidData)?;
+                        .ok_or(Rav2dError::InvalidData)?;
                     let dirs: &[i8] = &[0, 1, -1];
                     let mut dir = dirs[if p == 0 { 0 } else if p == 1 { 1 } else { 2 }];
                     let mut p2 = p as i32;
@@ -1525,7 +1519,7 @@ pub fn parse_frame_hdr(
                 }
                 let mut exact_match_mask: u32 = 0;
                 for n in 0..n_classes {
-                    exact_match_mask |= (gb.get_bit() as u32) << n;
+                    exact_match_mask |= gb.get_bit() << n;
                 }
                 let masks: &[u32] = if p != 0 { &SUBSET_MASKS_UV } else { &SUBSET_MASKS_Y };
                 let cf_range: &[[i8; 2]] = if p != 0 {
@@ -1606,14 +1600,14 @@ pub fn parse_frame_hdr(
                                 r#ref = gb.get_bits(n_bits_ref) as u8;
                                 hdr.ccso.p[p].refidx = r#ref;
                                 if r#ref >= hdr.n_ref_frames {
-                                    return Err(Dav2dError::InvalidData);
+                                    return Err(Rav2dError::InvalidData);
                                 }
                             }
                             let refhdr = refs[hdr.refidx[r#ref as usize] as usize]
                                 .p
                                 .frame_hdr
                                 .as_ref()
-                                .ok_or(Dav2dError::InvalidData)?;
+                                .ok_or(Rav2dError::InvalidData)?;
                             if hdr.ccso.p[p].reuse != 0 {
                                 let w4 = (hdr.width + 3) >> 2;
                                 let h4 = (hdr.height + 3) >> 2;
@@ -1623,7 +1617,7 @@ pub fn parse_frame_hdr(
                                     || h4 != rh4
                                     || refhdr.ccso.p[p].enabled == 0
                                 {
-                                    return Err(Dav2dError::InvalidData);
+                                    return Err(Rav2dError::InvalidData);
                                 }
                             }
                         }
@@ -1637,7 +1631,7 @@ pub fn parse_frame_hdr(
                             hdr.ccso.p[p].quant_idx = gb.get_bits(2) as u8;
                             hdr.ccso.p[p].ext_filter_support = gb.get_bits(3) as u8;
                             if hdr.ccso.p[p].ext_filter_support == 7 {
-                                return Err(Dav2dError::InvalidData);
+                                return Err(Rav2dError::InvalidData);
                             }
                             let si = hdr.ccso.p[p].scale_idx as usize;
                             let qi = hdr.ccso.p[p].quant_idx as usize;
@@ -1675,7 +1669,7 @@ pub fn parse_frame_hdr(
                                 .p
                                 .frame_hdr
                                 .as_ref()
-                                .ok_or(Dav2dError::InvalidData)?;
+                                .ok_or(Rav2dError::InvalidData)?;
                         let rp = &refhdr.ccso.p[p];
                         hdr.ccso.p[p].bo_only = rp.bo_only;
                         hdr.ccso.p[p].scale_idx = rp.scale_idx;
@@ -1713,10 +1707,10 @@ pub fn parse_frame_hdr(
         for i in 0..7 {
             hdr.gmv.m[i] = DEFAULT_WM_PARAMS;
         }
-        if hdr.is_inter_or_switch() {
-            if seqhdr.global_motion && gb.get_bit() != 0 {
+        if hdr.is_inter_or_switch()
+            && seqhdr.global_motion && gb.get_bit() != 0 {
                 if hdr.n_ref_frames == 0 {
-                    return Err(Dav2dError::InvalidData);
+                    return Err(Rav2dError::InvalidData);
                 }
                 hdr.gmv.r#ref = gb.get_uniform(hdr.n_ref_frames as u32 + 1) as u8;
                 let (ref_base_mat, in_dist);
@@ -1729,7 +1723,7 @@ pub fn parse_frame_hdr(
                         .p
                         .frame_hdr
                         .as_ref()
-                        .ok_or(Dav2dError::InvalidData)?;
+                        .ok_or(Rav2dError::InvalidData)?;
                     if refhdr.n_ref_frames == 0 {
                         ref_base_mat = DEFAULT_WM_PARAMS.matrix;
                         in_dist = 1;
@@ -1767,7 +1761,7 @@ pub fn parse_frame_hdr(
                             .p
                             .frame_hdr
                             .as_ref()
-                            .ok_or(Dav2dError::InvalidData)?
+                            .ok_or(Rav2dError::InvalidData)?
                             .frame_offset as i32,
                     );
                     rescale_matrix(&mut ref_mat, &ref_base_mat, in_dist, out_dist);
@@ -1789,7 +1783,6 @@ pub fn parse_frame_hdr(
                     mat[1] = gb.get_bits_subexp(ref_mat[1] >> 13, 0x4000) * 8192;
                 }
             }
-        }
     } // end !tip_output_frame
 
     // grain
@@ -1798,7 +1791,7 @@ pub fn parse_frame_hdr(
             (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
         if hdr.film_grain.present != 0 {
             hdr.film_grain.id = gb.get_bits(3) as u8;
-            hdr.film_grain.seed = gb.get_bits(16) as u32;
+            hdr.film_grain.seed = gb.get_bits(16);
         }
     }
 
@@ -1825,11 +1818,11 @@ pub fn parse_fgm_hdr(
     let mask = gb.get_bits(8) as u8;
     let layout_idx = gb.get_vlc();
     if layout_idx > 3 {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
     let layout = LAYOUTS[layout_idx as usize];
     if layout != seq_layout {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
 
     let mut result: [Option<FilmGrainData>; 8] = Default::default();
@@ -1971,21 +1964,21 @@ pub fn parse_ci_hdr(ci: &mut ContentInterpretation, gb: &mut GetBits) -> Result<
                 ci.sar.w = gb.get_vlc();
                 ci.sar.h = gb.get_vlc();
             }
-            _ => return Err(Dav2dError::InvalidData),
+            _ => return Err(Rav2dError::InvalidData),
         }
     }
 
     if ci.timing_info_present {
-        ci.timing.num_units_in_display_tick = gb.get_bits(32) as u32;
-        ci.timing.time_scale = gb.get_bits(32) as u32;
+        ci.timing.num_units_in_display_tick = gb.get_bits(32);
+        ci.timing.time_scale = gb.get_bits(32);
         if ci.timing.num_units_in_display_tick == 0 || ci.timing.time_scale == 0 {
-            return Err(Dav2dError::InvalidData);
+            return Err(Rav2dError::InvalidData);
         }
         ci.timing.equal_elemental_interval = gb.get_bit() as u8;
         if ci.timing.equal_elemental_interval != 0 {
             let t = gb.get_vlc();
             if t == u32::MAX {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
             ci.timing.num_ticks_per_elemental_duration = t + 1;
         }
@@ -2083,7 +2076,7 @@ pub fn read_frame_size(
                     .p
                     .frame_hdr
                     .as_ref()
-                    .ok_or(Dav2dError::InvalidData)?;
+                    .ok_or(Rav2dError::InvalidData)?;
                 hdr.width = refhdr.width;
                 hdr.height = refhdr.height;
                 return Ok(());
@@ -2418,7 +2411,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
     let len = hdr_gb.get_uleb128() as usize;
     hdr_gb.bytealign();
     if hdr_gb.has_error() || len > hdr_gb.remaining_bytes() {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
     let body_start = hdr_gb.byte_pos();
     let total_consumed = body_start + len;
@@ -2438,7 +2431,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
     }
 
     if gb.has_error() {
-        return Err(Dav2dError::InvalidData);
+        return Err(Rav2dError::InvalidData);
     }
 
     let obu_type = u32_to_obu_type(obu_type_raw);
@@ -2459,14 +2452,14 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             c.operating_point_idc = 0;
             let spatial_mask = c.operating_point_idc >> 8;
             c.max_spatial_id = if spatial_mask != 0 {
-                ulog2(spatial_mask) as i32
+                ulog2(spatial_mask)
             } else {
                 0
             };
 
             if c.seq_hdr.is_none() {
                 c.frame_hdr = None;
-            } else if c.seq_hdr.as_ref().map_or(true, |old| **old != seq_hdr) {
+            } else if c.seq_hdr.as_ref().is_none_or(|old| **old != seq_hdr) {
                 c.frame_hdr = None;
                 c.content_light = None;
                 c.mastering_display = None;
@@ -2496,7 +2489,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             let seqhdr = c
                 .seq_hdr
                 .as_ref()
-                .ok_or(Dav2dError::InvalidData)?
+                .ok_or(Rav2dError::InvalidData)?
                 .clone();
 
             let first_tile = matches!(
@@ -2521,14 +2514,13 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 check_trailing_bits(&mut gb, c.strict_std_compliance)?;
             }
 
-            if let Some(ref fh) = c.frame_hdr {
-                if c.frame_size_limit > 0
+            if let Some(ref fh) = c.frame_hdr
+                && c.frame_size_limit > 0
                     && (fh.width as u64) * (fh.height as u64) > c.frame_size_limit as u64
                 {
                     c.frame_hdr = None;
-                    return Err(Dav2dError::FrameTooLarge);
+                    return Err(Rav2dError::FrameTooLarge);
                 }
-            }
 
             if matches!(obu_type, ObuType::Sef | ObuType::Tip | ObuType::Bridge) {
                 // frame header only OBU, no tile data
@@ -2536,7 +2528,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 let fh = c
                     .frame_hdr
                     .as_ref()
-                    .ok_or(Dav2dError::InvalidData)?
+                    .ok_or(Rav2dError::InvalidData)?
                     .clone();
                 let mut tg = TileGroup {
                     data: Vec::new(),
@@ -2546,7 +2538,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 parse_tile_hdr(&fh, &mut tg, &mut gb);
                 gb.bytealign();
                 if gb.has_error() {
-                    return Err(Dav2dError::InvalidData);
+                    return Err(Rav2dError::InvalidData);
                 }
                 tg.data = gb.remaining_slice().to_vec();
 
@@ -2554,7 +2546,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                     c.tile.clear();
                     c.n_tile_data = 0;
                     c.n_tiles = 0;
-                    return Err(Dav2dError::InvalidData);
+                    return Err(Rav2dError::InvalidData);
                 }
                 c.n_tiles += 1 + tg.end - tg.start;
                 c.tile.push(tg);
@@ -2566,7 +2558,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             let seqhdr = c
                 .seq_hdr
                 .as_ref()
-                .ok_or(Dav2dError::InvalidData)?
+                .ok_or(Rav2dError::InvalidData)?
                 .clone();
             let fgm = parse_fgm_hdr(&mut gb, seqhdr.layout)?;
             for (i, entry) in fgm.into_iter().enumerate() {
@@ -2587,7 +2579,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
         Some(ObuType::Metadata) => {
             let meta_type = gb.get_uleb128();
             if gb.has_error() {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
             match meta_type {
                 v if v == ObuMetaType::HdrCll as u32 => {
@@ -2623,17 +2615,17 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
         if fh.show_existing_frame != 0 {
             let idx = fh.existing_frame_idx as usize;
             if c.refs[idx].p.frame_hdr.is_none() {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
             if c.strict_std_compliance && !c.refs[idx].p.showable {
-                return Err(Dav2dError::InvalidData);
+                return Err(Rav2dError::InvalidData);
             }
-            // TODO: queue output of existing frame
+            // STUB: queue referenced frame for display output (show_existing_frame path)
             if c.refs[idx]
                 .p
                 .frame_hdr
                 .as_ref()
-                .map_or(false, |h| h.frame_type == FrameType::Key)
+                .is_some_and(|h| h.frame_type == FrameType::Key)
             {
                 let r = idx;
                 c.refs[r].p.showable = false;
@@ -2647,14 +2639,13 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             }
             c.frame_hdr = None;
         } else {
-            let _seqhdr = c.seq_hdr.as_ref().unwrap();
             let total_tiles = fh.tiling.t.cols as i32 * fh.tiling.t.rows as i32;
             let frame_without_data = fh.tip.frame_mode == 2;
             if c.n_tiles == total_tiles || frame_without_data {
                 if !frame_without_data && c.n_tile_data == 0 {
-                    return Err(Dav2dError::InvalidData);
+                    return Err(Rav2dError::InvalidData);
                 }
-                // TODO: submit_frame(c)
+                // STUB: submit frame for tile decoding, loop filtering, and output
                 c.frame_hdr = None;
                 c.n_tiles = 0;
             }

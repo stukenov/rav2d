@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 rav2d = { workspace = true }
+clap = { version = "4", features = ["derive"] }

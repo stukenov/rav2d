@@ -1314,7 +1314,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_w_mask_444() {
         let tmp1 = vec![(200i16) << 4; 16];
         let tmp2 = vec![(100i16) << 4; 16];

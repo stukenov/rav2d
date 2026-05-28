@@ -52,21 +52,13 @@ pub struct ScalableMotionParams {
     pub step: i32,
 }
 
+#[derive(Default)]
 pub struct NsWienerBank {
     pub bank_size: [u8; 16],
     pub bank_idx: [u8; 16],
     pub filter: [[[i8; 32]; 16]; 4],
 }
 
-impl Default for NsWienerBank {
-    fn default() -> Self {
-        Self {
-            bank_size: [0; 16],
-            bank_idx: [0; 16],
-            filter: [[[0; 32]; 16]; 4],
-        }
-    }
-}
 
 pub struct TileState {
     pub cdf: CdfContext,
@@ -157,6 +149,7 @@ impl Default for FrameThread {
     }
 }
 
+#[derive(Default)]
 pub struct LoopFilterState {
     pub mask: Vec<Av2Filter>,
     pub lr_mask: Vec<Av2Restoration>,
@@ -180,32 +173,6 @@ pub struct LoopFilterState {
     pub pc_filters: Vec<[i16; 13]>,
 }
 
-impl Default for LoopFilterState {
-    fn default() -> Self {
-        Self {
-            mask: Vec::new(),
-            lr_mask: Vec::new(),
-            segmap_uv: Vec::new(),
-            uv_segmap_stride: 0,
-            cdef_buf_plane_sz: [0; 2],
-            cdef_buf_sbh: 0,
-            lr_buf_plane_sz: [0; 4],
-            re_sz: 0,
-            base_q: 0,
-            gdf_ref_dst_idx: 0,
-            start_of_tile_row: Vec::new(),
-            restore_planes: 0,
-            wiener_idx: 0,
-            ns_subclass_class_idx: None,
-            lr_db_line: Default::default(),
-            lr_cdef_line: Default::default(),
-            p: Default::default(),
-            ns_subclass_lut: Vec::new(),
-            pc_subclass_lut: Vec::new(),
-            pc_filters: Vec::new(),
-        }
-    }
-}
 
 pub struct FrameContext {
     pub seq_hdr: Arc<SequenceHeader>,
@@ -361,6 +328,7 @@ pub struct DecoderContext {
     pub n_passes: i32,
 }
 
+#[derive(Default)]
 pub struct RefState {
     pub p: ThreadPicture,
     pub segmap: Option<Vec<u8>>,
@@ -369,17 +337,6 @@ pub struct RefState {
     pub refpoc: [u8; 7],
 }
 
-impl Default for RefState {
-    fn default() -> Self {
-        Self {
-            p: ThreadPicture::default(),
-            segmap: None,
-            refmvs: None,
-            ccsomap: None,
-            refpoc: [0; 7],
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -172,7 +172,7 @@ pub fn cdef_find_dir(img: &[u8], stride: usize, var: &mut u32) -> i32 {
 }
 
 pub fn cdef_pri_tap(pri_strength: i32) -> i32 {
-    4 - ((pri_strength >> 0) & 1)
+    4 - (pri_strength & 1)
 }
 
 pub fn cdef_apply_constrain(
@@ -271,9 +271,9 @@ pub fn cdef_filter_block_8bpc(
 
     if pri_strength != 0 {
         let pri_tap = 4 - (pri_strength & 1);
-        let pri_shift = imax(0, damping - ulog2(pri_strength as u32) as i32);
+        let pri_shift = imax(0, damping - ulog2(pri_strength as u32));
         if sec_strength != 0 {
-            let sec_shift = damping - ulog2(sec_strength as u32) as i32;
+            let sec_shift = damping - ulog2(sec_strength as u32);
             for _y in 0..h {
                 for x in 0..w {
                     let px = dst[dp + x] as i32;
@@ -341,7 +341,7 @@ pub fn cdef_filter_block_8bpc(
             }
         }
     } else {
-        let sec_shift = damping - ulog2(sec_strength as u32) as i32;
+        let sec_shift = damping - ulog2(sec_strength as u32);
         for _y in 0..h {
             for x in 0..w {
                 let px = dst[dp + x] as i32;
@@ -476,7 +476,7 @@ pub fn cdef_brow_8bpc(
 
     let mut by = by_start;
     while by < by_end {
-        let sb64_idx = (by as usize / 16) * ((params.bw + 15) / 16);
+        let sb64_idx = (by as usize / 16) * params.bw.div_ceil(16);
 
         let mut bx = 0i32;
         while bx < params.bw as i32 {
@@ -546,8 +546,8 @@ pub fn cdef_brow_8bpc(
                         if bx == 0 { edges &= !CdefEdgeFlags::HAVE_LEFT.0; }
                         if bx + 2 >= params.bw as i32 { edges &= !CdefEdgeFlags::HAVE_RIGHT.0; }
 
-                        let uv_off = (by as usize * 4 >> ss_ver) * uv_ls
-                            + (bx as usize * 4 >> ss_hor);
+                        let uv_off = ((by as usize * 4) >> ss_ver) * uv_ls
+                            + ((bx as usize * 4) >> ss_hor);
 
                         if uv_off + ch * uv_ls + cw <= u.len() {
                             let top_off = if uv_off >= uv_ls { uv_off - uv_ls } else { uv_off };

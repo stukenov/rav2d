@@ -35,11 +35,11 @@ pub fn get_shear_params(wm: &mut WarpedMotionParams) -> i32 {
     let y = apply_sign(resolve_divisor_32(mat[2].unsigned_abs(), &mut shift), mat[2]);
     let v1 = (mat[4] as i64 * 0x10000) * y as i64;
     let rnd = (1i64 << shift) >> 1;
-    wm.abcd[2] = iclip_wmp(apply_sign64((v1.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift, v1) as i32);
+    wm.abcd[2] = iclip_wmp(apply_sign64((v1.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift, v1));
     let v2 = (mat[3] as i64 * mat[4] as i64) * y as i64;
     wm.abcd[3] = iclip_wmp(
         mat[5]
-            - apply_sign64((v2.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift, v2) as i32
+            - apply_sign64((v2.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift, v2)
             - 0x10000,
     );
 
@@ -148,7 +148,7 @@ pub fn find_affine_int(
     }
 
     let mut shift = 0i32;
-    let mut idet = apply_sign64(resolve_divisor_64(det.unsigned_abs(), &mut shift) as i64, det) as i32;
+    let mut idet = apply_sign64(resolve_divisor_64(det.unsigned_abs(), &mut shift) as i64, det);
     shift -= 16;
     if shift < 0 {
         idet <<= -shift;

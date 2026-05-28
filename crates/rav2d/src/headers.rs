@@ -82,17 +82,22 @@ pub enum RestorationType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i8)]
+#[derive(Default)]
 pub enum WarpedMotionType {
     Invalid = -1,
+    #[default]
     Identity = 0,
     Translation = 1,
     RotZoom = 2,
     Affine = 3,
 }
 
-impl Default for WarpedMotionType {
-    fn default() -> Self {
-        Self::Identity
+impl WarpedMotionType {
+    /// # Safety
+    /// `val` must be in range -1..=3 (Invalid..Affine).
+    pub unsafe fn from_raw(val: i8) -> Self {
+        debug_assert!((-1..=3).contains(&val), "invalid WarpedMotionType: {val}");
+        unsafe { std::mem::transmute(val) }
     }
 }
 

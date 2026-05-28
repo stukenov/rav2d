@@ -1,5 +1,6 @@
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::mem::MemPool;
 
@@ -11,6 +12,7 @@ pub struct Ref {
     free_callback: FreeCallback,
 }
 
+// SAFETY: Ref uses atomic reference counting; data pointer is owned and not aliased.
 unsafe impl Send for Ref {}
 unsafe impl Sync for Ref {}
 
@@ -27,17 +29,17 @@ impl Ref {
         }))
     }
 
-    pub fn create_from_pool(pool: &MemPool, size: usize) -> Option<Box<Self>> {
+    pub fn create_from_pool(pool: &Arc<MemPool>, size: usize) -> Option<Box<Self>> {
         let ptr = pool.pop(size)?;
+        let pool = Arc::clone(pool);
+        let addr = ptr.as_ptr() as usize;
         Some(Box::new(Self {
             data: Some(ptr),
             ref_cnt: AtomicUsize::new(1),
-            free_callback: {
-                let size = size;
-                Box::new(move || {
-                    // pool.push handled externally when ref drops
-                })
-            },
+            free_callback: Box::new(move || {
+                // SAFETY: addr was obtained from pool.pop and is still valid.
+                pool.push(unsafe { NonNull::new_unchecked(addr as *mut u8) }, size);
+            }),
         }))
     }
 
@@ -104,7 +106,7 @@ impl SharedRef {
     }
 
     pub fn is_writable(&self) -> bool {
-        self.inner.as_ref().map_or(false, |r| r.is_writable())
+        self.inner.as_ref().is_some_and(|r| r.is_writable())
     }
 
     pub fn take(&mut self) -> Option<Box<Ref>> {

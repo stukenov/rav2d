@@ -55,7 +55,7 @@ pub fn quantize_mv_comp(absv: u32) -> u32 {
     }
     let nbits = iclip(ulog2(absv) - 4, 0, 6) as u32;
     let has_bits = (nbits != 0) as u32;
-    let res = (absv - (16 * has_bits << nbits)) >> nbits;
+    let res = (absv - ((16 * has_bits) << nbits)) >> nbits;
     res + (nbits + has_bits) * 16
 }
 
@@ -80,7 +80,7 @@ pub fn dequantize_mv_comp(v: i32) -> i32 {
     let nbits = (absv >> 4).wrapping_sub(if absv >= 16 { 1 } else { 0 });
     let has_bits = (nbits != 0) as u32;
     let mut res = (absv - (nbits + has_bits) * 16) << nbits;
-    res += 16 * has_bits << nbits;
+    res += (16 * has_bits) << nbits;
     if v < 0 { -(res as i32) } else { res as i32 }
 }
 
@@ -175,6 +175,8 @@ pub struct TrajMap {
 }
 
 impl TrajMap {
+    /// # Safety
+    /// Reinterprets the (y, x) pair as a single u16 via pointer cast. Caller must ensure the struct is #[repr(C)] with matching layout.
     pub unsafe fn n(&self) -> u16 {
         unsafe { *(self as *const Self as *const u16) }
     }
@@ -202,6 +204,7 @@ impl Default for QMv {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
+#[derive(Default)]
 pub struct TemporalBlock {
     pub mv: TemporalBlockMv,
     pub r#ref: RefPair,
@@ -220,17 +223,10 @@ impl Default for TemporalBlockMv {
     }
 }
 
-impl Default for TemporalBlock {
-    fn default() -> Self {
-        Self {
-            mv: TemporalBlockMv::default(),
-            r#ref: RefPair::default(),
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 #[repr(C, align(64))]
+#[derive(Default)]
 pub struct Block {
     pub mv: [Mv; 2],
     pub r#ref: RefPair,
@@ -244,22 +240,6 @@ pub struct Block {
     pub m: [i32; 6],
 }
 
-impl Default for Block {
-    fn default() -> Self {
-        Self {
-            mv: [Mv::default(); 2],
-            r#ref: RefPair::default(),
-            bs: 0,
-            mf: 0,
-            ox4: 0,
-            oy4: 0,
-            subpel_filter: 0,
-            warp_type: 0,
-            lmv: [Mv::default(); 2],
-            m: [0; 6],
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct MfmvRef {
@@ -364,9 +344,9 @@ pub fn model_from_corners(
     ypos: i32,
     b_dim: &[u8],
 ) -> bool {
-    let (tl_x, tl_y) = unsafe { (topleft_mv.c.x as i32, topleft_mv.c.y as i32) };
-    let (tr_x, tr_y) = unsafe { (topright_mv.c.x as i32, topright_mv.c.y as i32) };
-    let (bl_x, bl_y) = unsafe { (bottomleft_mv.c.x as i32, bottomleft_mv.c.y as i32) };
+    let (tl_x, tl_y) = unsafe { (topleft_mv.c.x, topleft_mv.c.y) };
+    let (tr_x, tr_y) = unsafe { (topright_mv.c.x, topright_mv.c.y) };
+    let (bl_x, bl_y) = unsafe { (bottomleft_mv.c.x, bottomleft_mv.c.y) };
 
     if unsafe { topright_mv.n == topleft_mv.n && bottomleft_mv.n == topleft_mv.n } {
         return false;
@@ -1335,7 +1315,7 @@ pub fn add_spatial_candidate(
             if b.mf & 1 != 0 && unsafe { gmv[0].c.y } != INVALID_MV { gmv[0] } else { b.mv[0] },
             if b.mf & 1 != 0 && unsafe { gmv[1].c.y } != INVALID_MV { gmv[1] } else { b.mv[1] },
         ];
-        add_candidate_comp(mvstack, cnt, 6, weight, (b.mf >> 2) as i8,
+        add_candidate_comp(mvstack, cnt, 6, weight, b.mf >> 2 ,
                            &cand_mv, &mut st.iter_cntr, 16);
     } else {
         if seq_hdr.mv_traj && frm_hdr.use_ref_frame_mvs != 0
@@ -1546,16 +1526,16 @@ pub fn refmvs_find(
     }
 
     // warp from corners
-    if warp.is_some() {
-        if let Some(bml_b) = bml {
-            if bml_b.mf & 2 != 0 && unsafe { bml_b.r#ref.r[0] } == ref0
+    if warp.is_some()
+        && let Some(bml_b) = bml
+            && bml_b.mf & 2 != 0 && unsafe { bml_b.r#ref.r[0] } == ref0
                 && bml_b.warp_type != WarpedMotionType::Invalid as i8
             {
                 let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
                 let bl_mv = if bml_b.mf & 2 == 0 { bml_b.mv[bl_ref_idx] }
                     else { get_warpmv_proj(bml_b.warp_type, &bml_b.m, bx4 * 4, (by4 + bh4) * 4, minx, maxx, miny, maxy) };
-                if let Some(tl_b) = tl {
-                    if let Some(rmt_b) = rmt {
+                if let Some(tl_b) = tl
+                    && let Some(rmt_b) = rmt {
                         let tl_ref_idx = (unsafe { tl_b.r#ref.r[0] } != ref0) as usize;
                         let tr_ref_idx = (unsafe { rmt_b.r#ref.r[0] } != ref0) as usize;
                         let cond_tl = tl_ref_idx == 0 || (unsafe { tl_b.r#ref.r[1] } == ref0 && tl_b.mf & 2 == 0);
@@ -1566,18 +1546,16 @@ pub fn refmvs_find(
                             let tr_mv = if rmt_b.mf & 2 == 0 { rmt_b.mv[tr_ref_idx] }
                                 else { get_warpmv_proj(rmt_b.warp_type, &rmt_b.m, (bx4 + bw4) * 4, by4 * 4, minx, maxx, miny, maxy) };
                             let mut mat = [0i32; 7];
-                            if model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim) {
-                                if let Some(ref mut w) = warp {
+                            if model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim)
+                                && let Some(ref mut w) = warp {
                                     w[*warp_cnt as usize] = mat;
                                     *warp_cnt += 1;
                                 }
-                            }
                         }
                     }
-                }
-                if *warp_cnt == 0 {
-                    if let Some(lmt_b) = lmt {
-                        if let Some(tr_b) = tr {
+                if *warp_cnt == 0
+                    && let Some(lmt_b) = lmt
+                        && let Some(tr_b) = tr {
                             let tl_ref_idx = (unsafe { lmt_b.r#ref.r[0] } != ref0) as usize;
                             let tr_ref_idx = (unsafe { tr_b.r#ref.r[0] } != ref0) as usize;
                             let cond_tl = tl_ref_idx == 0 || (unsafe { lmt_b.r#ref.r[1] } == ref0 && lmt_b.mf & 2 == 0);
@@ -1588,19 +1566,14 @@ pub fn refmvs_find(
                                 let tr_mv = if tr_b.mf & 2 == 0 { tr_b.mv[tr_ref_idx] }
                                     else { get_warpmv_proj(tr_b.warp_type, &tr_b.m, (bx4 + bw4) * 4, by4 * 4, minx, maxx, miny, maxy) };
                                 let mut mat = [0i32; 7];
-                                if model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim) {
-                                    if let Some(ref mut w) = warp {
+                                if model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim)
+                                    && let Some(ref mut w) = warp {
                                         w[*warp_cnt as usize] = mat;
                                         *warp_cnt += 1;
                                     }
-                                }
                             }
                         }
-                    }
-                }
             }
-        }
-    }
 
     let stride = rf.rp_stride;
     let tms_8x8y = ((by4 & (rf.sbsz - 1)) >> 1) as isize;
@@ -1722,9 +1695,9 @@ pub fn refmvs_find(
             if bh4 == h4 {
                 let pos = ((by4 + bh4 - 1) & 63) as usize * 128 + ((bx4 - adj) & 127) as usize;
                 let ext_bml = &rt.r[pos];
-                if let Some(bml_b) = bml {
-                    if BLOCK_DIMENSIONS[ext_bml.bs as usize][0] < adj as u8
-                        || ext_bml.bs != bml_b.bs
+                if let Some(bml_b) = bml
+                    && (BLOCK_DIMENSIONS[ext_bml.bs as usize][0] < adj as u8
+                        || ext_bml.bs != bml_b.bs)
                     {
                         add_matrix!(ext_bml, limited_no_type);
                         add_spatial_candidate(bh4 - 1, -adj, rf, rp_proj, rp_traj,
@@ -1732,14 +1705,13 @@ pub fn refmvs_find(
                                               bms_8x8y, ((bx4 - adj) >> 1) as isize,
                                               r#ref, &gmv, seq_hdr, frm_hdr);
                     }
-                }
             }
             if bh4 > 1 {
                 let pos = (by4 & 63) as usize * 128 + ((bx4 - adj) & 127) as usize;
                 let ext_tml = &rt.r[pos];
-                if let Some(tml_b) = tml {
-                    if BLOCK_DIMENSIONS[ext_tml.bs as usize][0] < adj as u8
-                        || ext_tml.bs != tml_b.bs
+                if let Some(tml_b) = tml
+                    && (BLOCK_DIMENSIONS[ext_tml.bs as usize][0] < adj as u8
+                        || ext_tml.bs != tml_b.bs)
                     {
                         add_matrix!(ext_tml, limited_no_type);
                         add_spatial_candidate(0, -adj, rf, rp_proj, rp_traj,
@@ -1747,7 +1719,6 @@ pub fn refmvs_find(
                                               tms_8x8y, ((bx4 - adj) >> 1) as isize,
                                               r#ref, &gmv, seq_hdr, frm_hdr);
                     }
-                }
             }
         }
     }
@@ -1894,8 +1865,8 @@ pub fn refmvs_find(
     }
 
     // warp bank + gmv + defaults
-    if let Some(warp_out) = warp {
-        if *warp_cnt < 4 {
+    if let Some(warp_out) = warp
+        && *warp_cnt < 4 {
             debug_assert!((ref0 as usize) < TIP_FRAME && ref1 == -1);
             let sz = rt.warp.size[ref0 as usize] as usize;
             let idx = rt.warp.idx[ref0 as usize] as usize;
@@ -1925,7 +1896,6 @@ pub fn refmvs_find(
                 *warp_cnt += 1;
             }
         }
-    }
 
     debug_assert!(*cnt <= 6);
 
@@ -1934,7 +1904,7 @@ pub fn refmvs_find(
     if ref0 == -1 {
         let max_bvp = frm_hdr.max_bvp_drl_bits as i32 + 1;
         if n_refmvs < max_bvp {
-            let sbsz = (64 << frm_hdr.sb128) as i32;
+            let sbsz = 64 << frm_hdr.sb128 ;
             mvstack[n_refmvs as usize].mv[0] = Mv { c: MvXY { y: -(sbsz * 8), x: 0 } };
             mvstack[n_refmvs as usize].weight = 0;
             n_refmvs += 1;
@@ -2088,7 +2058,7 @@ pub fn check_traj_intersect(
         x2 &= sample_step_mask;
         let pos2 = pos(y2, x2);
         let k2 = (x1 >> shift) - (x2 >> shift);
-        debug_assert!(k2 >= -1 && k2 <= 1);
+        debug_assert!((-1..=1).contains(&k2));
         map[(k2 + 1) as usize][ref2][pos2] = TrajMap {
             y: (y1 - y2) as i8,
             x: (x1 - x2) as i8,
@@ -2153,7 +2123,7 @@ pub fn check_traj_intersect(
         x3 &= sample_step_mask;
         let pos3 = pos(y3, x3);
         let k3 = (x2 >> shift) - (x3 >> shift);
-        debug_assert!(k3 >= -1 && k3 <= 1);
+        debug_assert!((-1..=1).contains(&k3));
         map[(k3 + 1) as usize][ref1][pos3] = TrajMap {
             y: (y2 - y3) as i8,
             x: (x2 - x3) as i8,
@@ -2178,7 +2148,7 @@ pub fn load_tmvs(
         tile_row_idx = 0;
     }
     debug_assert!(row_start8 >= 0);
-    let sbsz8 = (rf.sbsz >> 1) as i32;
+    let sbsz8 = rf.sbsz >> 1 ;
     let mfmv_sbsz8 = rf.mfmv_sbsz8;
     let mfmv_edge = rf.mfmv_edge;
     row_end8 = imin(row_end8, rf.ih8);
@@ -2290,11 +2260,11 @@ pub fn load_tmvs(
                         col_start8_shifted, col_end8_shifted, mask,
                     );
                     for i in 0..7 {
-                        rf.rp_traj[i] = std::mem::replace(&mut rp_traj_local[i], Vec::new());
+                        rf.rp_traj[i] = std::mem::take(&mut rp_traj_local[i]);
                     }
                     for k in 0..3 {
                         for r in 0..7 {
-                            rf.rp_map[k][r] = std::mem::replace(&mut map_local[k][r], Vec::new());
+                            rf.rp_map[k][r] = std::mem::take(&mut map_local[k][r]);
                         }
                     }
                 }
@@ -2396,7 +2366,7 @@ pub fn init_frame(
     let n_tile_rows = if have_threading { frm_hdr.tiling.t.rows as i32 } else { 1 };
     let n_blocks = rp_stride * n_tile_rows;
 
-    rf.sbsz = (16 << frm_hdr.sb128) as i32;
+    rf.sbsz = 16 << frm_hdr.sb128 ;
     let mfmv_sb128 = (frm_hdr.sb128 != 0 && frm_hdr.tmvp_sample_step > 1) as i32;
     rf.mfmv_k_shift = 3 + mfmv_sb128;
     rf.mfmv_sbsz8 = 8 << mfmv_sb128;
@@ -2641,7 +2611,7 @@ pub fn init_frame(
                     for m in 0..7 {
                         let rrpoc = ref_ref_poc[rf.mfmv[n].r#ref as usize][m] as i32;
                         let diff2 = get_poc_diff(nbits, rpoc, rrpoc);
-                        rf.mfmv_ref2ref[n][m] = if (diff2 + 31) as u32 + 0 < 63 { diff2 as i8 } else { 0 };
+                        rf.mfmv_ref2ref[n][m] = if ((diff2 + 31) as u32) < 63 { diff2 as i8 } else { 0 };
                         let mut l = 0usize;
                         while l < 7 {
                             if rrpoc == ref_poc[l] as i32 { break; }
@@ -2745,7 +2715,7 @@ pub fn reset_sb(
             }
             if r.mf & 2 != 0 {
                 let wmp = WarpedMotionParams {
-                    wm_type: unsafe { std::mem::transmute::<i8, WarpedMotionType>(r.warp_type) },
+                    wm_type: unsafe { WarpedMotionType::from_raw(r.warp_type) },
                     matrix: r.m,
                     ..WarpedMotionParams::default()
                 };

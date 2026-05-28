@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 
 pub const FRAME_ERROR: u32 = u32::MAX - 1;
@@ -46,6 +46,7 @@ pub struct TaskList {
     len: usize,
 }
 
+// SAFETY: TaskList owns all nodes via Box; tail pointer only used while head is live.
 unsafe impl Send for TaskList {}
 
 impl TaskList {
@@ -98,6 +99,12 @@ impl Default for TaskList {
 pub struct PendingTasks {
     list: Mutex<TaskList>,
     merge: AtomicBool,
+}
+
+impl Default for PendingTasks {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PendingTasks {
@@ -232,7 +239,7 @@ impl Drop for WorkerHandle {
     }
 }
 
-pub fn create_tile_sbrow_tasks(n_tiles: usize, sb_rows: usize, pass: i32) -> Vec<Task> {
+pub fn create_tile_sbrow_tasks(n_tiles: usize, sb_rows: usize, _pass: i32) -> Vec<Task> {
     let mut tasks = Vec::with_capacity(n_tiles * sb_rows);
     for _tile in 0..n_tiles {
         for sby in 0..sb_rows as i32 {
@@ -362,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_worker_handle_spawn_join() {
-        use std::sync::atomic::AtomicBool;
+        use std::sync::{atomic::AtomicBool, Arc};
         let done = Arc::new(AtomicBool::new(false));
         let done_clone = done.clone();
         let mut handle = WorkerHandle::spawn(move || {

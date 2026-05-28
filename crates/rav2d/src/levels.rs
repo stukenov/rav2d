@@ -189,6 +189,15 @@ pub enum BlockPartition {
 }
 pub const N_PARTITIONS: usize = 10;
 
+impl BlockPartition {
+    /// # Safety
+    /// `val` must be in range -1..=9 (Invalid..Split).
+    pub unsafe fn from_raw(val: i8) -> Self {
+        debug_assert!((-1..=9).contains(&val), "invalid BlockPartition: {val}");
+        unsafe { std::mem::transmute(val) }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TxPartition {
@@ -200,6 +209,15 @@ pub enum TxPartition {
     V4 = 5,
     H5 = 6,
     V5 = 7,
+}
+
+impl TxPartition {
+    /// # Safety
+    /// `val` must be in range 0..=7 (None..V5).
+    pub unsafe fn from_raw(val: u8) -> Self {
+        debug_assert!(val <= 7, "invalid TxPartition: {val}");
+        unsafe { std::mem::transmute(val) }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +257,15 @@ pub enum BlockSize {
     Bs4x4 = 30,
 }
 pub const N_BS_SIZES: usize = 31;
+
+impl BlockSize {
+    /// # Safety
+    /// `val` must be in range -1..=30 (Invalid..Bs4x4).
+    pub unsafe fn from_raw(val: i8) -> Self {
+        debug_assert!((-1..=30).contains(&val), "invalid BlockSize: {val}");
+        unsafe { std::mem::transmute(val) }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -328,6 +355,7 @@ pub struct MvXY {
 
 impl std::fmt::Debug for Mv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // SAFETY: Mv.c and Mv.n share the same layout; c is always valid.
         let c = unsafe { self.c };
         write!(f, "Mv({}, {})", c.y, c.x)
     }
@@ -348,6 +376,7 @@ impl Default for RefPair {
 
 impl std::fmt::Debug for RefPair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // SAFETY: RefPair.r and RefPair.pair share the same repr(C) layout.
         let r = unsafe { self.r };
         write!(f, "RefPair({}, {})", r[0], r[1])
     }

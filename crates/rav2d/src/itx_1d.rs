@@ -162,11 +162,11 @@ fn inv_dct_1d(c: &mut [i32], stride: usize, mat: &[i8], n: usize) {
 fn inv_dct4_1d(c: &mut [i32], stride: usize) {
     let a0 = c[0 * stride] * 64 + c[2 * stride] * 64;
     let a1 = c[0 * stride] * 64 - c[2 * stride] * 64;
-    let b0 = c[1 * stride] * 83 + c[3 * stride] * 35;
-    let b1 = c[1 * stride] * 35 - c[3 * stride] * 83;
+    let b0 = c[stride] * 83 + c[3 * stride] * 35;
+    let b1 = c[stride] * 35 - c[3 * stride] * 83;
 
     c[0 * stride] = a0 + b0;
-    c[1 * stride] = a1 + b1;
+    c[stride] = a1 + b1;
     c[2 * stride] = a1 - b1;
     c[3 * stride] = a0 - b0;
 }
@@ -279,7 +279,7 @@ fn inv_identity32_1d(c: &mut [i32], stride: usize) {
 
 pub fn inv_wht4_1d(c: &mut [i32], stride: usize) {
     let in0 = c[0 * stride];
-    let in1 = c[1 * stride];
+    let in1 = c[stride];
     let in2 = c[2 * stride];
     let in3 = c[3 * stride];
 
@@ -290,13 +290,13 @@ pub fn inv_wht4_1d(c: &mut [i32], stride: usize) {
     let t1 = t4 - in1;
 
     c[0 * stride] = t0 - t3;
-    c[1 * stride] = t3;
+    c[stride] = t3;
     c[2 * stride] = t1;
     c[3 * stride] = t2 + t1;
 }
 
 pub fn cctx(u: &mut [i32], v: &mut [i32], angle: &[i16; 3], sz: usize, bitdepth: i32) {
-    debug_assert!(sz.is_power_of_two() && sz >= 16 && sz <= 1024);
+    debug_assert!(sz.is_power_of_two() && (16..=1024).contains(&sz));
     let min = -(1 << (bitdepth + 7));
     let max = (1 << (bitdepth + 7)) - 1;
     let sina = angle[0] as i32;

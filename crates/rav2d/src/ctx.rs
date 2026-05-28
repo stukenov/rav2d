@@ -11,7 +11,7 @@ pub fn memset_pow2(buf: &mut [u8], off: usize, val: u8, log2_n: u8) {
 
 #[inline(always)]
 pub fn memset_likely_pow2(buf: &mut [u8], off: usize, val: u8, n: usize) {
-    debug_assert!(n >= 1 && n <= 64);
+    debug_assert!((1..=64).contains(&n));
     buf[off..off + n].fill(val);
 }
 

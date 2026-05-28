@@ -10,6 +10,7 @@ struct PoolEntry {
     size: usize,
 }
 
+// SAFETY: PoolEntry owns its allocation; access is serialized by the MemPool mutex.
 unsafe impl Send for PoolEntry {}
 
 pub struct MemPool {
@@ -19,6 +20,12 @@ pub struct MemPool {
 struct PoolInner {
     free_list: Vec<PoolEntry>,
     ended: bool,
+}
+
+impl Default for MemPool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MemPool {
@@ -44,10 +51,7 @@ impl MemPool {
 
         let layout = Layout::from_size_align(size, POOL_ALIGNMENT).ok()?;
         let ptr = unsafe { alloc::alloc(layout) };
-        NonNull::new(ptr).map(|p| {
-            // no tracking needed in non-debug mode
-            p
-        })
+        NonNull::new(ptr)
     }
 
     pub fn push(&self, ptr: NonNull<u8>, size: usize) {

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    env:
+      DAV2D_LIB_PATH: ${{ github.workspace }}/dav2d/build/src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install meson and ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+
+      - name: Install meson and ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja
+
+      - name: Build dav2d
+        run: |
+          cd dav2d
+          meson setup build --default-library=both
+          ninja -C build
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+        env:
+          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
+      - name: cargo test
+        run: cargo test --workspace
+        env:
+          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
+      - name: cargo build --release
+        run: cargo build --release --workspace
+        env:
+          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}

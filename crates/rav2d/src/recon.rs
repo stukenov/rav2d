@@ -1,6 +1,6 @@
 use crate::intops::{apply_sign, iclip, imax, imin, umin, ulog2};
 use crate::headers::PixelLayout;
-use crate::levels::{Av2Block, BlockSize, IntraPredMode, Mv, RefPair, N_BS_SIZES, txtp};
+use crate::levels::{BlockSize, IntraPredMode, Mv, RefPair, N_BS_SIZES, txtp};
 use crate::refmvs::{self, TemporalBlock, INVALID_TRAJ};
 use crate::mc::OpflRegressionData;
 use crate::msac::MsacContext;
@@ -12,7 +12,7 @@ pub fn adjust_strength(strength: i32, var: u32) -> i32 {
     if var == 0 {
         return 0;
     }
-    let i = if var >> 6 != 0 { imin(ulog2(var >> 6) as i32, 12) } else { 0 };
+    let i = if var >> 6 != 0 { imin(ulog2(var >> 6), 12) } else { 0 };
     (strength * (4 + i) + 8) >> 4
 }
 
@@ -197,7 +197,7 @@ pub fn get_skip_ctx(
                 v = match tx {
                     0 => dir[0] as u32,
                     1 => read_u16_ne(dir) as u32,
-                    2 | 3 => read_u32_ne(dir) as u32,
+                    2 | 3 => read_u32_ne(dir),
                     _ => unreachable!(),
                 };
             }
@@ -843,14 +843,14 @@ pub fn decode_coefs(
             }
         } else {
             stx_type = (t_dim.min >= 2 && *txtp as u8 == txtp::DCT_DCT
-                && eob >= 3 && eob < 32) as u32;
+                && (3..32).contains(&eob)) as u32;
         }
         if stx_type != 0 {
             stx_type = msac.decode_symbol_adapt(
                 mode.stx((!p.intra) as usize, t_dim.min as usize), 3,
             );
-            let mut stx_set: u32 = 0;
             if stx_type != 0 && p.intra {
+                let mut stx_set: u32;
                 if t_dim.min >= 1 && *txtp as u8 == txtp::ADST_ADST {
                     static INV_MAP_ADST: [[u8; 4]; 12] = [
                         [3,1,0,2],[1,3,0,2],[1,3,0,2],[1,3,0,2],
@@ -898,7 +898,7 @@ pub fn decode_coefs(
         let stride = 1 + (4 << slh);
         let mut levels = vec![0i8; stride * ((4 << slw) + 1)];
         let sz_ctx = imin(t_dim.ctx as i32, 2) as usize;
-        let sz = ((16 << tx2dszctx) - 1) as i32;
+        let sz = (16 << tx2dszctx) - 1 ;
         let bob = sz - eob;
         let ctx = ((bob > 2 << tx2dszctx) as usize) + ((bob > 4 << tx2dszctx) as usize);
         let mut tok = 1 + msac.decode_symbol_adapt(
@@ -1173,7 +1173,7 @@ pub fn decode_coefs(
                 let shift = slh + 2;
                 let mask = (4 << slh) - 1;
                 levels[..stride * ((4 << slh) + 2)].fill(0);
-                let hi_to_low = ((8 << slh) >> chroma as usize) as i32;
+                let hi_to_low = (8 << slh) >> chroma as usize ;
                 decode_coefs_class!(1, stride, shift, 0, mask, hi_to_low, xy_h);
             }
             2 => {
@@ -1182,7 +1182,7 @@ pub fn decode_coefs(
                 let shift2 = slh + 2;
                 let mask = (4 << slw) - 1;
                 levels[..stride * ((4 << slw) + 2)].fill(0);
-                let hi_to_low = ((8 << slw) >> chroma as usize) as i32;
+                let hi_to_low = (8 << slw) >> chroma as usize ;
                 decode_coefs_class!(2, stride, shift, shift2, mask, hi_to_low, xy_v);
             }
             _ => unreachable!(),
@@ -1235,7 +1235,7 @@ pub fn decode_coefs(
         }
     } else {
         let max_br = if chroma { 5 } else { 8 };
-        let tcq_bit = ((tcq_state & 2) >> 1) as i32;
+        let tcq_bit = (tcq_state & 2) >> 1 ;
         let dc_val: i32;
         if dc_tok >= max_br - tcq_en as i32 {
             let hr = decode_hr(msac, hr_avg);
@@ -1356,7 +1356,7 @@ fn emu_edge(
     iw: usize, ih: usize,
     x: i32, y: i32,
 ) {
-    let mut src_y = y.max(0) as usize;
+    let _src_y = y.max(0) as usize;
     for dst_y in 0..bh {
         let actual_y = ((y + dst_y as i32).max(0) as usize).min(ih.saturating_sub(1));
         let dst_row = dst_y * dst_stride;
@@ -1496,9 +1496,9 @@ pub fn warp_affine_8bpc(
     ref_w: i32, ref_h: i32,
     bw4: i32, bh4: i32,
     mat: &[i32; 6],
-    pl: usize,
+    _pl: usize,
     ss_hor: i32, ss_ver: i32,
-    emu_edge_buf: &mut [u8],
+    _emu_edge_buf: &mut [u8],
 ) {
     let h_mul = 4 >> ss_hor;
     let v_mul = 4 >> ss_ver;
@@ -1584,7 +1584,7 @@ pub fn avg_8bpc(
             let d = y * dst_stride + x;
             let s = y * w + x;
             if d < dst.len() && s < tmp1.len() && s < tmp2.len() {
-                let val = ((tmp1[s] as i32 + tmp2[s] as i32 + (1 << 4)) >> 5).max(0).min(255);
+                let val = ((tmp1[s] as i32 + tmp2[s] as i32 + (1 << 4)) >> 5).clamp(0, 255);
                 dst[d] = val as u8;
             }
         }
@@ -1685,7 +1685,7 @@ pub fn recon_b_luma_tx_8bpc(
     cf: &[i32],
     eob: i32,
     txtp: u16,
-    tx: usize,
+    _tx: usize,
     qm: Option<&[u8]>,
     dq: &[u32; 2],
     bitdepth_max: i32,
@@ -1817,7 +1817,7 @@ pub struct ReconBlockContext {
 
 pub fn recon_b_8bpc(
     dst_y: &mut [u8], y_stride: usize,
-    dst_u: &mut [u8], dst_v: &mut [u8], uv_stride: usize,
+    _dst_u: &mut [u8], _dst_v: &mut [u8], _uv_stride: usize,
     ctx: &ReconBlockContext,
     cf: &[i32],
     cbi: &[(i16, u16)],
@@ -1832,8 +1832,8 @@ pub fn recon_b_8bpc(
 ) {
     let w = ctx.bw4 * 4;
     let h = ctx.bh4 * 4;
-    let cw = w >> ss_hor;
-    let ch = h >> ss_ver;
+    let _cw = w >> ss_hor;
+    let _ch = h >> ss_ver;
 
     if ctx.skip_txfm {
         return;
@@ -1841,8 +1841,8 @@ pub fn recon_b_8bpc(
 
     if ctx.intra && !ctx.intrabc {
         if !cbi.is_empty() && cbi[0].0 >= 0 {
-            let tx_w = w as usize;
-            let tx_h = h as usize;
+            let _tx_w = w as usize;
+            let _tx_h = h as usize;
             let txtp = cbi[0].1;
             let eob = cbi[0].0 as i32;
 
@@ -1970,8 +1970,8 @@ pub fn recon_b_8bpc(
             w as usize, h as usize,
         );
 
-        if !cbi.is_empty() && cbi[0].0 > 0 {
-            if off < dst_y.len() {
+        if !cbi.is_empty() && cbi[0].0 > 0
+            && off < dst_y.len() {
                 let params = ReconLumaTxParams {
                     tx: 0,
                     bx4: ctx.bx,
@@ -1985,7 +1985,6 @@ pub fn recon_b_8bpc(
                     &params,
                 );
             }
-        }
     }
 }
 

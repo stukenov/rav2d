@@ -14,6 +14,7 @@ pub struct UserData {
     free_callback: Box<dyn Fn(*const u8) + Send + Sync>,
 }
 
+// SAFETY: UserData's raw pointer is only accessed via its own Drop and the Send+Sync free_callback.
 unsafe impl Send for UserData {}
 unsafe impl Sync for UserData {}
 
@@ -62,6 +63,7 @@ impl DataProps {
     }
 }
 
+/// A reference-counted byte buffer for compressed bitstream data.
 #[derive(Clone)]
 pub struct Data {
     buf: Option<Arc<Vec<u8>>>,

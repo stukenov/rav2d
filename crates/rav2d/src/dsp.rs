@@ -6,6 +6,7 @@ pub const N_SWITCHABLE_FILTERS: usize = 3;
 pub type PixelFn = unsafe extern "C" fn();
 
 #[derive(Clone)]
+#[derive(Default)]
 pub struct FilmGrainDSPContext {
     pub generate_grain_y: Option<PixelFn>,
     pub generate_grain_uv: [Option<PixelFn>; 3],
@@ -13,18 +14,9 @@ pub struct FilmGrainDSPContext {
     pub fguv_32x32xn: [Option<PixelFn>; 3],
 }
 
-impl Default for FilmGrainDSPContext {
-    fn default() -> Self {
-        Self {
-            generate_grain_y: None,
-            generate_grain_uv: [None; 3],
-            fgy_32x32xn: None,
-            fguv_32x32xn: [None; 3],
-        }
-    }
-}
 
 #[derive(Clone)]
+#[derive(Default)]
 pub struct IntraPredDSPContext {
     pub intra_pred: [Option<PixelFn>; 14],
     pub cfl_pred: [[Option<PixelFn>; 3]; 2],
@@ -35,19 +27,6 @@ pub struct IntraPredDSPContext {
     pub pal_pred: Option<PixelFn>,
 }
 
-impl Default for IntraPredDSPContext {
-    fn default() -> Self {
-        Self {
-            intra_pred: [None; 14],
-            cfl_pred: [[None; 3]; 2],
-            cfl_gen_y: [[None; 3]; 3],
-            cfl_gen_mat: [None; 3],
-            cfl_calc_alphas: None,
-            cfl_mhccp_pred: [None; 3],
-            pal_pred: None,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct MCDSPContext {
@@ -125,6 +104,7 @@ pub struct CdefDSPContext {
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 pub struct LoopRestorationDSPContext {
     pub ns_wiener_single: [Option<PixelFn>; 2],
     pub ns_wiener_multi: Option<PixelFn>,
@@ -133,17 +113,6 @@ pub struct LoopRestorationDSPContext {
     pub gdf_add: Option<PixelFn>,
 }
 
-impl Default for LoopRestorationDSPContext {
-    fn default() -> Self {
-        Self {
-            ns_wiener_single: [None; 2],
-            ns_wiener_multi: None,
-            pc_wiener: None,
-            gdf_prep: None,
-            gdf_add: None,
-        }
-    }
-}
 
 #[derive(Clone, Default)]
 pub struct DSPContext {
