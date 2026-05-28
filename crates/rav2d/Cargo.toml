@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "AV2 video decoder in Rust"
+readme = "README.md"
+keywords = ["av2", "video", "decoder", "codec"]
+categories = ["multimedia::video"]
 
 [dependencies]
 rav2d-sys = { workspace = true }

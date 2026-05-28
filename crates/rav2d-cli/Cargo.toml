@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CLI tool for rav2d AV2 decoder"
+readme = "README.md"
+keywords = ["av2", "video", "decoder", "cli"]
+categories = ["command-line-utilities", "multimedia::video"]
 
 [[bin]]
 name = "rav2d"
