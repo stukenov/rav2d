@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
-use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI32;
 
 use crate::data::DataProps;
 use crate::headers::{FrameHeader, PixelLayout, SequenceHeader};
@@ -350,15 +350,7 @@ mod tests {
     #[test]
     fn test_picture_alloc_and_drop() {
         let allocator = Arc::new(DefaultPicAllocator::new());
-        let p = Picture::alloc(
-            320,
-            240,
-            PixelLayout::I420,
-            8,
-            None,
-            None,
-            allocator,
-        );
+        let p = Picture::alloc(320, 240, PixelLayout::I420, 8, None, None, allocator);
         assert!(p.is_some());
         let p = p.unwrap();
         assert!(p.has_data());
@@ -367,16 +359,7 @@ mod tests {
     #[test]
     fn test_picture_unref() {
         let allocator = Arc::new(DefaultPicAllocator::new());
-        let mut p = Picture::alloc(
-            320,
-            240,
-            PixelLayout::I420,
-            8,
-            None,
-            None,
-            allocator,
-        )
-        .unwrap();
+        let mut p = Picture::alloc(320, 240, PixelLayout::I420, 8, None, None, allocator).unwrap();
         p.unref();
         assert!(!p.has_data());
     }

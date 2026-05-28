@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rav2d::{Decoder, Settings, version};
 
 fn bench_version(c: &mut Criterion) {
@@ -30,5 +30,10 @@ fn bench_send_data_get_picture(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_version, bench_decoder_open, bench_send_data_get_picture);
+criterion_group!(
+    benches,
+    bench_version,
+    bench_decoder_open,
+    bench_send_data_get_picture
+);
 criterion_main!(benches);

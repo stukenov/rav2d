@@ -1,18 +1,24 @@
-use crate::intops::{apply_sign, iclip, imax, imin, umin, ulog2};
 use crate::headers::PixelLayout;
-use crate::levels::{BlockSize, IntraPredMode, Mv, RefPair, N_BS_SIZES, txtp};
-use crate::refmvs::{self, TemporalBlock, INVALID_TRAJ};
+use crate::intops::{apply_sign, iclip, imax, imin, ulog2, umin};
+use crate::levels::{BlockSize, IntraPredMode, Mv, N_BS_SIZES, RefPair, txtp};
 use crate::mc::OpflRegressionData;
 use crate::msac::MsacContext;
+use crate::refmvs::{self, INVALID_TRAJ, TemporalBlock};
 use crate::scan::SCANS;
-use crate::tables::{BLOCK_DIMENSIONS, DIV_RECIP, TxfmInfo, TXFM_DIMENSIONS, TXTP_FROM_UVMODE, MODE_TO_ANGLE_MAP};
+use crate::tables::{
+    BLOCK_DIMENSIONS, DIV_RECIP, MODE_TO_ANGLE_MAP, TXFM_DIMENSIONS, TXTP_FROM_UVMODE, TxfmInfo,
+};
 use crate::warpmv::resolve_divisor_32;
 
 pub fn adjust_strength(strength: i32, var: u32) -> i32 {
     if var == 0 {
         return 0;
     }
-    let i = if var >> 6 != 0 { imin(ulog2(var >> 6), 12) } else { 0 };
+    let i = if var >> 6 != 0 {
+        imin(ulog2(var >> 6), 12)
+    } else {
+        0
+    };
     (strength * (4 + i) + 8) >> 4
 }
 
@@ -158,9 +164,8 @@ pub fn get_skip_ctx(
     let b_dim = &BLOCK_DIMENSIONS[bs];
 
     if plane != 0 {
-        let not_one_blk =
-            (b_dim[2] - (b_dim[2] != 0 && ss_hor) as u8 > t_dim.lw) ||
-            (b_dim[3] - (b_dim[3] != 0 && ss_ver) as u8 > t_dim.lh);
+        let not_one_blk = (b_dim[2] - (b_dim[2] != 0 && ss_hor) as u8 > t_dim.lw)
+            || (b_dim[3] - (b_dim[3] != 0 && ss_ver) as u8 > t_dim.lh);
 
         let ca: bool = match t_dim.lw {
             0 => a[0] != 0x40,
@@ -201,9 +206,15 @@ pub fn get_skip_ctx(
                     _ => unreachable!(),
                 };
             }
-            if tx == 3 { v |= read_u32_ne(&dir[4..]); }
-            if tx >= 2 { v |= v >> 16; }
-            if tx >= 1 { v |= v >> 8; }
+            if tx == 3 {
+                v |= read_u32_ne(&dir[4..]);
+            }
+            if tx >= 2 {
+                v |= v >> 16;
+            }
+            if tx >= 1 {
+                v |= v >> 8;
+            }
             v
         };
         let la = merge(a, t_dim.lw);
@@ -246,7 +257,14 @@ pub fn get_lo_ctx(
     stride: usize,
 ) -> u32 {
     let chroma = plane != 0;
-    let lo_freq = xy < if chroma { 1 } else if tx_class == 0 { 4 } else { 2 };
+    let lo_freq = xy
+        < if chroma {
+            1
+        } else if tx_class == 0 {
+            4
+        } else {
+            2
+        };
     let mut lim: u32 = if lo_freq { 5 } else { 3 };
     let mut lo_mag: u32 = 0;
     let mut hi: u32 = 0;
@@ -266,13 +284,31 @@ pub fn get_lo_ctx(
     if tx_class == 0 {
         add!(levels[off + stride + 1]);
         if !chroma {
-            lo_mag += (levels[off + 2] as u32).min(lim)
-                    + (levels[off + 2 * stride] as u32).min(lim);
+            lo_mag +=
+                (levels[off + 2] as u32).min(lim) + (levels[off + 2 * stride] as u32).min(lim);
             if lo_freq {
-                offset = if xy == 0 { 0 } else if xy < 2 { 9 } else { 16 };
-                lim    = if xy == 0 { 8 } else if xy < 2 { 6 } else { 4 };
+                offset = if xy == 0 {
+                    0
+                } else if xy < 2 {
+                    9
+                } else {
+                    16
+                };
+                lim = if xy == 0 {
+                    8
+                } else if xy < 2 {
+                    6
+                } else {
+                    4
+                };
             } else {
-                offset = if xy < 6 { 0 } else if xy < 8 { 5 } else { 10 };
+                offset = if xy < 6 {
+                    0
+                } else if xy < 8 {
+                    5
+                } else {
+                    10
+                };
                 lim = 4;
             }
         } else {
@@ -283,11 +319,10 @@ pub fn get_lo_ctx(
         if !chroma {
             lim = 3;
             add!(levels[off + 2]);
-            lo_mag += (levels[off + 3] as u32).min(3)
-                    + (levels[off + 4] as u32).min(3);
+            lo_mag += (levels[off + 3] as u32).min(3) + (levels[off + 4] as u32).min(3);
             if lo_freq {
                 offset = if xy == 0 { 21 } else { 28 };
-                lim    = if xy == 0 { 6 } else { 4 };
+                lim = if xy == 0 { 6 } else { 4 };
             } else {
                 offset = 15;
                 lim = 4;
@@ -298,17 +333,15 @@ pub fn get_lo_ctx(
         }
     }
 
-    *hi_mag = (if !chroma && lo_freq && (xy > 0 || tx_class != 0) { 7 } else { 0 })
-        + ((hi + 1) >> 1).min(if chroma { 3 } else { 6 });
+    *hi_mag = (if !chroma && lo_freq && (xy > 0 || tx_class != 0) {
+        7
+    } else {
+        0
+    }) + ((hi + 1) >> 1).min(if chroma { 3 } else { 6 });
     offset + ((lo_mag + 1) >> 1).min(lim)
 }
 
-pub fn get_lo_ctx_idtx(
-    levels: &[i8],
-    off: usize,
-    hi_mag: &mut u32,
-    stride: usize,
-) -> u32 {
+pub fn get_lo_ctx_idtx(levels: &[i8], off: usize, hi_mag: &mut u32, stride: usize) -> u32 {
     let v0 = levels[off - 1] as u32;
     let v1 = levels[off - stride] as u32;
     let lo_mag = v0.min(3) + v1.min(3);
@@ -317,14 +350,9 @@ pub fn get_lo_ctx_idtx(
     lo_mag
 }
 
-pub fn get_sign_ctx_idtx(
-    levels: &[i8],
-    off: usize,
-    stride: usize,
-) -> u32 {
-    let sum = levels[off - 1] as i32
-            + levels[off - stride] as i32
-            + levels[off - stride - 1] as i32;
+pub fn get_sign_ctx_idtx(levels: &[i8], off: usize, stride: usize) -> u32 {
+    let sum =
+        levels[off - 1] as i32 + levels[off - stride] as i32 + levels[off - stride - 1] as i32;
     let offset = if levels[off] > 3 { 2 } else { 0 };
     match sum {
         -3 => offset + 6,
@@ -339,25 +367,45 @@ pub fn get_sign_ctx_idtx(
 pub fn get_mask(
     mask: &mut [u8],
     stride: usize,
-    bx4: i32, x4: i32,
-    by4: i32, y4: i32,
+    bx4: i32,
+    x4: i32,
+    by4: i32,
+    y4: i32,
     mv: &[Mv; 2],
-    h_subpel_bits: i32, v_subpel_bits: i32,
-    bw4: i32, bh4: i32,
-    iw: i32, ih: i32,
+    h_subpel_bits: i32,
+    v_subpel_bits: i32,
+    bw4: i32,
+    bh4: i32,
+    iw: i32,
+    ih: i32,
 ) -> bool {
     let (mv0, mv1) = unsafe { (mv[0].c, mv[1].c) };
     let x0 = (bx4 + x4) * 4 + (mv0.x >> h_subpel_bits);
     let y0 = (by4 + y4) * 4 + (mv0.y >> v_subpel_bits);
     let x1 = (bx4 + x4) * 4 + (mv1.x >> h_subpel_bits);
     let y1 = (by4 + y4) * 4 + (mv1.y >> v_subpel_bits);
-    if x0 < 0 || x1 < 0 || y0 < 0 || y1 < 0 ||
-       x0 + bw4 * 4 >= iw || x1 + bw4 * 4 >= iw ||
-       y0 + bh4 * 4 >= ih || y1 + bh4 * 4 >= ih
+    if x0 < 0
+        || x1 < 0
+        || y0 < 0
+        || y1 < 0
+        || x0 + bw4 * 4 >= iw
+        || x1 + bw4 * 4 >= iw
+        || y0 + bh4 * 4 >= ih
+        || y1 + bh4 * 4 >= ih
     {
         let off = (y4 as usize * stride + x4 as usize) * 4;
-        gen_mask(&mut mask[off..], stride,
-                 bw4 * 4, bh4 * 4, x0, y0, x1, y1, iw as u32, ih as u32);
+        gen_mask(
+            &mut mask[off..],
+            stride,
+            bw4 * 4,
+            bh4 * 4,
+            x0,
+            y0,
+            x1,
+            y1,
+            iw as u32,
+            ih as u32,
+        );
         return true;
     }
     false
@@ -376,11 +424,7 @@ pub struct OpflMvDeltaBlock {
     pub d: [OpflMvDelta; 2],
 }
 
-pub fn opfl_mv_adj(
-    r: &OpflRegressionData,
-    dd: &mut OpflMvDeltaBlock,
-    d: [i8; 2],
-) {
+pub fn opfl_mv_adj(r: &OpflRegressionData, dd: &mut OpflMvDeltaBlock, d: [i8; 2]) {
     let mut su2 = r.su2;
     let mut suv = r.suv;
     let mut sv2 = r.sv2;
@@ -414,7 +458,9 @@ pub fn opfl_mv_adj(
         let idet = resolve_divisor_32(det as u32, &mut shift);
         let idet_bits = ulog2(idet as u32);
         for i in 0..2 {
-            if s[i] == 0 { continue; }
+            if s[i] == 0 {
+                continue;
+            }
             let mut abss = s[i].abs();
             let rb = imax(0, ulog2(abss as u32) + idet_bits - 22);
             if rb > 0 {
@@ -469,15 +515,21 @@ pub fn scaleup_8pel_mv_for_chroma(mv: &mut [Mv; 2], layout: PixelLayout) {
     match layout {
         PixelLayout::I444 => {
             for i in 0..2 {
-                unsafe { mv[i].c.x <<= 1; }
+                unsafe {
+                    mv[i].c.x <<= 1;
+                }
             }
             for i in 0..2 {
-                unsafe { mv[i].c.y <<= 1; }
+                unsafe {
+                    mv[i].c.y <<= 1;
+                }
             }
         }
         PixelLayout::I422 => {
             for i in 0..2 {
-                unsafe { mv[i].c.y <<= 1; }
+                unsafe {
+                    mv[i].c.y <<= 1;
+                }
             }
         }
         _ => {}
@@ -607,20 +659,26 @@ pub fn decode_coefs(
         3 => msac.decode_symbol_adapt(coef.eob_bin_128(eob_ctx), 7) as i32,
         4 => {
             let mut e = msac.decode_symbol_adapt(coef.eob_bin_256(eob_ctx), 7) as i32;
-            if e == 7 { e += msac.decode_bools_bypass(1) as i32; }
+            if e == 7 {
+                e += msac.decode_bools_bypass(1) as i32;
+            }
             e
         }
         5 => {
             let mut e = msac.decode_symbol_adapt(coef.eob_bin_512(eob_ctx), 7) as i32;
             if e == 7 {
                 e += msac.decode_bools_bypass(2) as i32;
-                if e == 10 { return i32::MIN; }
+                if e == 10 {
+                    return i32::MIN;
+                }
             }
             e
         }
         _ => {
             let mut e = msac.decode_symbol_adapt(coef.eob_bin_1024(eob_ctx), 7) as i32;
-            if e == 7 { e += msac.decode_bools_bypass(2) as i32; }
+            if e == 7 {
+                e += msac.decode_bools_bypass(2) as i32;
+            }
             e
         }
     };
@@ -641,8 +699,18 @@ pub fn decode_coefs(
             [txtp::H_DCT, txtp::H_ADST, txtp::H_FLIPADST, txtp::IDTX],
         ],
         [
-            [txtp::DCT_DCT, txtp::ADST_DCT, txtp::FLIPADST_DCT, txtp::H_DCT],
-            [txtp::DCT_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::V_DCT],
+            [
+                txtp::DCT_DCT,
+                txtp::ADST_DCT,
+                txtp::FLIPADST_DCT,
+                txtp::H_DCT,
+            ],
+            [
+                txtp::DCT_DCT,
+                txtp::DCT_ADST,
+                txtp::DCT_FLIPADST,
+                txtp::V_DCT,
+            ],
         ],
     ];
 
@@ -655,12 +723,20 @@ pub fn decode_coefs(
                     let idx = (p.cby & 15) as usize * 16 + (p.cbx & 15) as usize;
                     p.luma_fsc_map[idx] != 0
                 };
-                *txtp = if y_fsc { txtp::IDTX as u16 } else { txtp::WHT_WHT as u16 };
+                *txtp = if y_fsc {
+                    txtp::IDTX as u16
+                } else {
+                    txtp::WHT_WHT as u16
+                };
             } else {
                 *txtp &= 0xe7; // IDTX_INV -> IDTX
             }
         } else if p.intra {
-            *txtp = if p.fsc { txtp::IDTX as u16 } else { txtp::WHT_WHT as u16 };
+            *txtp = if p.fsc {
+                txtp::IDTX as u16
+            } else {
+                txtp::WHT_WHT as u16
+            };
         } else if t_dim.max == 0 {
             *txtp = if msac.decode_bool_adapt(mode.txtp_lossless()) != 0 {
                 txtp::IDTX as u16
@@ -696,11 +772,9 @@ pub fn decode_coefs(
         } else if eob == 0 || p.tx == 3 {
             *txtp = txtp::DCT_DCT as u16;
         } else if t_dim.max >= 3 {
-            let long_dct = t_dim.max == 4
-                || msac.decode_bool_adapt(mode.txtp_long32_dct(0)) != 0;
-            let short_idx = msac.decode_symbol_adapt(
-                mode.txtp_intra_short_1d(t_dim.min as usize), 3,
-            ) as usize;
+            let long_dct = t_dim.max == 4 || msac.decode_bool_adapt(mode.txtp_long32_dct(0)) != 0;
+            let short_idx =
+                msac.decode_symbol_adapt(mode.txtp_intra_short_1d(t_dim.min as usize), 3) as usize;
             let wh = (t_dim.w < t_dim.h) as usize;
             *txtp = TXTP_LONG_TBL[long_dct as usize][wh][short_idx] as u16;
         } else if p.reduced_txtp_set == 2 {
@@ -714,49 +788,361 @@ pub fn decode_coefs(
             };
             static MD_IDX2TYPE: [[[u8; 7]; 13]; 3] = [
                 [
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST, txtp::H_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::V_DCT, txtp::V_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_ADST, txtp::H_DCT, txtp::H_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST, txtp::H_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::V_ADST, txtp::V_FLIPADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST, txtp::H_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_ADST, txtp::H_DCT, txtp::H_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::V_DCT, txtp::V_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST, txtp::V_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST, txtp::H_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::DCT_ADST, txtp::V_DCT, txtp::H_DCT, txtp::V_ADST, txtp::H_ADST],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::H_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::V_DCT,
+                        txtp::V_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::H_DCT,
+                        txtp::H_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::H_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::V_ADST,
+                        txtp::V_FLIPADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::H_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::H_DCT,
+                        txtp::H_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::V_DCT,
+                        txtp::V_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::V_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::H_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::DCT_ADST,
+                        txtp::V_DCT,
+                        txtp::H_DCT,
+                        txtp::V_ADST,
+                        txtp::H_ADST,
+                    ],
                 ],
                 [
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::ADST_FLIPADST, txtp::FLIPADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::FLIPADST_ADST, txtp::ADST_FLIPADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::V_DCT, txtp::H_DCT, txtp::H_ADST],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::FLIPADST_ADST,
+                        txtp::ADST_FLIPADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::V_DCT,
+                        txtp::H_DCT,
+                        txtp::H_ADST,
+                    ],
                 ],
                 [
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::FLIPADST_ADST, txtp::ADST_FLIPADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::FLIPADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::DCT_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::DCT_DCT, txtp::ADST_ADST, txtp::ADST_DCT, txtp::DCT_ADST, txtp::V_DCT, txtp::H_DCT, txtp::V_ADST],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::FLIPADST_ADST,
+                        txtp::ADST_FLIPADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::V_DCT,
+                        txtp::H_DCT,
+                        txtp::V_ADST,
+                    ],
                 ],
             ];
             *txtp = MD_IDX2TYPE[sz_ctx][p.y_mode][tx_idx] as u16;
@@ -771,36 +1157,47 @@ pub fn decode_coefs(
             let xy = x + y;
             let ww = imin(8, t_dim.w as i32);
             let hh = imin(8, t_dim.h as i32);
-            let ctx = if xy < 2 { 1usize } else if xy > 4 * (ww + hh) - 4 { 2 } else { 0 };
+            let ctx = if xy < 2 {
+                1usize
+            } else if xy > 4 * (ww + hh) - 4 {
+                2
+            } else {
+                0
+            };
             if p.tx == 3 {
-                *txtp = if msac.decode_bool_adapt(
-                    mode.txtp_inter_dct_idtx(ctx, 3)
-                ) != 0 { txtp::DCT_DCT as u16 } else { txtp::IDTX as u16 };
+                *txtp = if msac.decode_bool_adapt(mode.txtp_inter_dct_idtx(ctx, 3)) != 0 {
+                    txtp::DCT_DCT as u16
+                } else {
+                    txtp::IDTX as u16
+                };
             } else if t_dim.max >= 3 {
-                let long_dct = t_dim.max == 4
-                    || msac.decode_bool_adapt(mode.txtp_long32_dct(1)) != 0;
-                let short_idx = msac.decode_symbol_adapt(
-                    mode.txtp_inter_short_1d(ctx, t_dim.min as usize), 3,
-                ) as usize;
+                let long_dct =
+                    t_dim.max == 4 || msac.decode_bool_adapt(mode.txtp_long32_dct(1)) != 0;
+                let short_idx = msac
+                    .decode_symbol_adapt(mode.txtp_inter_short_1d(ctx, t_dim.min as usize), 3)
+                    as usize;
                 let wh = (t_dim.w < t_dim.h) as usize;
                 *txtp = TXTP_LONG_TBL[long_dct as usize][wh][short_idx] as u16;
             } else if p.reduced_txtp_set == 1 || p.reduced_txtp_set == 2 {
-                *txtp = if msac.decode_bool_adapt(
-                    mode.txtp_inter_dct_idtx(ctx, t_dim.min as usize)
-                ) != 0 { txtp::DCT_DCT as u16 } else { txtp::IDTX as u16 };
+                *txtp = if msac.decode_bool_adapt(mode.txtp_inter_dct_idtx(ctx, t_dim.min as usize))
+                    != 0
+                {
+                    txtp::DCT_DCT as u16
+                } else {
+                    txtp::IDTX as u16
+                };
             } else if p.reduced_txtp_set == 3 {
-                let tx_idx = msac.decode_symbol_adapt(
-                    mode.txtp_inter_dct_idtx_iddct(ctx, t_dim.min as usize), 3,
-                ) as usize;
-                static TXTP_DCT_IDTX_IDDCT: [u8; 4] = [
-                    txtp::DCT_DCT, txtp::V_DCT, txtp::H_DCT, txtp::IDTX,
-                ];
+                let tx_idx = msac
+                    .decode_symbol_adapt(mode.txtp_inter_dct_idtx_iddct(ctx, t_dim.min as usize), 3)
+                    as usize;
+                static TXTP_DCT_IDTX_IDDCT: [u8; 4] =
+                    [txtp::DCT_DCT, txtp::V_DCT, txtp::H_DCT, txtp::IDTX];
                 *txtp = TXTP_DCT_IDTX_IDDCT[tx_idx] as u16;
             } else {
                 let setidx = (p.tx == 2) as usize;
-                let set = msac.decode_bool_adapt(
-                    mode.txtp_inter_tx_set(setidx, ctx, t_dim.min as usize)
-                ) as usize;
+                let set =
+                    msac.decode_bool_adapt(mode.txtp_inter_tx_set(setidx, ctx, t_dim.min as usize))
+                        as usize;
                 let t = if set == 0 {
                     msac.decode_symbol_adapt(mode.txtp_inter_set0(setidx, ctx), 7) as usize
                 } else if setidx != 0 {
@@ -809,14 +1206,42 @@ pub fn decode_coefs(
                     msac.decode_symbol_adapt(mode.txtp_inter_set1(ctx), 7) as usize + 8
                 };
                 static TXTP_INV_TBL: [[u8; 16]; 2] = [
-                    [txtp::IDTX, txtp::V_DCT, txtp::H_DCT,
-                     txtp::V_ADST, txtp::H_ADST, txtp::V_FLIPADST, txtp::H_FLIPADST,
-                     txtp::DCT_DCT, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::DCT_FLIPADST,
-                     txtp::ADST_ADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST],
-                    [txtp::IDTX, txtp::V_DCT, txtp::H_DCT,
-                     txtp::DCT_DCT, txtp::ADST_DCT, txtp::DCT_ADST, txtp::FLIPADST_DCT, txtp::DCT_FLIPADST,
-                     txtp::ADST_ADST, txtp::FLIPADST_FLIPADST, txtp::ADST_FLIPADST, txtp::FLIPADST_ADST,
-                     0, 0, 0, 0],
+                    [
+                        txtp::IDTX,
+                        txtp::V_DCT,
+                        txtp::H_DCT,
+                        txtp::V_ADST,
+                        txtp::H_ADST,
+                        txtp::V_FLIPADST,
+                        txtp::H_FLIPADST,
+                        txtp::DCT_DCT,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_ADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::IDTX,
+                        txtp::V_DCT,
+                        txtp::H_DCT,
+                        txtp::DCT_DCT,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::FLIPADST_DCT,
+                        txtp::DCT_FLIPADST,
+                        txtp::ADST_ADST,
+                        txtp::FLIPADST_FLIPADST,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
                 ];
                 *txtp = TXTP_INV_TBL[setidx][t] as u16;
             }
@@ -829,7 +1254,8 @@ pub fn decode_coefs(
     let mut stx_type: u32 = 0;
     if p.seq_ist[(!p.intra) as usize] && !chroma {
         if p.intra {
-            if eob >= 1 && p.y_mode != IntraPredMode::PaethPred as usize
+            if eob >= 1
+                && p.y_mode != IntraPredMode::PaethPred as usize
                 && (*txtp as u8 == txtp::DCT_DCT || *txtp as u8 == txtp::ADST_ADST)
             {
                 let lim = if p.tx == 1 && *txtp as u8 == txtp::DCT_DCT {
@@ -842,28 +1268,45 @@ pub fn decode_coefs(
                 stx_type = (eob < lim) as u32;
             }
         } else {
-            stx_type = (t_dim.min >= 2 && *txtp as u8 == txtp::DCT_DCT
-                && (3..32).contains(&eob)) as u32;
+            stx_type =
+                (t_dim.min >= 2 && *txtp as u8 == txtp::DCT_DCT && (3..32).contains(&eob)) as u32;
         }
         if stx_type != 0 {
-            stx_type = msac.decode_symbol_adapt(
-                mode.stx((!p.intra) as usize, t_dim.min as usize), 3,
-            );
+            stx_type =
+                msac.decode_symbol_adapt(mode.stx((!p.intra) as usize, t_dim.min as usize), 3);
             if stx_type != 0 && p.intra {
                 let mut stx_set: u32;
                 if t_dim.min >= 1 && *txtp as u8 == txtp::ADST_ADST {
                     static INV_MAP_ADST: [[u8; 4]; 12] = [
-                        [3,1,0,2],[1,3,0,2],[1,3,0,2],[1,3,0,2],
-                        [0,2,3,1],[2,1,0,3],[2,1,0,3],[1,0,3,2],
-                        [1,0,3,2],[3,1,0,2],[1,3,0,2],[1,3,0,2],
+                        [3, 1, 0, 2],
+                        [1, 3, 0, 2],
+                        [1, 3, 0, 2],
+                        [1, 3, 0, 2],
+                        [0, 2, 3, 1],
+                        [2, 1, 0, 3],
+                        [2, 1, 0, 3],
+                        [1, 0, 3, 2],
+                        [1, 0, 3, 2],
+                        [3, 1, 0, 2],
+                        [1, 3, 0, 2],
+                        [1, 3, 0, 2],
                     ];
                     let s = msac.decode_symbol_adapt(mode.stx_set_adst(), 3) as usize;
                     stx_set = INV_MAP_ADST[p.y_mode][s] as u32;
                 } else {
                     static INV_MAP: [[u8; 7]; 12] = [
-                        [6,1,0,5,4,3,2],[1,6,0,4,2,5,3],[1,6,0,4,2,5,3],[2,6,0,5,1,4,3],
-                        [3,4,6,1,0,2,5],[4,1,3,6,0,5,2],[4,1,3,6,0,5,2],[5,0,6,2,1,4,3],
-                        [5,0,6,2,1,4,3],[6,1,0,5,4,3,2],[1,6,0,4,2,5,3],[1,6,0,4,2,5,3],
+                        [6, 1, 0, 5, 4, 3, 2],
+                        [1, 6, 0, 4, 2, 5, 3],
+                        [1, 6, 0, 4, 2, 5, 3],
+                        [2, 6, 0, 5, 1, 4, 3],
+                        [3, 4, 6, 1, 0, 2, 5],
+                        [4, 1, 3, 6, 0, 5, 2],
+                        [4, 1, 3, 6, 0, 5, 2],
+                        [5, 0, 6, 2, 1, 4, 3],
+                        [5, 0, 6, 2, 1, 4, 3],
+                        [6, 1, 0, 5, 4, 3, 2],
+                        [1, 6, 0, 4, 2, 5, 3],
+                        [1, 6, 0, 4, 2, 5, 3],
                     ];
                     let s = msac.decode_symbol_adapt(mode.stx_set(), 6) as usize;
                     stx_set = INV_MAP[p.y_mode][s] as u32;
@@ -873,7 +1316,10 @@ pub fn decode_coefs(
             }
             *txtp |= (stx_type << 8) as u16;
         }
-    } else if p.seq_cctx && p.plane == 1 && eob >= p.intra as i32 && !p.lossless
+    } else if p.seq_cctx
+        && p.plane == 1
+        && eob >= p.intra as i32
+        && !p.lossless
         && (p.layout == PixelLayout::I420 || t_dim.max < 8)
     {
         let cctx = msac.decode_symbol_adapt(mode.cctx(), 6);
@@ -898,12 +1344,10 @@ pub fn decode_coefs(
         let stride = 1 + (4 << slh);
         let mut levels = vec![0i8; stride * ((4 << slw) + 1)];
         let sz_ctx = imin(t_dim.ctx as i32, 2) as usize;
-        let sz = (16 << tx2dszctx) - 1 ;
+        let sz = (16 << tx2dszctx) - 1;
         let bob = sz - eob;
         let ctx = ((bob > 2 << tx2dszctx) as usize) + ((bob > 4 << tx2dszctx) as usize);
-        let mut tok = 1 + msac.decode_symbol_adapt(
-            coef.bob_base_y_tok(sz_ctx, ctx), 2,
-        ) as i32;
+        let mut tok = 1 + msac.decode_symbol_adapt(coef.bob_base_y_tok(sz_ctx, ctx), 2) as i32;
         if tok == 3 {
             tok += msac.decode_symbol_adapt(coef.br_y_tok_idtx(sz_ctx, 0), 3) as i32;
         }
@@ -922,13 +1366,11 @@ pub fn decode_coefs(
             let off = (1 + x) * stride + (1 + y);
             let mut hr_ctx = 0u32;
             let ctx = get_lo_ctx_idtx(&levels, off, &mut hr_ctx, stride);
-            let mut tok = msac.decode_symbol_adapt(
-                coef.base_y_tok_idtx(sz_ctx, ctx as usize), 3,
-            ) as i32;
+            let mut tok =
+                msac.decode_symbol_adapt(coef.base_y_tok_idtx(sz_ctx, ctx as usize), 3) as i32;
             if tok == 3 {
-                tok += msac.decode_symbol_adapt(
-                    coef.br_y_tok_idtx(sz_ctx, hr_ctx as usize), 3,
-                ) as i32;
+                tok +=
+                    msac.decode_symbol_adapt(coef.br_y_tok_idtx(sz_ctx, hr_ctx as usize), 3) as i32;
             }
             cf[rc] = tok;
             levels[off] = tok as i8;
@@ -939,7 +1381,9 @@ pub fn decode_coefs(
         for i in bob..=sz {
             let rc = scan[i as usize] as usize;
             let tok_val = cf[rc];
-            if tok_val == 0 { continue; }
+            if tok_val == 0 {
+                continue;
+            }
             let x = rc >> shift;
             let y = rc & mask;
             let off = (1 + x) * stride + (1 + y);
@@ -958,7 +1402,8 @@ pub fn decode_coefs(
                 hr_avg = (hr_avg + hr) >> 1;
                 tok &= 0xfffff;
                 val = imin(
-                    ((((tok as u32).wrapping_mul(dq)) & 0xffffff).wrapping_add(4) >> dq_shift) as i32,
+                    ((((tok as u32).wrapping_mul(dq)) & 0xffffff).wrapping_add(4) >> dq_shift)
+                        as i32,
                     cf_max + sign as i32,
                 );
             } else {
@@ -995,45 +1440,65 @@ pub fn decode_coefs(
                     lim = 3;
                     if !chroma {
                         tok = 1 + msac.decode_symbol_adapt(
-                            coef.eob_base_y_tok_hf(t_dim.ctx as usize, ctx_init as usize), 2,
+                            coef.eob_base_y_tok_hf(t_dim.ctx as usize, ctx_init as usize),
+                            2,
                         ) as i32;
-                        hi_base = 1252; hi_stride = 4;
-                        lo_base = 452 + (t_dim.ctx as usize) * 160; lo_stride = 4; lo_nsym = 3;
+                        hi_base = 1252;
+                        hi_stride = 4;
+                        lo_base = 452 + (t_dim.ctx as usize) * 160;
+                        lo_stride = 4;
+                        lo_nsym = 3;
                     } else {
-                        tok = 1 + msac.decode_symbol_adapt(
-                            coef.eob_base_uv_tok_hf(ctx_init as usize), 2,
-                        ) as i32;
-                        hi_base = 4508; hi_stride = 4;
-                        lo_base = 4460; lo_stride = 4; lo_nsym = 3;
+                        tok = 1 + msac
+                            .decode_symbol_adapt(coef.eob_base_uv_tok_hf(ctx_init as usize), 2)
+                            as i32;
+                        hi_base = 4508;
+                        hi_stride = 4;
+                        lo_base = 4460;
+                        lo_stride = 4;
+                        lo_nsym = 3;
                     }
                     hi_cdf_valid = true;
                 } else {
                     lim = 5;
                     if !chroma {
                         tok = 1 + msac.decode_symbol_adapt(
-                            coef.eob_base_y_tok_lf(t_dim.ctx as usize, ctx_init as usize), 4,
+                            coef.eob_base_y_tok_lf(t_dim.ctx as usize, ctx_init as usize),
+                            4,
                         ) as i32;
-                        hi_base = 4080; hi_stride = 4;
-                        lo_base = 1440 + (t_dim.ctx as usize) * 528; lo_stride = 8; lo_nsym = 5;
+                        hi_base = 4080;
+                        hi_stride = 4;
+                        lo_base = 1440 + (t_dim.ctx as usize) * 528;
+                        lo_stride = 8;
+                        lo_nsym = 5;
                     } else {
-                        tok = 1 + msac.decode_symbol_adapt(
-                            coef.eob_base_uv_tok_lf(ctx_init as usize), 4,
-                        ) as i32;
-                        hi_base = 0; hi_stride = 0;
-                        lo_base = 4560; lo_stride = 8; lo_nsym = 5;
+                        tok = 1 + msac
+                            .decode_symbol_adapt(coef.eob_base_uv_tok_lf(ctx_init as usize), 4)
+                            as i32;
+                        hi_base = 0;
+                        hi_stride = 0;
+                        lo_base = 4560;
+                        lo_stride = 8;
+                        lo_nsym = 5;
                         hi_cdf_valid = false;
                     }
-                    if chroma { hi_cdf_valid = false; }
+                    if chroma {
+                        hi_cdf_valid = false;
+                    }
                 }
 
                 let (mut rc, mut x, mut y): (usize, usize, usize);
                 if $tx_cl == 0 {
                     rc = scan[eob as usize] as usize;
-                    x = rc >> shift; y = rc & mask;
+                    x = rc >> shift;
+                    y = rc & mask;
                 } else if $tx_cl == 1 {
-                    x = eob as usize & mask; y = eob as usize >> shift; rc = eob as usize;
+                    x = eob as usize & mask;
+                    y = eob as usize >> shift;
+                    rc = eob as usize;
                 } else {
-                    x = eob as usize & mask; y = eob as usize >> shift;
+                    x = eob as usize & mask;
+                    y = eob as usize >> shift;
                     rc = (x << shift2) | y;
                 }
                 if tok == lim && hi_cdf_valid {
@@ -1055,36 +1520,51 @@ pub fn decode_coefs(
                     if i == hi_to_low_tx - 1 {
                         lim = 5;
                         if !chroma {
-                            hi_base = 4080; hi_stride = 4;
+                            hi_base = 4080;
+                            hi_stride = 4;
                             lo_base = 1440 + (t_dim.ctx as usize) * 528;
-                            lo_stride = 8; lo_nsym = 5;
+                            lo_stride = 8;
+                            lo_nsym = 5;
                             hi_cdf_valid = true;
                         } else {
-                            hi_base = 0; hi_stride = 0;
-                            lo_base = 4560; lo_stride = 8; lo_nsym = 5;
+                            hi_base = 0;
+                            hi_stride = 0;
+                            lo_base = 4560;
+                            lo_stride = 8;
+                            lo_nsym = 5;
                             hi_cdf_valid = false;
                         }
                     }
-                    if i == 0 { break; }
+                    if i == 0 {
+                        break;
+                    }
                     if $tx_cl == 0 {
                         rc = scan[i as usize] as usize;
-                        x = rc >> shift; y = rc & mask;
+                        x = rc >> shift;
+                        y = rc & mask;
                     } else if $tx_cl == 1 {
-                        x = i as usize & mask; y = i as usize >> shift; rc = i as usize;
+                        x = i as usize & mask;
+                        y = i as usize >> shift;
+                        rc = i as usize;
                     } else {
-                        x = i as usize & mask; y = i as usize >> shift;
+                        x = i as usize & mask;
+                        y = i as usize >> shift;
                         rc = (x << shift2) | y;
                     }
                     let off = if $tx_cl == 0 { rc } else { x * stride + y };
                     let mut hr_ctx = 0u32;
-                    let xy_val: u32 = if $tx_cl == 0 { (x + y) as u32 } else { y as u32 };
-                    let ctx = get_lo_ctx(&levels, off, $tx_cl, &mut hr_ctx, xy_val, p.plane, stride);
+                    let xy_val: u32 = if $tx_cl == 0 {
+                        (x + y) as u32
+                    } else {
+                        y as u32
+                    };
+                    let ctx =
+                        get_lo_ctx(&levels, off, $tx_cl, &mut hr_ctx, xy_val, p.plane, stride);
                     let tcq_bit = ((tcq_state & 2) >> 1) as u32;
                     let lo_cdf_idx = (ctx * (2 - chroma as u32) + tcq_bit) as usize;
                     let o = lo_base + lo_cdf_idx * lo_stride;
-                    let mut tok = msac.decode_symbol_adapt(
-                        &mut coef.data[o..o + lo_stride], lo_nsym,
-                    ) as i32;
+                    let mut tok =
+                        msac.decode_symbol_adapt(&mut coef.data[o..o + lo_stride], lo_nsym) as i32;
                     if tok == lim && hi_cdf_valid {
                         let o2 = hi_base + hr_ctx as usize * hi_stride;
                         tok += msac.decode_symbol_adapt(&mut coef.data[o2..o2 + 4], 3) as i32;
@@ -1101,9 +1581,7 @@ pub fn decode_coefs(
                 let tcq_bit = ((tcq_state & 2) >> 1) as u32;
                 let lo_cdf_idx = (ctx * (2 - chroma as u32) + tcq_bit) as usize;
                 let o = lo_base + lo_cdf_idx * lo_stride;
-                dc_tok = msac.decode_symbol_adapt(
-                    &mut coef.data[o..o + lo_stride], lo_nsym,
-                ) as i32;
+                dc_tok = msac.decode_symbol_adapt(&mut coef.data[o..o + lo_stride], lo_nsym) as i32;
                 if dc_tok == lim && hi_cdf_valid {
                     let o2 = hi_base + hr_ctx as usize * hi_stride;
                     dc_tok += msac.decode_symbol_adapt(&mut coef.data[o2..o2 + 4], 3) as i32;
@@ -1114,11 +1592,17 @@ pub fn decode_coefs(
                 let ac_dq = p.dq_tbl[1];
                 for i in (1..=eob).rev() {
                     if $tx_cl == 0 {
-                        rc = if is_stx { i as usize } else { scan[i as usize] as usize };
+                        rc = if is_stx {
+                            i as usize
+                        } else {
+                            scan[i as usize] as usize
+                        };
                     } else if $tx_cl == 1 {
-                        y = i as usize >> shift; rc = i as usize;
+                        y = i as usize >> shift;
+                        rc = i as usize;
                     } else {
-                        x = i as usize & mask; y = i as usize >> shift;
+                        x = i as usize & mask;
+                        y = i as usize >> shift;
                         rc = (x << shift2) | y;
                     }
                     let tok_val = cf[rc];
@@ -1136,7 +1620,9 @@ pub fn decode_coefs(
                     tcq_state = tcq_next_state(tcq_state, tok_val);
                     let max_br = if i < hi_to_low_tx {
                         if chroma { 5 } else { 8 }
-                    } else { 6 };
+                    } else {
+                        6
+                    };
                     let mut tok = tok_val;
                     let ac_val: i32;
                     if tok >= max_br - tcq_en as i32 {
@@ -1146,12 +1632,14 @@ pub fn decode_coefs(
                         tok &= 0xfffff;
                         let v = (tok << tcq_en as i32) - tcq_bit;
                         ac_val = imin(
-                            ((((v as u32).wrapping_mul(ac_dq)) & 0xffffff).wrapping_add(4) >> dq_shift) as i32,
+                            ((((v as u32).wrapping_mul(ac_dq)) & 0xffffff).wrapping_add(4)
+                                >> dq_shift) as i32,
                             cf_max + sign as i32,
                         );
                     } else {
                         let v = (tok << tcq_en as i32) - tcq_bit;
-                        ac_val = (((v as u32).wrapping_mul(ac_dq)).wrapping_add(4) >> dq_shift) as i32;
+                        ac_val =
+                            (((v as u32).wrapping_mul(ac_dq)).wrapping_add(4) >> dq_shift) as i32;
                     }
                     cul_level += tok as u32;
                     cf[rc] = if sign != 0 { -ac_val } else { ac_val };
@@ -1173,7 +1661,7 @@ pub fn decode_coefs(
                 let shift = slh + 2;
                 let mask = (4 << slh) - 1;
                 levels[..stride * ((4 << slh) + 2)].fill(0);
-                let hi_to_low = (8 << slh) >> chroma as usize ;
+                let hi_to_low = (8 << slh) >> chroma as usize;
                 decode_coefs_class!(1, stride, shift, 0, mask, hi_to_low, xy_h);
             }
             2 => {
@@ -1182,7 +1670,7 @@ pub fn decode_coefs(
                 let shift2 = slh + 2;
                 let mask = (4 << slw) - 1;
                 levels[..stride * ((4 << slw) + 2)].fill(0);
-                let hi_to_low = (8 << slw) >> chroma as usize ;
+                let hi_to_low = (8 << slw) >> chroma as usize;
                 decode_coefs_class!(2, stride, shift, shift2, mask, hi_to_low, xy_v);
             }
             _ => unreachable!(),
@@ -1190,9 +1678,8 @@ pub fn decode_coefs(
     } else if chroma {
         dc_tok = 1 + msac.decode_symbol_adapt(coef.eob_base_uv_tok_lf(0), 4) as i32;
     } else {
-        dc_tok = 1 + msac.decode_symbol_adapt(
-            coef.eob_base_y_tok_lf(t_dim.ctx as usize, 0), 4,
-        ) as i32;
+        dc_tok =
+            1 + msac.decode_symbol_adapt(coef.eob_base_y_tok_lf(t_dim.ctx as usize, 0), 4) as i32;
         if dc_tok == 5 {
             let hi_idx = if tx_class == 0 { 0 } else { 7 };
             dc_tok += msac.decode_symbol_adapt(coef.br_y_tok_lf(hi_idx), 3) as i32;
@@ -1235,7 +1722,7 @@ pub fn decode_coefs(
         }
     } else {
         let max_br = if chroma { 5 } else { 8 };
-        let tcq_bit = (tcq_state & 2) >> 1 ;
+        let tcq_bit = (tcq_state & 2) >> 1;
         let dc_val: i32;
         if dc_tok >= max_br - tcq_en as i32 {
             let hr = decode_hr(msac, hr_avg);
@@ -1243,7 +1730,8 @@ pub fn decode_coefs(
             dc_tok &= 0xfffff;
             let v = (dc_tok << tcq_en as i32) - tcq_bit;
             dc_val = imin(
-                ((((v as u32).wrapping_mul(dc_dq as u32)) & 0xffffff).wrapping_add(4) >> dq_shift) as i32,
+                ((((v as u32).wrapping_mul(dc_dq as u32)) & 0xffffff).wrapping_add(4) >> dq_shift)
+                    as i32,
                 cf_max + dc_sign as i32,
             );
         } else {
@@ -1308,10 +1796,14 @@ pub fn mc_8bpc(
             let emu_h = (p.bh4 * v_mul + (my != 0) as i32 * 7) as usize;
             let emu_stride = 192usize;
             emu_edge(
-                emu_edge_buf, emu_stride,
-                ref_data, ref_stride,
-                emu_w, emu_h,
-                (p.right - p.left) as usize, (p.bottom - p.top) as usize,
+                emu_edge_buf,
+                emu_stride,
+                ref_data,
+                ref_stride,
+                emu_w,
+                emu_h,
+                (p.right - p.left) as usize,
+                (p.bottom - p.top) as usize,
                 dx - (mx != 0) as i32 * 3 - p.left,
                 dy - (my != 0) as i32 * 3 - p.top,
             );
@@ -1327,20 +1819,26 @@ pub fn mc_8bpc(
 
         if !is_compound {
             mc_subpel_8bpc(
-                dst, dst_stride,
+                dst,
+                dst_stride,
                 if need_emu { emu_edge_buf } else { ref_data },
-                src, src_stride,
-                w as usize, h as usize,
+                src,
+                src_stride,
+                w as usize,
+                h as usize,
                 mx << (p.ss_hor == 0) as i32,
                 my << (p.ss_ver == 0) as i32,
                 p.filter,
             );
         } else if let Some(d16) = dst16 {
             mct_subpel_8bpc(
-                d16, dst_stride,
+                d16,
+                dst_stride,
                 if need_emu { emu_edge_buf } else { ref_data },
-                src, src_stride,
-                w as usize, h as usize,
+                src,
+                src_stride,
+                w as usize,
+                h as usize,
                 mx << (p.ss_hor == 0) as i32,
                 my << (p.ss_ver == 0) as i32,
                 p.filter,
@@ -1350,11 +1848,16 @@ pub fn mc_8bpc(
 }
 
 fn emu_edge(
-    dst: &mut [u8], dst_stride: usize,
-    src: &[u8], src_stride: usize,
-    bw: usize, bh: usize,
-    iw: usize, ih: usize,
-    x: i32, y: i32,
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    bw: usize,
+    bh: usize,
+    iw: usize,
+    ih: usize,
+    x: i32,
+    y: i32,
 ) {
     let _src_y = y.max(0) as usize;
     for dst_y in 0..bh {
@@ -1373,10 +1876,15 @@ fn emu_edge(
 }
 
 fn mc_subpel_8bpc(
-    dst: &mut [u8], dst_stride: usize,
-    src: &[u8], src_off: usize, src_stride: usize,
-    w: usize, h: usize,
-    mx: i32, my: i32,
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
     filter: usize,
 ) {
     if mx == 0 && my == 0 {
@@ -1402,8 +1910,13 @@ fn mc_subpel_8bpc(
                     let sy = (y as i32 + ky - 3) as usize;
                     let sx = (x as i32 + kx - 3) as usize;
                     let idx = src_off + sy * src_stride + sx;
-                    let pix = if idx < src.len() { src[idx] as i32 } else { 128 };
-                    sum += pix * filter_taps[ky as usize] as i32 * filter_taps[kx as usize] as i32 / 128;
+                    let pix = if idx < src.len() {
+                        src[idx] as i32
+                    } else {
+                        128
+                    };
+                    sum += pix * filter_taps[ky as usize] as i32 * filter_taps[kx as usize] as i32
+                        / 128;
                 }
             }
             let d = y * dst_stride + x;
@@ -1415,10 +1928,15 @@ fn mc_subpel_8bpc(
 }
 
 fn mct_subpel_8bpc(
-    dst: &mut [i16], dst_stride: usize,
-    src: &[u8], src_off: usize, src_stride: usize,
-    w: usize, h: usize,
-    mx: i32, my: i32,
+    dst: &mut [i16],
+    dst_stride: usize,
+    src: &[u8],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
     filter: usize,
 ) {
     let filter_taps = get_subpel_filter(filter, mx, my);
@@ -1431,8 +1949,13 @@ fn mct_subpel_8bpc(
                     let sy = (y as i32 + ky - 3) as usize;
                     let sx = (x as i32 + kx - 3) as usize;
                     let idx = src_off + sy * src_stride + sx;
-                    let pix = if idx < src.len() { src[idx] as i32 } else { 128 };
-                    sum += pix * filter_taps[ky as usize] as i32 * filter_taps[kx as usize] as i32 / 128;
+                    let pix = if idx < src.len() {
+                        src[idx] as i32
+                    } else {
+                        128
+                    };
+                    sum += pix * filter_taps[ky as usize] as i32 * filter_taps[kx as usize] as i32
+                        / 128;
                 }
             }
             let d = y * dst_stride + x;
@@ -1491,13 +2014,18 @@ fn get_subpel_filter(filter: usize, mx: i32, my: i32) -> [i16; 8] {
 }
 
 pub fn warp_affine_8bpc(
-    dst: &mut [u8], dst_stride: usize,
-    ref_data: &[u8], ref_stride: usize,
-    ref_w: i32, ref_h: i32,
-    bw4: i32, bh4: i32,
+    dst: &mut [u8],
+    dst_stride: usize,
+    ref_data: &[u8],
+    ref_stride: usize,
+    ref_w: i32,
+    ref_h: i32,
+    bw4: i32,
+    bh4: i32,
     mat: &[i32; 6],
     _pl: usize,
-    ss_hor: i32, ss_ver: i32,
+    ss_hor: i32,
+    ss_ver: i32,
     _emu_edge_buf: &mut [u8],
 ) {
     let h_mul = 4 >> ss_hor;
@@ -1531,9 +2059,12 @@ pub struct BawpContext {
 }
 
 pub fn bawp_8bpc(
-    dst: &mut [u8], dst_stride: usize,
-    src: &[u8], src_stride: usize,
-    w: usize, h: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
     ctx: &BawpContext,
 ) {
     for y in 0..h {
@@ -1553,10 +2084,14 @@ pub fn bawp_8bpc(
 }
 
 pub fn iiblend_8bpc(
-    dst: &mut [u8], dst_stride: usize,
-    inter_pred: &[u8], inter_stride: usize,
-    intra_pred: &[u8], intra_stride: usize,
-    w: usize, h: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    inter_pred: &[u8],
+    inter_stride: usize,
+    intra_pred: &[u8],
+    intra_stride: usize,
+    w: usize,
+    h: usize,
     mask: &[u8],
 ) {
     for y in 0..h {
@@ -1566,7 +2101,11 @@ pub fn iiblend_8bpc(
             let ia = y * intra_stride + x;
             if d < dst.len() && ip < inter_pred.len() && ia < intra_pred.len() {
                 let m_idx = y * w + x;
-                let m = if m_idx < mask.len() { mask[m_idx] as i32 } else { 32 };
+                let m = if m_idx < mask.len() {
+                    mask[m_idx] as i32
+                } else {
+                    32
+                };
                 let val = (m * intra_pred[ia] as i32 + (64 - m) * inter_pred[ip] as i32 + 32) >> 6;
                 dst[d] = iclip(val, 0, 255) as u8;
             }
@@ -1574,11 +2113,7 @@ pub fn iiblend_8bpc(
     }
 }
 
-pub fn avg_8bpc(
-    dst: &mut [u8], dst_stride: usize,
-    tmp1: &[i16], tmp2: &[i16],
-    w: usize, h: usize,
-) {
+pub fn avg_8bpc(dst: &mut [u8], dst_stride: usize, tmp1: &[i16], tmp2: &[i16], w: usize, h: usize) {
     for y in 0..h {
         for x in 0..w {
             let d = y * dst_stride + x;
@@ -1592,9 +2127,12 @@ pub fn avg_8bpc(
 }
 
 pub fn w_avg_8bpc(
-    dst: &mut [u8], dst_stride: usize,
-    tmp1: &[i16], tmp2: &[i16],
-    w: usize, h: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
     weight: i32,
 ) {
     for y in 0..h {
@@ -1602,8 +2140,8 @@ pub fn w_avg_8bpc(
             let d = y * dst_stride + x;
             let s = y * w + x;
             if d < dst.len() && s < tmp1.len() && s < tmp2.len() {
-                let val = (tmp1[s] as i32 * weight + tmp2[s] as i32 * (16 - weight)
-                    + (1 << 8)) >> 9;
+                let val =
+                    (tmp1[s] as i32 * weight + tmp2[s] as i32 * (16 - weight) + (1 << 8)) >> 9;
                 dst[d] = iclip(val, 0, 255) as u8;
             }
         }
@@ -1611,9 +2149,12 @@ pub fn w_avg_8bpc(
 }
 
 pub fn mask_blend_8bpc(
-    dst: &mut [u8], dst_stride: usize,
-    tmp1: &[i16], tmp2: &[i16],
-    w: usize, h: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
     mask: &[u8],
 ) {
     for y in 0..h {
@@ -1622,8 +2163,7 @@ pub fn mask_blend_8bpc(
             let s = y * w + x;
             if d < dst.len() && s < tmp1.len() && s < tmp2.len() && s < mask.len() {
                 let m = mask[s] as i32;
-                let val = (tmp1[s] as i32 * m + tmp2[s] as i32 * (64 - m)
-                    + (1 << 9)) >> 10;
+                let val = (tmp1[s] as i32 * m + tmp2[s] as i32 * (64 - m) + (1 << 9)) >> 10;
                 dst[d] = iclip(val, 0, 255) as u8;
             }
         }
@@ -1631,9 +2171,12 @@ pub fn mask_blend_8bpc(
 }
 
 pub fn opfl_mv_refinement(
-    tmp1: &[i16], tmp2: &[i16],
-    w: usize, h: usize,
-    dx: &mut [i32], dy: &mut [i32],
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
+    dx: &mut [i32],
+    dy: &mut [i32],
     n_blocks: usize,
 ) {
     let blk_w = w / n_blocks.max(1);
@@ -1650,10 +2193,12 @@ pub fn opfl_mv_refinement(
                 let idx = y * w + px;
                 if idx < tmp1.len() && idx < tmp2.len() {
                     let diff = tmp1[idx] as i64 - tmp2[idx] as i64;
-                    let gx = (tmp1[idx + 1] as i64 - tmp1[idx - 1] as i64
-                        + tmp2[idx + 1] as i64 - tmp2[idx - 1] as i64) >> 1;
-                    let gy = (tmp1[idx + w] as i64 - tmp1[idx - w] as i64
-                        + tmp2[idx + w] as i64 - tmp2[idx - w] as i64) >> 1;
+                    let gx = (tmp1[idx + 1] as i64 - tmp1[idx - 1] as i64 + tmp2[idx + 1] as i64
+                        - tmp2[idx - 1] as i64)
+                        >> 1;
+                    let gy = (tmp1[idx + w] as i64 - tmp1[idx - w] as i64 + tmp2[idx + w] as i64
+                        - tmp2[idx - w] as i64)
+                        >> 1;
                     sum_dx += gx * diff;
                     sum_dy += gy * diff;
                     sum_d += gx * gx + gy * gy;
@@ -1706,8 +2251,10 @@ pub fn recon_b_luma_tx_8bpc(
 }
 
 fn dequant_coeffs(
-    cf: &[i32], out: &mut [i32],
-    w: usize, h: usize,
+    cf: &[i32],
+    out: &mut [i32],
+    w: usize,
+    h: usize,
     eob: usize,
     dq: &[u32; 2],
     qm: Option<&[u8]>,
@@ -1718,18 +2265,18 @@ fn dequant_coeffs(
 
     for i in 0..=eob.min(w * h - 1) {
         let q = if i == 0 { dc_q } else { ac_q };
-        let qm_val = qm.map_or(1 << 5, |m| {
-            if i < m.len() { m[i] as i32 } else { 1 << 5 }
-        });
+        let qm_val = qm.map_or(1 << 5, |m| if i < m.len() { m[i] as i32 } else { 1 << 5 });
         let val = (cf[i] * q * qm_val + (1 << 4)) >> 5;
         out[i] = iclip(val, -(bitdepth_max + 1) * (1 << 6), bitdepth_max * (1 << 6));
     }
 }
 
 fn itxfm_add_8bpc(
-    dst: &mut [u8], dst_stride: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
     cf: &[i32],
-    w: usize, h: usize,
+    w: usize,
+    h: usize,
     _txtp: u16,
     _bitdepth_max: i32,
 ) {
@@ -1774,9 +2321,15 @@ pub fn read_coef_blocks(
     let mut txtp = 0u16;
     let mut res_ctx = 0u8;
     let eob = decode_coefs(
-        msac, coef_cdf, mode_cdf,
-        a_coef, l_coef,
-        decode_p, cf_buf, &mut txtp, &mut res_ctx,
+        msac,
+        coef_cdf,
+        mode_cdf,
+        a_coef,
+        l_coef,
+        decode_p,
+        cf_buf,
+        &mut txtp,
+        &mut res_ctx,
     );
 
     if eob == i32::MIN {
@@ -1816,8 +2369,11 @@ pub struct ReconBlockContext {
 }
 
 pub fn recon_b_8bpc(
-    dst_y: &mut [u8], y_stride: usize,
-    _dst_u: &mut [u8], _dst_v: &mut [u8], _uv_stride: usize,
+    dst_y: &mut [u8],
+    y_stride: usize,
+    _dst_u: &mut [u8],
+    _dst_v: &mut [u8],
+    _uv_stride: usize,
     ctx: &ReconBlockContext,
     cf: &[i32],
     cbi: &[(i16, u16)],
@@ -1825,9 +2381,11 @@ pub fn recon_b_8bpc(
     ref_strides: &[usize; 7],
     ref_w: &[i32; 7],
     ref_h: &[i32; 7],
-    cur_w: i32, cur_h: i32,
+    cur_w: i32,
+    cur_h: i32,
     dq: &[u32; 2],
-    ss_hor: i32, ss_ver: i32,
+    ss_hor: i32,
+    ss_ver: i32,
     bitdepth_max: i32,
 ) {
     let w = ctx.bw4 * 4;
@@ -1856,8 +2414,16 @@ pub fn recon_b_8bpc(
                     th: h,
                 };
                 recon_b_luma_tx_8bpc(
-                    &mut dst_y[off..], y_stride,
-                    cf, eob, txtp, 0, None, dq, bitdepth_max, &params,
+                    &mut dst_y[off..],
+                    y_stride,
+                    cf,
+                    eob,
+                    txtp,
+                    0,
+                    None,
+                    dq,
+                    bitdepth_max,
+                    &params,
                 );
             }
         }
@@ -1893,8 +2459,10 @@ pub fn recon_b_8bpc(
             y_stride,
             ref_planes[ref0],
             ref_strides[ref0],
-            ref_w[ref0], ref_h[ref0],
-            cur_w, cur_h,
+            ref_w[ref0],
+            ref_h[ref0],
+            cur_w,
+            cur_h,
             &mc_params,
             &mut emu_buf,
             false,
@@ -1912,8 +2480,15 @@ pub fn recon_b_8bpc(
                     th: h,
                 };
                 recon_b_luma_tx_8bpc(
-                    &mut dst_y[off..], y_stride,
-                    cf, cbi[0].0 as i32, cbi[0].1, 0, None, dq, bitdepth_max,
+                    &mut dst_y[off..],
+                    y_stride,
+                    cf,
+                    cbi[0].0 as i32,
+                    cbi[0].1,
+                    0,
+                    None,
+                    dq,
+                    bitdepth_max,
                     &params,
                 );
             }
@@ -1942,10 +2517,14 @@ pub fn recon_b_8bpc(
         };
 
         mc_8bpc(
-            dst_y, y_stride,
-            ref_planes[ref0], ref_strides[ref0],
-            ref_w[ref0], ref_h[ref0],
-            cur_w, cur_h,
+            dst_y,
+            y_stride,
+            ref_planes[ref0],
+            ref_strides[ref0],
+            ref_w[ref0],
+            ref_h[ref0],
+            cur_w,
+            cur_h,
             &mc_params0,
             &mut emu_buf,
             true,
@@ -1953,10 +2532,14 @@ pub fn recon_b_8bpc(
         );
 
         mc_8bpc(
-            dst_y, y_stride,
-            ref_planes[ref1], ref_strides[ref1],
-            ref_w[ref1], ref_h[ref1],
-            cur_w, cur_h,
+            dst_y,
+            y_stride,
+            ref_planes[ref1],
+            ref_strides[ref1],
+            ref_w[ref1],
+            ref_h[ref1],
+            cur_w,
+            cur_h,
             &mc_params0,
             &mut emu_buf,
             true,
@@ -1965,26 +2548,35 @@ pub fn recon_b_8bpc(
 
         let off = ctx.by as usize * y_stride + ctx.bx as usize * 4;
         avg_8bpc(
-            &mut dst_y[off..], y_stride,
-            &tmp1, &tmp2,
-            w as usize, h as usize,
+            &mut dst_y[off..],
+            y_stride,
+            &tmp1,
+            &tmp2,
+            w as usize,
+            h as usize,
         );
 
-        if !cbi.is_empty() && cbi[0].0 > 0
-            && off < dst_y.len() {
-                let params = ReconLumaTxParams {
-                    tx: 0,
-                    bx4: ctx.bx,
-                    by4: ctx.by,
-                    tw: w,
-                    th: h,
-                };
-                recon_b_luma_tx_8bpc(
-                    &mut dst_y[off..], y_stride,
-                    cf, cbi[0].0 as i32, cbi[0].1, 0, None, dq, bitdepth_max,
-                    &params,
-                );
-            }
+        if !cbi.is_empty() && cbi[0].0 > 0 && off < dst_y.len() {
+            let params = ReconLumaTxParams {
+                tx: 0,
+                bx4: ctx.bx,
+                by4: ctx.by,
+                tw: w,
+                th: h,
+            };
+            recon_b_luma_tx_8bpc(
+                &mut dst_y[off..],
+                y_stride,
+                cf,
+                cbi[0].0 as i32,
+                cbi[0].1,
+                0,
+                None,
+                dq,
+                bitdepth_max,
+                &params,
+            );
+        }
     }
 }
 
@@ -2052,7 +2644,16 @@ mod tests {
 
     #[test]
     fn test_wide_angle_remap_dc() {
-        let t_dim = TxfmInfo { w: 4, h: 4, lw: 2, lh: 2, min: 2, max: 2, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 4,
+            h: 4,
+            lw: 2,
+            lh: 2,
+            min: 2,
+            max: 2,
+            sub: 0,
+            ctx: 0,
+        };
         let mut angle = 0;
         let r = wide_angle_remap(&t_dim, IntraPredMode::DcPred, &mut angle, 0);
         assert_eq!(r, IntraPredMode::DcPred);
@@ -2060,7 +2661,16 @@ mod tests {
 
     #[test]
     fn test_wide_angle_remap_no_remap() {
-        let t_dim = TxfmInfo { w: 4, h: 4, lw: 2, lh: 2, min: 2, max: 2, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 4,
+            h: 4,
+            lw: 2,
+            lh: 2,
+            min: 2,
+            max: 2,
+            sub: 0,
+            ctx: 0,
+        };
         let mut angle = 0;
         let r = wide_angle_remap(&t_dim, IntraPredMode::VertPred, &mut angle, 0);
         assert_eq!(r, IntraPredMode::VertPred);
@@ -2068,7 +2678,16 @@ mod tests {
 
     #[test]
     fn test_wide_angle_remap_wide_rect() {
-        let t_dim = TxfmInfo { w: 16, h: 4, lw: 4, lh: 2, min: 2, max: 4, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 16,
+            h: 4,
+            lw: 4,
+            lh: 2,
+            min: 2,
+            max: 4,
+            sub: 0,
+            ctx: 0,
+        };
         let mut angle = 30;
         let r = wide_angle_remap(&t_dim, IntraPredMode::VertPred, &mut angle, 0);
         let _ = r;
@@ -2076,7 +2695,16 @@ mod tests {
 
     #[test]
     fn test_wide_angle_remap_tall_rect() {
-        let t_dim = TxfmInfo { w: 4, h: 16, lw: 2, lh: 4, min: 2, max: 4, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 4,
+            h: 16,
+            lw: 2,
+            lh: 4,
+            min: 2,
+            max: 4,
+            sub: 0,
+            ctx: 0,
+        };
         let mut angle = -30;
         let r = wide_angle_remap(&t_dim, IntraPredMode::HorPred, &mut angle, 0);
         let _ = r;
@@ -2248,7 +2876,16 @@ mod tests {
 
     #[test]
     fn test_get_dc_sign_ctx_zero() {
-        let t_dim = TxfmInfo { w: 1, h: 1, lw: 0, lh: 0, min: 0, max: 0, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 1,
+            h: 1,
+            lw: 0,
+            lh: 0,
+            min: 0,
+            max: 0,
+            sub: 0,
+            ctx: 0,
+        };
         let a = [0u8; 16];
         let l = [0u8; 16];
         let r = get_dc_sign_ctx(&t_dim, &a, &l);
@@ -2257,7 +2894,16 @@ mod tests {
 
     #[test]
     fn test_get_dc_sign_ctx_balanced() {
-        let t_dim = TxfmInfo { w: 1, h: 1, lw: 0, lh: 0, min: 0, max: 0, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 1,
+            h: 1,
+            lw: 0,
+            lh: 0,
+            min: 0,
+            max: 0,
+            sub: 0,
+            ctx: 0,
+        };
         let a = [0x40u8; 16];
         let l = [0x80u8; 16];
         let r = get_dc_sign_ctx(&t_dim, &a, &l);
@@ -2266,7 +2912,16 @@ mod tests {
 
     #[test]
     fn test_get_skip_ctx_luma_same_size() {
-        let t_dim = TxfmInfo { w: 4, h: 4, lw: 2, lh: 2, min: 2, max: 2, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 4,
+            h: 4,
+            lw: 2,
+            lh: 2,
+            min: 2,
+            max: 2,
+            sub: 0,
+            ctx: 0,
+        };
         let a = [0u8; 16];
         let l = [0u8; 16];
         let r = get_skip_ctx(&t_dim, 18, &a, &l, 0, 0, false, false);
@@ -2275,7 +2930,16 @@ mod tests {
 
     #[test]
     fn test_get_skip_ctx_chroma() {
-        let t_dim = TxfmInfo { w: 1, h: 1, lw: 0, lh: 0, min: 0, max: 0, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 1,
+            h: 1,
+            lw: 0,
+            lh: 0,
+            min: 0,
+            max: 0,
+            sub: 0,
+            ctx: 0,
+        };
         let a = [0x40u8; 16];
         let l = [0x40u8; 16];
         let r = get_skip_ctx(&t_dim, 30, &a, &l, 1, 0, false, false);
@@ -2284,7 +2948,16 @@ mod tests {
 
     #[test]
     fn test_get_skip_ctx_chroma_has_cf() {
-        let t_dim = TxfmInfo { w: 1, h: 1, lw: 0, lh: 0, min: 0, max: 0, sub: 0, ctx: 0 };
+        let t_dim = TxfmInfo {
+            w: 1,
+            h: 1,
+            lw: 0,
+            lh: 0,
+            min: 0,
+            max: 0,
+            sub: 0,
+            ctx: 0,
+        };
         let a = [0x00u8; 16];
         let l = [0x00u8; 16];
         let r = get_skip_ctx(&t_dim, 30, &a, &l, 1, 0, false, false);
@@ -2320,7 +2993,9 @@ mod tests {
         let mv = [make_mv(-1000, -1000), make_mv(-1000, -1000)];
         let r = get_mask(&mut mask, 8, 0, 0, 0, 0, &mv, 0, 0, 1, 1, 100, 100);
         assert!(r);
-        for i in 0..4 { assert_eq!(mask[i], 32); }
+        for i in 0..4 {
+            assert_eq!(mask[i], 32);
+        }
     }
 
     #[test]
@@ -2329,12 +3004,20 @@ mod tests {
         let mv = [make_mv(0, 0), make_mv(-1000, -1000)];
         let r = get_mask(&mut mask, 4, 0, 0, 0, 0, &mv, 0, 0, 1, 1, 100, 100);
         assert!(r);
-        for i in 0..4 { assert_eq!(mask[i], 64); }
+        for i in 0..4 {
+            assert_eq!(mask[i], 64);
+        }
     }
 
     #[test]
     fn test_opfl_mv_adj_zero_det() {
-        let r = OpflRegressionData { su2: 0, suv: 0, sv2: 0, suw: 10, svw: 10 };
+        let r = OpflRegressionData {
+            su2: 0,
+            suv: 0,
+            sv2: 0,
+            suw: 10,
+            svw: 10,
+        };
         let mut dd = OpflMvDeltaBlock::default();
         dd.d[0].x = 99;
         opfl_mv_adj(&r, &mut dd, [1, 1]);
@@ -2346,7 +3029,13 @@ mod tests {
 
     #[test]
     fn test_opfl_mv_adj_identity_like() {
-        let r = OpflRegressionData { su2: 100, suv: 0, sv2: 100, suw: 0, svw: 0 };
+        let r = OpflRegressionData {
+            su2: 100,
+            suv: 0,
+            sv2: 100,
+            suw: 0,
+            svw: 0,
+        };
         let mut dd = OpflMvDeltaBlock::default();
         opfl_mv_adj(&r, &mut dd, [0, 0]);
         assert_eq!(dd.d[0].x, 0);
@@ -2356,8 +3045,11 @@ mod tests {
     #[test]
     fn test_opfl_mv_adj_clamps() {
         let r = OpflRegressionData {
-            su2: 1000, suv: 0, sv2: 1000,
-            suw: 1000000, svw: 1000000,
+            su2: 1000,
+            suv: 0,
+            sv2: 1000,
+            suw: 1000000,
+            svw: 1000000,
         };
         let mut dd = OpflMvDeltaBlock::default();
         opfl_mv_adj(&r, &mut dd, [127, 127]);
@@ -2506,28 +3198,55 @@ mod tests {
         // Set skip CDF to force all_skip=1 (high probability for symbol 1)
         let mut coef = CdfCoefContext::default();
         // skip[0][0][0..2] - set high prob for "true" (all skip)
-        coef.data[0] = 100; coef.data[1] = 0; // low threshold → always picks 1
+        coef.data[0] = 100;
+        coef.data[1] = 0; // low threshold → always picks 1
         let mut mode = CdfModeContext::default();
         let buf = [0xFFu8; 16];
         let mut msac = MsacContext::new(&buf, false);
         let a = [0x40u8; 16];
         let l = [0x40u8; 16];
         let params = DecodeCoefParams {
-            tx: 0, bs: 6, plane: 0, intra: true, fsc: false,
-            lossless: false, sdp_active: false, seg_id: 0,
-            y_mode: 0, uv_mode: 0, seq_fsc: false,
-            seq_ist: [false, false], seq_cctx: false,
-            chroma_dctonly: false, reduced_txtp_set: 0,
-            tcq_enabled: false, layout: PixelLayout::I420,
-            u_has_cf: 0, cbx: 0, cby: 0, luma_fsc_map: &[0; 256],
-            dq_tbl: [100, 100], bitdepth: 8, qm: None,
-            ss_hor: true, ss_ver: true,
+            tx: 0,
+            bs: 6,
+            plane: 0,
+            intra: true,
+            fsc: false,
+            lossless: false,
+            sdp_active: false,
+            seg_id: 0,
+            y_mode: 0,
+            uv_mode: 0,
+            seq_fsc: false,
+            seq_ist: [false, false],
+            seq_cctx: false,
+            chroma_dctonly: false,
+            reduced_txtp_set: 0,
+            tcq_enabled: false,
+            layout: PixelLayout::I420,
+            u_has_cf: 0,
+            cbx: 0,
+            cby: 0,
+            luma_fsc_map: &[0; 256],
+            dq_tbl: [100, 100],
+            bitdepth: 8,
+            qm: None,
+            ss_hor: true,
+            ss_ver: true,
         };
         let mut cf = [0i32; 16];
         let mut txtp_val = 0u16;
         let mut res_ctx = 0u8;
-        let ret = decode_coefs(&mut msac, &mut coef, &mut mode, &a, &l,
-                               &params, &mut cf, &mut txtp_val, &mut res_ctx);
+        let ret = decode_coefs(
+            &mut msac,
+            &mut coef,
+            &mut mode,
+            &a,
+            &l,
+            &params,
+            &mut cf,
+            &mut txtp_val,
+            &mut res_ctx,
+        );
         assert_eq!(ret, -1);
         assert_eq!(res_ctx, 0x40);
         assert_eq!(txtp_val, txtp::DCT_DCT as u16);
@@ -2539,28 +3258,55 @@ mod tests {
         let mut coef = CdfCoefContext::default();
         // skip[1][0][9] for fsc+intra sctx=9 path
         // offset: 1*100 + 0*20 + 9*2 = 118
-        coef.data[118] = 100; coef.data[119] = 0;
+        coef.data[118] = 100;
+        coef.data[119] = 0;
         let mut mode = CdfModeContext::default();
         let buf = [0xFFu8; 16];
         let mut msac = MsacContext::new(&buf, false);
         let a = [0x40u8; 16];
         let l = [0x40u8; 16];
         let params = DecodeCoefParams {
-            tx: 0, bs: 6, plane: 0, intra: true, fsc: true,
-            lossless: false, sdp_active: false, seg_id: 0,
-            y_mode: 0, uv_mode: 0, seq_fsc: true,
-            seq_ist: [false, false], seq_cctx: false,
-            chroma_dctonly: false, reduced_txtp_set: 0,
-            tcq_enabled: false, layout: PixelLayout::I420,
-            u_has_cf: 0, cbx: 0, cby: 0, luma_fsc_map: &[0; 256],
-            dq_tbl: [100, 100], bitdepth: 8, qm: None,
-            ss_hor: true, ss_ver: true,
+            tx: 0,
+            bs: 6,
+            plane: 0,
+            intra: true,
+            fsc: true,
+            lossless: false,
+            sdp_active: false,
+            seg_id: 0,
+            y_mode: 0,
+            uv_mode: 0,
+            seq_fsc: true,
+            seq_ist: [false, false],
+            seq_cctx: false,
+            chroma_dctonly: false,
+            reduced_txtp_set: 0,
+            tcq_enabled: false,
+            layout: PixelLayout::I420,
+            u_has_cf: 0,
+            cbx: 0,
+            cby: 0,
+            luma_fsc_map: &[0; 256],
+            dq_tbl: [100, 100],
+            bitdepth: 8,
+            qm: None,
+            ss_hor: true,
+            ss_ver: true,
         };
         let mut cf = [0i32; 16];
         let mut txtp_val = 0u16;
         let mut res_ctx = 0u8;
-        let ret = decode_coefs(&mut msac, &mut coef, &mut mode, &a, &l,
-                               &params, &mut cf, &mut txtp_val, &mut res_ctx);
+        let ret = decode_coefs(
+            &mut msac,
+            &mut coef,
+            &mut mode,
+            &a,
+            &l,
+            &params,
+            &mut cf,
+            &mut txtp_val,
+            &mut res_ctx,
+        );
         assert_eq!(ret, -1);
         assert_eq!(res_ctx, 0x40);
         assert_eq!(txtp_val, txtp::IDTX as u16);

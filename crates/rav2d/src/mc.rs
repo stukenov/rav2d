@@ -13,17 +13,12 @@ pub fn put_8bpc(
     h: usize,
 ) {
     for y in 0..h {
-        dst[y * dst_stride..y * dst_stride + w].copy_from_slice(&src[y * src_stride..y * src_stride + w]);
+        dst[y * dst_stride..y * dst_stride + w]
+            .copy_from_slice(&src[y * src_stride..y * src_stride + w]);
     }
 }
 
-pub fn prep_8bpc(
-    tmp: &mut [i16],
-    src: &[u8],
-    src_stride: usize,
-    w: usize,
-    h: usize,
-) {
+pub fn prep_8bpc(tmp: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize) {
     for y in 0..h {
         for x in 0..w {
             tmp[y * w + x] = ((src[y * src_stride + x] as i32) << INTERMEDIATE_BITS_8BPC) as i16;
@@ -31,14 +26,7 @@ pub fn prep_8bpc(
     }
 }
 
-pub fn avg_8bpc(
-    dst: &mut [u8],
-    dst_stride: usize,
-    tmp1: &[i16],
-    tmp2: &[i16],
-    w: usize,
-    h: usize,
-) {
+pub fn avg_8bpc(dst: &mut [u8], dst_stride: usize, tmp1: &[i16], tmp2: &[i16], w: usize, h: usize) {
     let sh = INTERMEDIATE_BITS_8BPC + 1;
     let rnd = 1 << INTERMEDIATE_BITS_8BPC;
     for y in 0..h {
@@ -97,14 +85,7 @@ pub fn mask_8bpc(
     }
 }
 
-pub fn blend_8bpc(
-    dst: &mut [u8],
-    dst_stride: usize,
-    tmp: &[u8],
-    w: usize,
-    h: usize,
-    mask: &[u8],
-) {
+pub fn blend_8bpc(dst: &mut [u8], dst_stride: usize, tmp: &[u8], w: usize, h: usize, mask: &[u8]) {
     for y in 0..h {
         for x in 0..w {
             let di = y * dst_stride + x;
@@ -115,14 +96,7 @@ pub fn blend_8bpc(
     }
 }
 
-pub fn morph_8bpc(
-    dst: &mut [u8],
-    dst_stride: usize,
-    alpha: i32,
-    beta: i32,
-    w: usize,
-    h: usize,
-) {
+pub fn morph_8bpc(dst: &mut [u8], dst_stride: usize, alpha: i32, beta: i32, w: usize, h: usize) {
     for y in 0..h {
         for x in 0..w {
             let di = y * dst_stride + x;
@@ -210,7 +184,9 @@ pub fn sad_nxn_8bpc(
 }
 
 fn get_h_filter(mx: i32, filter_type: i32, w: usize) -> Option<[i8; 8]> {
-    if mx == 0 { return None; }
+    if mx == 0 {
+        return None;
+    }
     let f = if filter_type == -1 {
         EXT_WARP_FILTER[(mx - 1) as usize]
     } else if w > 4 {
@@ -222,7 +198,9 @@ fn get_h_filter(mx: i32, filter_type: i32, w: usize) -> Option<[i8; 8]> {
 }
 
 fn get_v_filter(my: i32, filter_type: i32, h: usize) -> Option<[i8; 8]> {
-    if my == 0 { return None; }
+    if my == 0 {
+        return None;
+    }
     let f = if filter_type == -1 {
         EXT_WARP_FILTER[(my - 1) as usize]
     } else if h > 4 {
@@ -286,7 +264,9 @@ pub fn put_8tap_8bpc(
             let mut mid = vec![0i16; 64 * tmp_h];
             for y in 0..tmp_h {
                 for x in 0..w {
-                    let si = (src_off as isize + (y as isize - 3) * src_stride as isize + x as isize) as usize;
+                    let si = (src_off as isize
+                        + (y as isize - 3) * src_stride as isize
+                        + x as isize) as usize;
                     mid[y * 64 + x] = ((filter_8tap_u8(src, si, &fh, 1)
                         + ((1 << (bits - intermediate_bits)) >> 1))
                         >> (bits - intermediate_bits)) as i16;
@@ -299,7 +279,8 @@ pub fn put_8tap_8bpc(
                         (filter_8tap_i16(&mid, mi, &fv, 64)
                             + ((1 << (bits + intermediate_bits)) >> 1))
                             >> (bits + intermediate_bits),
-                        0, 255,
+                        0,
+                        255,
                     ) as u8;
                 }
             }
@@ -310,7 +291,8 @@ pub fn put_8tap_8bpc(
                     let si = src_off + y * src_stride + x;
                     dst[y * dst_stride + x] = iclip(
                         (filter_8tap_u8(src, si, &fh, 1) + intermediate_rnd) >> bits,
-                        0, 255,
+                        0,
+                        255,
                     ) as u8;
                 }
             }
@@ -320,9 +302,9 @@ pub fn put_8tap_8bpc(
                 for x in 0..w {
                     let si = src_off + y * src_stride + x;
                     dst[y * dst_stride + x] = iclip(
-                        (filter_8tap_u8(src, si, &fv, ss)
-                            + ((1 << bits) >> 1)) >> bits,
-                        0, 255,
+                        (filter_8tap_u8(src, si, &fv, ss) + ((1 << bits) >> 1)) >> bits,
+                        0,
+                        255,
                     ) as u8;
                 }
             }
@@ -357,7 +339,9 @@ pub fn prep_8tap_8bpc(
             let mut mid = vec![0i16; 64 * tmp_h];
             for y in 0..tmp_h {
                 for x in 0..w {
-                    let si = (src_off as isize + (y as isize - 3) * src_stride as isize + x as isize) as usize;
+                    let si = (src_off as isize
+                        + (y as isize - 3) * src_stride as isize
+                        + x as isize) as usize;
                     mid[y * 64 + x] = ((filter_8tap_u8(src, si, &fh, 1)
                         + ((1 << (bits - intermediate_bits)) >> 1))
                         >> (bits - intermediate_bits)) as i16;
@@ -366,9 +350,9 @@ pub fn prep_8tap_8bpc(
             for y in 0..h {
                 for x in 0..w {
                     let mi = (y + 3) * 64 + x;
-                    tmp[y * tmp_stride + x] = ((filter_8tap_i16(&mid, mi, &fv, 64)
-                        + ((1 << bits) >> 1)) >> bits) as i16
-                        - PREP_BIAS_8BPC as i16;
+                    tmp[y * tmp_stride + x] =
+                        ((filter_8tap_i16(&mid, mi, &fv, 64) + ((1 << bits) >> 1)) >> bits) as i16
+                            - PREP_BIAS_8BPC as i16;
                 }
             }
         }
@@ -378,7 +362,8 @@ pub fn prep_8tap_8bpc(
                     let si = src_off + y * src_stride + x;
                     tmp[y * tmp_stride + x] = ((filter_8tap_u8(src, si, &fh, 1)
                         + ((1 << (bits - intermediate_bits)) >> 1))
-                        >> (bits - intermediate_bits)) as i16
+                        >> (bits - intermediate_bits))
+                        as i16
                         - PREP_BIAS_8BPC as i16;
                 }
             }
@@ -389,7 +374,8 @@ pub fn prep_8tap_8bpc(
                     let si = src_off + y * src_stride + x;
                     tmp[y * tmp_stride + x] = ((filter_8tap_u8(src, si, &fv, ss)
                         + ((1 << (bits - intermediate_bits)) >> 1))
-                        >> (bits - intermediate_bits)) as i16
+                        >> (bits - intermediate_bits))
+                        as i16
                         - PREP_BIAS_8BPC as i16;
                 }
             }
@@ -426,22 +412,33 @@ pub fn w_mask_8bpc(
     for row in 0..h {
         let mut x = 0usize;
         while x < w {
-            let m = imin(38 + (((tmp1[t1off + x] as i32 - tmp2[t2off + x] as i32).abs() + mask_rnd) >> mask_sh), 64);
+            let m = imin(
+                38 + (((tmp1[t1off + x] as i32 - tmp2[t2off + x] as i32).abs() + mask_rnd)
+                    >> mask_sh),
+                64,
+            );
             dst[doff + x] = iclip(
                 (tmp1[t1off + x] as i32 * m + tmp2[t2off + x] as i32 * (64 - m) + rnd) >> sh,
-                0, 255,
+                0,
+                255,
             ) as u8;
 
             if ss_hor {
                 x += 1;
-                let n = imin(38 + (((tmp1[t1off + x] as i32 - tmp2[t2off + x] as i32).abs() + mask_rnd) >> mask_sh), 64);
+                let n = imin(
+                    38 + (((tmp1[t1off + x] as i32 - tmp2[t2off + x] as i32).abs() + mask_rnd)
+                        >> mask_sh),
+                    64,
+                );
                 dst[doff + x] = iclip(
                     (tmp1[t1off + x] as i32 * n + tmp2[t2off + x] as i32 * (64 - n) + rnd) >> sh,
-                    0, 255,
+                    0,
+                    255,
                 ) as u8;
 
                 if row & 1 != 0 && ss_ver {
-                    mask[moff + (x >> 1)] = ((m + n + mask[moff + (x >> 1)] as i32 + 2 - sign) >> 2) as u8;
+                    mask[moff + (x >> 1)] =
+                        ((m + n + mask[moff + (x >> 1)] as i32 + 2 - sign) >> 2) as u8;
                 } else if ss_ver {
                     mask[moff + (x >> 1)] = (m + n) as u8;
                 } else {
@@ -488,9 +485,7 @@ pub fn put_bilin_8bpc(
             for y in 0..h + 1 {
                 for x in 0..w {
                     let si = y * src_stride + x;
-                    mid[y * 64 + x] = bilin_rnd(
-                        src[si] as i32, src[si + 1] as i32, mx, 0,
-                    ) as i16;
+                    mid[y * 64 + x] = bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0) as i16;
                 }
             }
             for y in 0..h {
@@ -498,7 +493,8 @@ pub fn put_bilin_8bpc(
                     let mi = y * 64 + x;
                     dst[y * dst_stride + x] = iclip(
                         bilin_rnd(mid[mi] as i32, mid[mi + 64] as i32, my, 8),
-                        0, 255,
+                        0,
+                        255,
                     ) as u8;
                 }
             }
@@ -517,7 +513,8 @@ pub fn put_bilin_8bpc(
                 let si = y * src_stride + x;
                 dst[y * dst_stride + x] = iclip(
                     bilin_rnd(src[si] as i32, src[si + src_stride] as i32, my, 4),
-                    0, 255,
+                    0,
+                    255,
                 ) as u8;
             }
         }
@@ -542,26 +539,22 @@ pub fn prep_bilin_8bpc(
             for y in 0..h + 1 {
                 for x in 0..w {
                     let si = y * src_stride + x;
-                    mid[y * 64 + x] = bilin_rnd(
-                        src[si] as i32, src[si + 1] as i32, mx, 0,
-                    ) as i16;
+                    mid[y * 64 + x] = bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0) as i16;
                 }
             }
             for y in 0..h {
                 for x in 0..w {
                     let mi = y * 64 + x;
-                    tmp[y * tmp_stride + x] = bilin_rnd(
-                        mid[mi] as i32, mid[mi + 64] as i32, my, 4,
-                    ) as i16;
+                    tmp[y * tmp_stride + x] =
+                        bilin_rnd(mid[mi] as i32, mid[mi + 64] as i32, my, 4) as i16;
                 }
             }
         } else {
             for y in 0..h {
                 for x in 0..w {
                     let si = y * src_stride + x;
-                    tmp[y * tmp_stride + x] = bilin_rnd(
-                        src[si] as i32, src[si + 1] as i32, mx, 0,
-                    ) as i16;
+                    tmp[y * tmp_stride + x] =
+                        bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0) as i16;
                 }
             }
         }
@@ -569,9 +562,8 @@ pub fn prep_bilin_8bpc(
         for y in 0..h {
             for x in 0..w {
                 let si = y * src_stride + x;
-                tmp[y * tmp_stride + x] = bilin_rnd(
-                    src[si] as i32, src[si + src_stride] as i32, my, 0,
-                ) as i16;
+                tmp[y * tmp_stride + x] =
+                    bilin_rnd(src[si] as i32, src[si + src_stride] as i32, my, 0) as i16;
             }
         }
     } else {
@@ -579,12 +571,7 @@ pub fn prep_bilin_8bpc(
     }
 }
 
-pub fn sad8x8_8bpc(
-    p0: &[u8],
-    p0_stride: usize,
-    p1: &[u8],
-    p1_stride: usize,
-) -> u32 {
+pub fn sad8x8_8bpc(p0: &[u8], p0_stride: usize, p1: &[u8], p1_stride: usize) -> u32 {
     let mut sad = 0u32;
     for y in 0..8 {
         for x in 0..8 {
@@ -612,9 +599,12 @@ pub fn sad_refine_mv_8bpc(
 
     if is_implicit {
         best_sad = sad_nxn_8bpc(
-            &p0[2 * p0_stride + 2..], p0_stride,
-            &p1[2 * p1_stride + 2..], p1_stride,
-            sadw, sadh,
+            &p0[2 * p0_stride + 2..],
+            p0_stride,
+            &p1[2 * p1_stride + 2..],
+            p1_stride,
+            sadw,
+            sadh,
         );
         best_sad = (best_sad * 7 + 7) >> 3;
         if best_sad < sad_thr {
@@ -624,13 +614,20 @@ pub fn sad_refine_mv_8bpc(
 
     for y_off in -2i32..=2 {
         for x_off in -2i32..=2 {
-            if x_off == 0 && y_off == 0 { continue; }
+            if x_off == 0 && y_off == 0 {
+                continue;
+            }
             let sad = sad_nxn_8bpc(
-                &p0[((2 + y_off) as usize) * p0_stride + (2 + x_off) as usize..], p0_stride,
-                &p1[((2 - y_off) as usize) * p1_stride + (2 - x_off) as usize..], p1_stride,
-                sadw, sadh,
+                &p0[((2 + y_off) as usize) * p0_stride + (2 + x_off) as usize..],
+                p0_stride,
+                &p1[((2 - y_off) as usize) * p1_stride + (2 - x_off) as usize..],
+                p1_stride,
+                sadw,
+                sadh,
             );
-            if sad >= best_sad { continue; }
+            if sad >= best_sad {
+                continue;
+            }
             best_sad = sad;
             best_dx = x_off;
             best_dy = y_off;
@@ -724,7 +721,13 @@ pub fn opfl_derive_mv_8bpc(
                     svw += v * ww;
                 }
             }
-            out[oi] = OpflRegressionData { su2, suv, sv2, suw, svw };
+            out[oi] = OpflRegressionData {
+                su2,
+                suv,
+                sv2,
+                suw,
+                svw,
+            };
             oi += 1;
             x += bs;
         }
@@ -828,7 +831,8 @@ pub fn warp_affine_8x8t_8bpc(
         for x in 0..8 {
             let fi = (192 + ((tmy + 512) >> 10)) as usize;
             let f = &MC_WARP_FILTER[fi];
-            tmp[y * tmp_stride + x] = filter_warp_rnd(&mid, mid_base + x, f, 8, 7) - PREP_BIAS_8BPC as i16;
+            tmp[y * tmp_stride + x] =
+                filter_warp_rnd(&mid, mid_base + x, f, 8, 7) - PREP_BIAS_8BPC as i16;
             tmy += abcd[2] as i32;
         }
         my += abcd[3] as i32;
@@ -861,7 +865,9 @@ pub fn put_8tap_scaled_8bpc(
     let intermediate_rnd: i32 = 1 << (intermediate_bits - 1);
     let mut mid = [[0i16; 64]; 8];
     let mut order = [0usize; 8];
-    for i in 0..8 { order[i] = i; }
+    for i in 0..8 {
+        order[i] = i;
+    }
     let mut in_y: i32 = -8;
     let sp = (src_off as isize - src_stride * 3) as usize;
 
@@ -874,7 +880,9 @@ pub fn put_8tap_scaled_8bpc(
 
         while in_y < src_y {
             let old = order[0];
-            for i in 0..7 { order[i] = order[i + 1]; }
+            for i in 0..7 {
+                order[i] = order[i + 1];
+            }
             order[7] = old;
 
             let mut imx = mx;
@@ -900,9 +908,17 @@ pub fn put_8tap_scaled_8bpc(
         for x in 0..w {
             dst[dst_p + x] = if let Some(ref f) = fv {
                 let sum = filter_8tap_ring(&mid, &order, x, f);
-                iclip((sum + (1 << (5 + intermediate_bits))) >> (6 + intermediate_bits), 0, 255) as u8
+                iclip(
+                    (sum + (1 << (5 + intermediate_bits))) >> (6 + intermediate_bits),
+                    0,
+                    255,
+                ) as u8
             } else {
-                iclip((mid[order[3]][x] as i32 + intermediate_rnd) >> intermediate_bits, 0, 255) as u8
+                iclip(
+                    (mid[order[3]][x] as i32 + intermediate_rnd) >> intermediate_bits,
+                    0,
+                    255,
+                ) as u8
             };
         }
 
@@ -928,7 +944,9 @@ pub fn prep_8tap_scaled_8bpc(
     let intermediate_bits: i32 = 4;
     let mut mid = [[0i16; 64]; 8];
     let mut order = [0usize; 8];
-    for i in 0..8 { order[i] = i; }
+    for i in 0..8 {
+        order[i] = i;
+    }
     let mut in_y: i32 = -8;
     let sp = (src_off as isize - src_stride * 3) as usize;
 
@@ -941,7 +959,9 @@ pub fn prep_8tap_scaled_8bpc(
 
         while in_y < src_y {
             let old = order[0];
-            for i in 0..7 { order[i] = order[i + 1]; }
+            for i in 0..7 {
+                order[i] = order[i + 1];
+            }
             order[7] = old;
 
             let mut imx = mx;
@@ -1012,7 +1032,8 @@ pub fn put_bilin_scaled_8bpc(
                 mid[ri][x] = bilin_rnd(
                     src[src_p + ioff] as i32,
                     src[src_p + ioff + 1] as i32,
-                    frac, 4 - intermediate_bits,
+                    frac,
+                    4 - intermediate_bits,
                 ) as i16;
                 imx += dx;
                 ioff += (imx >> 10) as usize;
@@ -1024,9 +1045,14 @@ pub fn put_bilin_scaled_8bpc(
 
         for x in 0..w {
             dst[dst_p + x] = iclip(
-                bilin_rnd(mid[mid1_idx][x] as i32, mid[mid2_idx][x] as i32,
-                          dmy >> 6, 4 + intermediate_bits),
-                0, 255,
+                bilin_rnd(
+                    mid[mid1_idx][x] as i32,
+                    mid[mid2_idx][x] as i32,
+                    dmy >> 6,
+                    4 + intermediate_bits,
+                ),
+                0,
+                255,
             ) as u8;
         }
 
@@ -1069,7 +1095,8 @@ pub fn prep_bilin_scaled_8bpc(
                 mid[ri][x] = bilin_rnd(
                     src[src_p + ioff] as i32,
                     src[src_p + ioff + 1] as i32,
-                    frac, 4 - intermediate_bits,
+                    frac,
+                    4 - intermediate_bits,
                 ) as i16;
                 imx += dx;
                 ioff += (imx >> 10) as usize;
@@ -1081,8 +1108,10 @@ pub fn prep_bilin_scaled_8bpc(
 
         for x in 0..w {
             tmp[tmp_p + x] = bilin_rnd(
-                mid[mid1_idx][x] as i32, mid[mid2_idx][x] as i32,
-                dmy >> 6, 4,
+                mid[mid1_idx][x] as i32,
+                mid[mid2_idx][x] as i32,
+                dmy >> 6,
+                4,
             ) as i16;
         }
 
@@ -1319,7 +1348,9 @@ mod tests {
         let tmp2 = vec![(100i16) << 4; 16];
         let mut dst = vec![0u8; 16];
         let mut mask = vec![0u8; 16];
-        w_mask_8bpc(&mut dst, 4, &tmp1, &tmp2, 4, 4, &mut mask, 4, 0, false, false);
+        w_mask_8bpc(
+            &mut dst, 4, &tmp1, &tmp2, 4, 4, &mut mask, 4, 0, false, false,
+        );
         for &v in &dst {
             assert!(v > 0);
         }
@@ -1417,7 +1448,9 @@ mod tests {
     #[test]
     fn test_put_bilin_h_only() {
         let mut src = vec![100u8; 80];
-        for y in 0..8 { src[y * 10 + 1] = 200; }
+        for y in 0..8 {
+            src[y * 10 + 1] = 200;
+        }
         let mut dst = vec![0u8; 64];
         put_bilin_8bpc(&mut dst, 8, &src, 10, 1, 8, 8, 0);
         for y in 0..8 {
@@ -1428,7 +1461,9 @@ mod tests {
     #[test]
     fn test_put_bilin_v_only() {
         let mut src = vec![100u8; 80];
-        for x in 0..8 { src[10 + x] = 200; }
+        for x in 0..8 {
+            src[10 + x] = 200;
+        }
         let mut dst = vec![0u8; 64];
         put_bilin_8bpc(&mut dst, 8, &src, 10, 8, 1, 0, 8);
         assert!(dst[0] > 100 && dst[0] < 200);
@@ -1459,7 +1494,9 @@ mod tests {
     #[test]
     fn test_prep_bilin_h_only() {
         let mut src = vec![100u8; 80];
-        for y in 0..8 { src[y * 10 + 1] = 200; }
+        for y in 0..8 {
+            src[y * 10 + 1] = 200;
+        }
         let mut tmp = vec![0i16; 64];
         prep_bilin_8bpc(&mut tmp, 8, &src, 10, 1, 8, 8, 0);
         for y in 0..8 {
@@ -1553,8 +1590,7 @@ mod tests {
         let src_off = (stride * 4) as usize;
         let mut dst = [0u8; 64];
         put_8tap_scaled_8bpc(
-            &mut dst, 8, &src, src_off, stride,
-            4, 4, 0, 0, 1024, 1024, 0,
+            &mut dst, 8, &src, src_off, stride, 4, 4, 0, 0, 1024, 1024, 0,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -1570,8 +1606,18 @@ mod tests {
         let src_off = (stride * 4) as usize;
         let mut dst = [0u8; 64];
         put_8tap_scaled_8bpc(
-            &mut dst, 8, &src, src_off, stride,
-            4, 4, 8 << 6, 8 << 6, 1024, 1024, 0,
+            &mut dst,
+            8,
+            &src,
+            src_off,
+            stride,
+            4,
+            4,
+            8 << 6,
+            8 << 6,
+            1024,
+            1024,
+            0,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -1587,8 +1633,7 @@ mod tests {
         let src_off = (stride * 4) as usize;
         let mut tmp = [0i16; 64];
         prep_8tap_scaled_8bpc(
-            &mut tmp, 8, &src, src_off, stride,
-            4, 4, 0, 0, 1024, 1024, 0,
+            &mut tmp, 8, &src, src_off, stride, 4, 4, 0, 0, 1024, 1024, 0,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -1603,10 +1648,7 @@ mod tests {
         let src = vec![128u8; 128];
         let src_off = (stride * 2) as usize;
         let mut dst = [0u8; 64];
-        put_bilin_scaled_8bpc(
-            &mut dst, 8, &src, src_off, stride,
-            4, 4, 0, 0, 1024, 1024,
-        );
+        put_bilin_scaled_8bpc(&mut dst, 8, &src, src_off, stride, 4, 4, 0, 0, 1024, 1024);
         for y in 0..4 {
             for x in 0..4 {
                 assert_eq!(dst[y * 8 + x], 128);
@@ -1621,8 +1663,17 @@ mod tests {
         let src_off = (stride * 2) as usize;
         let mut dst = [0u8; 64];
         put_bilin_scaled_8bpc(
-            &mut dst, 8, &src, src_off, stride,
-            4, 4, 8 << 6, 8 << 6, 1024, 1024,
+            &mut dst,
+            8,
+            &src,
+            src_off,
+            stride,
+            4,
+            4,
+            8 << 6,
+            8 << 6,
+            1024,
+            1024,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -1637,10 +1688,7 @@ mod tests {
         let src = vec![128u8; 128];
         let src_off = (stride * 2) as usize;
         let mut tmp = [0i16; 64];
-        prep_bilin_scaled_8bpc(
-            &mut tmp, 8, &src, src_off, stride,
-            4, 4, 0, 0, 1024, 1024,
-        );
+        prep_bilin_scaled_8bpc(&mut tmp, 8, &src, src_off, stride, 4, 4, 0, 0, 1024, 1024);
         for y in 0..4 {
             for x in 0..4 {
                 assert_eq!(tmp[y * 8 + x], (128 << 4) as i16);
@@ -1675,7 +1723,9 @@ mod tests {
     fn test_opfl_derive_mv_nonzero_diff() {
         let p0 = vec![100u8; 64 * 8];
         let mut p1 = vec![100u8; 64 * 8];
-        for x in 4..8 { p1[2 * 64 + x] = 200; }
+        for x in 4..8 {
+            p1[2 * 64 + x] = 200;
+        }
         let mut out = [OpflRegressionData::default(); 1];
         opfl_derive_mv_8bpc(&mut out, &p0, 64, &p1, 64, 8, 8, 8, [1, -1]);
         assert_ne!(out[0].suw, 0);

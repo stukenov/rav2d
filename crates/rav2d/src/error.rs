@@ -36,8 +36,14 @@ mod tests {
     fn test_error_display() {
         assert_eq!(Rav2dError::Eof.to_string(), "end of stream");
         assert_eq!(Rav2dError::Again.to_string(), "need more data");
-        assert_eq!(Rav2dError::InvalidData.to_string(), "invalid or corrupt bitstream data");
-        assert_eq!(Rav2dError::FrameTooLarge.to_string(), "frame dimensions exceed limit");
+        assert_eq!(
+            Rav2dError::InvalidData.to_string(),
+            "invalid or corrupt bitstream data"
+        );
+        assert_eq!(
+            Rav2dError::FrameTooLarge.to_string(),
+            "frame dimensions exceed limit"
+        );
         assert_eq!(Rav2dError::InvalidParam.to_string(), "invalid parameter");
         assert_eq!(Rav2dError::OutOfMemory.to_string(), "out of memory");
     }

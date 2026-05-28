@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_worker_handle_spawn_join() {
-        use std::sync::{atomic::AtomicBool, Arc};
+        use std::sync::{Arc, atomic::AtomicBool};
         let done = Arc::new(AtomicBool::new(false));
         let done_clone = done.clone();
         let mut handle = WorkerHandle::spawn(move || {

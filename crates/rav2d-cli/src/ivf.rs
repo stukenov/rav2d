@@ -16,14 +16,20 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<IvfHeader> {
     reader.read_exact(&mut buf)?;
 
     if &buf[0..4] != b"DKIF" {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not an IVF file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not an IVF file",
+        ));
     }
 
     let codec = &buf[8..12];
     if codec != b"AV02" && codec != b"AV01" && codec != b"av02" && codec != b"av01" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unsupported codec: {:?}", std::str::from_utf8(codec).unwrap_or("?")),
+            format!(
+                "unsupported codec: {:?}",
+                std::str::from_utf8(codec).unwrap_or("?")
+            ),
         ));
     }
 
@@ -36,6 +42,7 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<IvfHeader> {
     })
 }
 
+#[allow(dead_code)]
 pub struct IvfFrame {
     pub data: Vec<u8>,
     pub timestamp: u64,
@@ -50,7 +57,9 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Option<IvfFrame>> {
     }
 
     let size = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
-    let timestamp = u64::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11]]);
+    let timestamp = u64::from_le_bytes([
+        hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11],
+    ]);
 
     let mut data = vec![0u8; size];
     reader.read_exact(&mut data)?;

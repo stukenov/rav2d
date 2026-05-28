@@ -1,12 +1,12 @@
+use crate::dip_tables::DIP_WEIGHTS;
 use crate::intops::{apply_sign, clz, ctz, iclip, imax, imin, ulog2};
-use crate::recon::derive_alpha;
 use crate::levels::CflMhDir;
 use crate::levels::{
-    ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG, ANGLE_IS_LUMA,
-    ANGLE_MRL_IDX_MASK, ANGLE_MRL_IDX_SHIFT, ANGLE_MULTI_MRL_FLAG,
-    ANGLE_SMOOTH_LEFT_EDGE_FLAG, ANGLE_SMOOTH_TOP_EDGE_FLAG, ANGLE_USE_EDGE_FILTER_FLAG,
+    ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG, ANGLE_IS_LUMA, ANGLE_MRL_IDX_MASK,
+    ANGLE_MRL_IDX_SHIFT, ANGLE_MULTI_MRL_FLAG, ANGLE_SMOOTH_LEFT_EDGE_FLAG,
+    ANGLE_SMOOTH_TOP_EDGE_FLAG, ANGLE_USE_EDGE_FILTER_FLAG,
 };
-use crate::dip_tables::DIP_WEIGHTS;
+use crate::recon::derive_alpha;
 use crate::tables::{
     DC_IBP_WEIGHTS, DIV_RECIP, DIV_SCALE_SH_BIAS, DIV_SCALE_SH_COEFW, DIV_SCALE_SH_OFFSET,
     DR_INTRA_DERIVATIVE, SM_WEIGHTS,
@@ -21,65 +21,249 @@ pub struct DrFilter4Tap {
 }
 
 pub static DR_INTERP_FILTER: [DrFilter4Tap; 32] = [
-    DrFilter4Tap { a:   0, b: 128, c:   0, d:   0 },
-    DrFilter4Tap { a:  -2, b: 127, c:   4, d:  -1 },
-    DrFilter4Tap { a:  -3, b: 125, c:   8, d:  -2 },
-    DrFilter4Tap { a:  -5, b: 123, c:  13, d:  -3 },
-    DrFilter4Tap { a:  -6, b: 121, c:  17, d:  -4 },
-    DrFilter4Tap { a:  -7, b: 118, c:  22, d:  -5 },
-    DrFilter4Tap { a:  -9, b: 116, c:  27, d:  -6 },
-    DrFilter4Tap { a:  -9, b: 112, c:  32, d:  -7 },
-    DrFilter4Tap { a: -10, b: 109, c:  37, d:  -8 },
-    DrFilter4Tap { a: -11, b: 106, c:  41, d:  -8 },
-    DrFilter4Tap { a: -11, b: 102, c:  46, d:  -9 },
-    DrFilter4Tap { a: -12, b:  98, c:  52, d: -10 },
-    DrFilter4Tap { a: -12, b:  94, c:  56, d: -10 },
-    DrFilter4Tap { a: -12, b:  90, c:  61, d: -11 },
-    DrFilter4Tap { a: -12, b:  85, c:  66, d: -11 },
-    DrFilter4Tap { a: -12, b:  81, c:  71, d: -12 },
-    DrFilter4Tap { a: -12, b:  76, c:  76, d: -12 },
-    DrFilter4Tap { a: -12, b:  71, c:  81, d: -12 },
-    DrFilter4Tap { a: -11, b:  66, c:  85, d: -12 },
-    DrFilter4Tap { a: -11, b:  61, c:  90, d: -12 },
-    DrFilter4Tap { a: -10, b:  56, c:  94, d: -12 },
-    DrFilter4Tap { a: -10, b:  52, c:  98, d: -12 },
-    DrFilter4Tap { a:  -9, b:  46, c: 102, d: -11 },
-    DrFilter4Tap { a:  -8, b:  41, c: 106, d: -11 },
-    DrFilter4Tap { a:  -8, b:  37, c: 109, d: -10 },
-    DrFilter4Tap { a:  -7, b:  32, c: 112, d:  -9 },
-    DrFilter4Tap { a:  -6, b:  27, c: 116, d:  -9 },
-    DrFilter4Tap { a:  -5, b:  22, c: 118, d:  -7 },
-    DrFilter4Tap { a:  -4, b:  17, c: 121, d:  -6 },
-    DrFilter4Tap { a:  -3, b:  13, c: 123, d:  -5 },
-    DrFilter4Tap { a:  -2, b:   8, c: 125, d:  -3 },
-    DrFilter4Tap { a:  -1, b:   4, c: 127, d:  -2 },
+    DrFilter4Tap {
+        a: 0,
+        b: 128,
+        c: 0,
+        d: 0,
+    },
+    DrFilter4Tap {
+        a: -2,
+        b: 127,
+        c: 4,
+        d: -1,
+    },
+    DrFilter4Tap {
+        a: -3,
+        b: 125,
+        c: 8,
+        d: -2,
+    },
+    DrFilter4Tap {
+        a: -5,
+        b: 123,
+        c: 13,
+        d: -3,
+    },
+    DrFilter4Tap {
+        a: -6,
+        b: 121,
+        c: 17,
+        d: -4,
+    },
+    DrFilter4Tap {
+        a: -7,
+        b: 118,
+        c: 22,
+        d: -5,
+    },
+    DrFilter4Tap {
+        a: -9,
+        b: 116,
+        c: 27,
+        d: -6,
+    },
+    DrFilter4Tap {
+        a: -9,
+        b: 112,
+        c: 32,
+        d: -7,
+    },
+    DrFilter4Tap {
+        a: -10,
+        b: 109,
+        c: 37,
+        d: -8,
+    },
+    DrFilter4Tap {
+        a: -11,
+        b: 106,
+        c: 41,
+        d: -8,
+    },
+    DrFilter4Tap {
+        a: -11,
+        b: 102,
+        c: 46,
+        d: -9,
+    },
+    DrFilter4Tap {
+        a: -12,
+        b: 98,
+        c: 52,
+        d: -10,
+    },
+    DrFilter4Tap {
+        a: -12,
+        b: 94,
+        c: 56,
+        d: -10,
+    },
+    DrFilter4Tap {
+        a: -12,
+        b: 90,
+        c: 61,
+        d: -11,
+    },
+    DrFilter4Tap {
+        a: -12,
+        b: 85,
+        c: 66,
+        d: -11,
+    },
+    DrFilter4Tap {
+        a: -12,
+        b: 81,
+        c: 71,
+        d: -12,
+    },
+    DrFilter4Tap {
+        a: -12,
+        b: 76,
+        c: 76,
+        d: -12,
+    },
+    DrFilter4Tap {
+        a: -12,
+        b: 71,
+        c: 81,
+        d: -12,
+    },
+    DrFilter4Tap {
+        a: -11,
+        b: 66,
+        c: 85,
+        d: -12,
+    },
+    DrFilter4Tap {
+        a: -11,
+        b: 61,
+        c: 90,
+        d: -12,
+    },
+    DrFilter4Tap {
+        a: -10,
+        b: 56,
+        c: 94,
+        d: -12,
+    },
+    DrFilter4Tap {
+        a: -10,
+        b: 52,
+        c: 98,
+        d: -12,
+    },
+    DrFilter4Tap {
+        a: -9,
+        b: 46,
+        c: 102,
+        d: -11,
+    },
+    DrFilter4Tap {
+        a: -8,
+        b: 41,
+        c: 106,
+        d: -11,
+    },
+    DrFilter4Tap {
+        a: -8,
+        b: 37,
+        c: 109,
+        d: -10,
+    },
+    DrFilter4Tap {
+        a: -7,
+        b: 32,
+        c: 112,
+        d: -9,
+    },
+    DrFilter4Tap {
+        a: -6,
+        b: 27,
+        c: 116,
+        d: -9,
+    },
+    DrFilter4Tap {
+        a: -5,
+        b: 22,
+        c: 118,
+        d: -7,
+    },
+    DrFilter4Tap {
+        a: -4,
+        b: 17,
+        c: 121,
+        d: -6,
+    },
+    DrFilter4Tap {
+        a: -3,
+        b: 13,
+        c: 123,
+        d: -5,
+    },
+    DrFilter4Tap {
+        a: -2,
+        b: 8,
+        c: 125,
+        d: -3,
+    },
+    DrFilter4Tap {
+        a: -1,
+        b: 4,
+        c: 127,
+        d: -2,
+    },
 ];
 
 pub fn get_filter_strength(wh: i32, angle: i32, is_sm: bool) -> i32 {
     if is_sm {
         if wh <= 8 {
-            if angle >= 64 { return 2; }
-            if angle >= 40 { return 1; }
+            if angle >= 64 {
+                return 2;
+            }
+            if angle >= 40 {
+                return 1;
+            }
         } else if wh <= 16 {
-            if angle >= 48 { return 2; }
-            if angle >= 20 { return 1; }
+            if angle >= 48 {
+                return 2;
+            }
+            if angle >= 20 {
+                return 1;
+            }
         } else if wh <= 24 {
-            if angle >= 4 { return 3; }
+            if angle >= 4 {
+                return 3;
+            }
         } else {
             return 3;
         }
     } else {
         if wh <= 8 {
-            if angle >= 56 { return 1; }
+            if angle >= 56 {
+                return 1;
+            }
         } else if wh <= 16 {
-            if angle >= 40 { return 1; }
+            if angle >= 40 {
+                return 1;
+            }
         } else if wh <= 24 {
-            if angle >= 32 { return 3; }
-            if angle >= 16 { return 2; }
-            if angle >= 8 { return 1; }
+            if angle >= 32 {
+                return 3;
+            }
+            if angle >= 16 {
+                return 2;
+            }
+            if angle >= 8 {
+                return 1;
+            }
         } else if wh <= 32 {
-            if angle >= 32 { return 3; }
-            if angle >= 4 { return 2; }
+            if angle >= 32 {
+                return 3;
+            }
+            if angle >= 4 {
+                return 2;
+            }
             return 1;
         } else {
             return 3;
@@ -98,11 +282,7 @@ pub fn filter_edge(
     to: i32,
     strength: usize,
 ) {
-    static KERNEL: [[u8; 5]; 3] = [
-        [0, 4, 8, 4, 0],
-        [0, 5, 6, 5, 0],
-        [2, 4, 4, 4, 2],
-    ];
+    static KERNEL: [[u8; 5]; 3] = [[0, 4, 8, 4, 0], [0, 5, 6, 5, 0], [2, 4, 4, 4, 2]];
 
     debug_assert!(strength > 0);
     let mut i = 0;
@@ -182,8 +362,13 @@ pub fn ipred_dc_128(dst: &mut [u8], stride: usize, width: usize, height: usize) 
 }
 
 pub fn ipred_dc_top(
-    dst: &mut [u8], stride: usize, tl: &[u8], o: usize,
-    width: usize, mut height: usize, angle: i32,
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    width: usize,
+    mut height: usize,
+    angle: i32,
 ) {
     let dc = dc_gen_top(tl, o, width);
     let mut off = 0;
@@ -206,8 +391,13 @@ pub fn ipred_dc_top(
 }
 
 pub fn ipred_dc_left(
-    dst: &mut [u8], stride: usize, tl: &[u8], o: usize,
-    mut width: usize, height: usize, angle: i32,
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    mut width: usize,
+    height: usize,
+    angle: i32,
 ) {
     let dc = dc_gen_left(tl, o, height);
     let mut off = 0;
@@ -219,7 +409,8 @@ pub fn ipred_dc_left(
         for y in 0..height {
             let left = tl[o - 1 - y] as u32;
             for x in 0..w {
-                dst[off + x] = ((left * (128 - w_x[x] as u32) + dc * w_x[x] as u32 + 64) >> 7) as u8;
+                dst[off + x] =
+                    ((left * (128 - w_x[x] as u32) + dc * w_x[x] as u32 + 64) >> 7) as u8;
             }
             off += stride;
         }
@@ -238,8 +429,13 @@ pub fn ipred_dc_left(
 }
 
 pub fn ipred_dc(
-    dst: &mut [u8], stride: usize, tl: &[u8], o: usize,
-    mut width: usize, mut height: usize, angle: i32,
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    mut width: usize,
+    mut height: usize,
+    angle: i32,
 ) {
     let dc = dc_gen(tl, o, width, height);
     let mut off = 0;
@@ -265,7 +461,8 @@ pub fn ipred_dc(
         for y in y_start..height {
             let left = tl[o - 1 - y] as u32;
             for x in 0..w {
-                dst[off + x] = ((left * (128 - w_x[x] as u32) + dc * w_x[x] as u32 + 64) >> 7) as u8;
+                dst[off + x] =
+                    ((left * (128 - w_x[x] as u32) + dc * w_x[x] as u32 + 64) >> 7) as u8;
             }
             off += stride;
         }
@@ -341,7 +538,7 @@ pub fn ipred_smooth(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usize
     for y in 0..h {
         let left = tl[o - 1 - y] as i32;
         let diff_hor = left - right;
-        let off_ver = h as i32 - 1 - y as i32 ;
+        let off_ver = h as i32 - 1 - y as i32;
         let w_ver = weights[y] as i32;
         for x in 0..w {
             let above = tl[o + 1 + x] as i32;
@@ -426,17 +623,33 @@ pub fn ipred_z1(
         let e_stride = (width + height) * 2 + mrl_idx * 3 + 1;
         let mut tmp = vec![0u8; 64 * 64];
         ipred_z1(
-            &mut tmp, 64, tl, o, width, height,
+            &mut tmp,
+            64,
+            tl,
+            o,
+            width,
+            height,
             angle | ((mrl_idx as i32) << ANGLE_MRL_IDX_SHIFT) | ANGLE_IS_LUMA,
-            max_width, _max_height, ibp_weights,
+            max_width,
+            _max_height,
+            ibp_weights,
         );
         ipred_z1(
-            dst, stride, tl, o + e_stride, width, height,
-            angle | ANGLE_IS_LUMA, max_width, _max_height, ibp_weights,
+            dst,
+            stride,
+            tl,
+            o + e_stride,
+            width,
+            height,
+            angle | ANGLE_IS_LUMA,
+            max_width,
+            _max_height,
+            ibp_weights,
         );
         for y in 0..height {
             for x in 0..width {
-                dst[y * stride + x] = ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
+                dst[y * stride + x] =
+                    ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
             }
         }
         return;
@@ -455,8 +668,14 @@ pub fn ipred_z1(
     };
     if str > 0 {
         filter_edge(
-            &mut filt[1..], sz, 1, sz + max_width as usize - width,
-            &tl[o..], 0, sz as i32, str as usize,
+            &mut filt[1..],
+            sz,
+            1,
+            sz + max_width as usize - width,
+            &tl[o..],
+            0,
+            sz as i32,
+            str as usize,
         );
     } else {
         filt[1..1 + sz].copy_from_slice(&tl[o..o + sz]);
@@ -509,10 +728,26 @@ pub fn ipred_z1(
         let mode_idx = imin(10 - (angle >> 3), 6) as usize;
         let mut tmp = vec![0u8; 64 * 64];
         ipred_z3(
-            &mut tmp, 64, tl, o, width, height,
-            (180 + angle) | angle_flags, max_width, _max_height, ibp_weights,
+            &mut tmp,
+            64,
+            tl,
+            o,
+            width,
+            height,
+            (180 + angle) | angle_flags,
+            max_width,
+            _max_height,
+            ibp_weights,
         );
-        ibp_blend_8bpc(dst, stride, &tmp, width, height, false, &ibp_weights[mode_idx]);
+        ibp_blend_8bpc(
+            dst,
+            stride,
+            &tmp,
+            width,
+            height,
+            false,
+            &ibp_weights[mode_idx],
+        );
     }
 }
 
@@ -543,17 +778,33 @@ pub fn ipred_z3(
         let e_stride = (width + height) * 2 + mrl_idx * 3 + 1;
         let mut tmp = vec![0u8; 64 * 64];
         ipred_z3(
-            &mut tmp, 64, tl, o, width, height,
+            &mut tmp,
+            64,
+            tl,
+            o,
+            width,
+            height,
             angle | ((mrl_idx as i32) << ANGLE_MRL_IDX_SHIFT) | ANGLE_IS_LUMA,
-            max_width, max_height, ibp_weights,
+            max_width,
+            max_height,
+            ibp_weights,
         );
         ipred_z3(
-            dst, stride, tl, o + e_stride, width, height,
-            angle | ANGLE_IS_LUMA, max_width, max_height, ibp_weights,
+            dst,
+            stride,
+            tl,
+            o + e_stride,
+            width,
+            height,
+            angle | ANGLE_IS_LUMA,
+            max_width,
+            max_height,
+            ibp_weights,
         );
         for y in 0..height {
             for x in 0..width {
-                dst[y * stride + x] = ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
+                dst[y * stride + x] =
+                    ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
             }
         }
         return;
@@ -574,8 +825,14 @@ pub fn ipred_z3(
 
     if str > 0 {
         filter_edge(
-            &mut filt[2..], sz, height - max_height as usize, sz - 1,
-            &tl[o + 1 - sz..], 0, sz as i32, str as usize,
+            &mut filt[2..],
+            sz,
+            height - max_height as usize,
+            sz - 1,
+            &tl[o + 1 - sz..],
+            0,
+            sz as i32,
+            str as usize,
         );
     } else {
         filt[2..2 + sz].copy_from_slice(&tl[o + 1 - sz..o + 1]);
@@ -619,10 +876,26 @@ pub fn ipred_z3(
         let mode_idx = imin((angle - 183) >> 3, 6) as usize;
         let mut tmp = vec![0u8; 64 * 64];
         ipred_z1(
-            &mut tmp, 64, tl, o, width, height,
-            (angle - 180) | angle_flags, max_width, max_height, ibp_weights,
+            &mut tmp,
+            64,
+            tl,
+            o,
+            width,
+            height,
+            (angle - 180) | angle_flags,
+            max_width,
+            max_height,
+            ibp_weights,
         );
-        ibp_blend_8bpc(dst, stride, &tmp, width, height, true, &ibp_weights[mode_idx]);
+        ibp_blend_8bpc(
+            dst,
+            stride,
+            &tmp,
+            width,
+            height,
+            true,
+            &ibp_weights[mode_idx],
+        );
     }
 }
 
@@ -651,18 +924,31 @@ pub fn ipred_z2(
         let e_stride = (width + height) * 2 + mrl_idx * 3 + 1;
         let mut tmp = vec![0u8; 64 * 64];
         ipred_z2(
-            &mut tmp, 64, tl, o, width, height,
+            &mut tmp,
+            64,
+            tl,
+            o,
+            width,
+            height,
             angle | ((mrl_idx as i32) << ANGLE_MRL_IDX_SHIFT) | ANGLE_IS_LUMA,
-            max_width, max_height,
+            max_width,
+            max_height,
         );
         ipred_z2(
-            dst, stride, tl, o + e_stride, width, height,
+            dst,
+            stride,
+            tl,
+            o + e_stride,
+            width,
+            height,
             angle | ANGLE_IS_LUMA,
-            max_width, max_height,
+            max_width,
+            max_height,
         );
         for y in 0..height {
             for x in 0..width {
-                dst[y * stride + x] = ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
+                dst[y * stride + x] =
+                    ((tmp[y * 64 + x] as u16 + dst[y * stride + x] as u16 + 1) >> 1) as u8;
             }
         }
         return;
@@ -682,8 +968,14 @@ pub fn ipred_z2(
     };
     if str_t > 0 {
         filter_edge(
-            &mut filt[1..], sz_t, 1, sz_t + max_width as usize - width,
-            &tl[o..], 0, sz_t as i32, str_t as usize,
+            &mut filt[1..],
+            sz_t,
+            1,
+            sz_t + max_width as usize - width,
+            &tl[o..],
+            0,
+            sz_t as i32,
+            str_t as usize,
         );
     } else {
         filt[1..1 + sz_t].copy_from_slice(&tl[o..o + sz_t]);
@@ -702,8 +994,14 @@ pub fn ipred_z2(
     };
     if str_l > 0 {
         filter_edge(
-            &mut filt2[1..], sz_l, height - max_height as usize, sz_l - 1,
-            &tl[o - (height + mrl_idx)..], 0, sz_l as i32, str_l as usize,
+            &mut filt2[1..],
+            sz_l,
+            height - max_height as usize,
+            sz_l - 1,
+            &tl[o - (height + mrl_idx)..],
+            0,
+            sz_l as i32,
+            str_l as usize,
         );
     } else {
         filt2[1..1 + sz_l].copy_from_slice(&tl[o - (height + mrl_idx)..o + 1]);
@@ -778,11 +1076,15 @@ pub fn ibp_blend_8bpc(
         let wy = y >> y_shift;
         for x in 0..width {
             let wx = x >> x_shift;
-            let weight = if inv { weights[wx][wy] } else { weights[wy][wx] } as i32;
-            dst[y * stride + x] =
-                ((tmp[y * 64 + x] as i32 * (128 - weight) + dst[y * stride + x] as i32 * weight
-                    + 64)
-                    >> 7) as u8;
+            let weight = if inv {
+                weights[wx][wy]
+            } else {
+                weights[wy][wx]
+            } as i32;
+            dst[y * stride + x] = ((tmp[y * 64 + x] as i32 * (128 - weight)
+                + dst[y * stride + x] as i32 * weight
+                + 64)
+                >> 7) as u8;
         }
     }
 }
@@ -892,12 +1194,18 @@ pub fn ipred_dip_8bpc(
 
     let mut uwl2 = wl2 - 1;
     let mut dwl2 = 0i32;
-    if uwl2 < 0 { dwl2 = -uwl2; uwl2 = 0; }
+    if uwl2 < 0 {
+        dwl2 = -uwl2;
+        uwl2 = 0;
+    }
     let step_x = 1usize << uwl2;
     let dw = 1usize << dwl2;
     let mut uhl2 = hl2 - 1;
     let mut dhl2 = 0i32;
-    if uhl2 < 0 { dhl2 = -uhl2; uhl2 = 0; }
+    if uhl2 < 0 {
+        dhl2 = -uhl2;
+        uhl2 = 0;
+    }
     let step_y = 1usize << uhl2;
     let dh = 1usize << dhl2;
     let grid_h = 8usize >> dhl2;
@@ -930,8 +1238,7 @@ pub fn ipred_dip_8bpc(
                 p1 = dst[y * stride + x + step_x - 1] as i32;
                 for z in 0..step_x - 1 {
                     let z1 = (z + 1) as i32;
-                    dst[y * stride + x + z] =
-                        ((p0 * (step_x as i32 - z1) + p1 * z1) >> uwl2) as u8;
+                    dst[y * stride + x + z] = ((p0 * (step_x as i32 - z1) + p1 * z1) >> uwl2) as u8;
                 }
                 x += step_x;
             }
@@ -957,14 +1264,7 @@ pub fn ipred_dip_8bpc(
     }
 }
 
-pub fn pal_pred_8bpc(
-    dst: &mut [u8],
-    stride: usize,
-    pal: &[u8],
-    idx: &[u8],
-    w: usize,
-    h: usize,
-) {
+pub fn pal_pred_8bpc(dst: &mut [u8], stride: usize, pal: &[u8], idx: &[u8], w: usize, h: usize) {
     let mut ii = 0;
     for y in 0..h {
         let mut x = 0;
@@ -994,20 +1294,36 @@ pub const CFL_ALPHA_U_MASK: u32 = ((1 << CFL_ALPHA_LOG2) - 1) << CFL_ALPHA_U_SHI
 pub const CFL_ALPHA_V_MASK: u32 = ((1 << CFL_ALPHA_LOG2) - 1) << CFL_ALPHA_V_SHIFT;
 
 #[inline(always)]
-fn cfl_filter(src: &[u8], c: usize, l: usize, r: usize, b: usize,
-              top: &[u8], tc: usize, filter_type: i32) -> u8 {
+fn cfl_filter(
+    src: &[u8],
+    c: usize,
+    l: usize,
+    r: usize,
+    b: usize,
+    top: &[u8],
+    tc: usize,
+    filter_type: i32,
+) -> u8 {
     match filter_type {
         CFL_FLT_TYPE_UNIFORM => {
-            ((src[c] as u16 + src[r] as u16 +
-              src[b + c] as u16 + src[b + r] as u16) >> 2) as u8
+            ((src[c] as u16 + src[r] as u16 + src[b + c] as u16 + src[b + r] as u16) >> 2) as u8
         }
         CFL_FLT_TYPE_VSTRIP => {
-            ((src[l] as u16 + 2 * src[c] as u16 + src[r] as u16 +
-              src[b + l] as u16 + 2 * src[b + c] as u16 + src[b + r] as u16) >> 3) as u8
+            ((src[l] as u16
+                + 2 * src[c] as u16
+                + src[r] as u16
+                + src[b + l] as u16
+                + 2 * src[b + c] as u16
+                + src[b + r] as u16)
+                >> 3) as u8
         }
         _ => {
-            ((src[l] as u16 + 4 * src[c] as u16 + src[r] as u16 +
-              top[tc] as u16 + src[b + c] as u16) >> 3) as u8
+            ((src[l] as u16
+                + 4 * src[c] as u16
+                + src[r] as u16
+                + top[tc] as u16
+                + src[b + c] as u16)
+                >> 3) as u8
         }
     }
 }
@@ -1037,8 +1353,16 @@ pub fn cfl_gen_y_420_8bpc(
     let has_t = flags & CFL_HAS_TOP != 0;
     let has_l = flags & CFL_HAS_LEFT != 0;
     let dir = flags & CFL_DIR_ALL;
-    let n_left: usize = if has_l { 1 + (dir == CFL_DIR_LEFT) as usize } else { 0 };
-    let n_top: usize = if has_t { 1 + (dir == CFL_DIR_TOP) as usize } else { 0 };
+    let n_left: usize = if has_l {
+        1 + (dir == CFL_DIR_LEFT) as usize
+    } else {
+        0
+    };
+    let n_top: usize = if has_t {
+        1 + (dir == CFL_DIR_TOP) as usize
+    } else {
+        0
+    };
     let dst_left_base = n_top * dst_top_stride + 64 * 64;
     let ss = n_left << 1;
 
@@ -1063,27 +1387,49 @@ pub fn cfl_gen_y_420_8bpc(
             top_sp = (src_off - ss) - n_top * 2 * src_stride;
             top_buf = src;
             b = src_stride as isize;
-            t = if n_top == 1 { -(src_stride as isize) } else { 0 };
+            t = if n_top == 1 {
+                -(src_stride as isize)
+            } else {
+                0
+            };
         }
 
         for _y in 0..n_top {
             for x in 0..n_left {
                 let c = x * 2;
                 let r = c + 1;
-                let l_idx = if n_left & 1 != 0 { if c > 0 { c - 1 } else { 0 } } else { imax(c as i32 - 1, 0) as usize };
+                let l_idx = if n_left & 1 != 0 {
+                    if c > 0 { c - 1 } else { 0 }
+                } else {
+                    imax(c as i32 - 1, 0) as usize
+                };
                 dst[dst_lp + x] = cfl_filter(
-                    top_buf, top_sp + c, top_sp + l_idx, top_sp + r, b as usize,
-                    top_buf, (top_sp as isize + t) as usize + c,
+                    top_buf,
+                    top_sp + c,
+                    top_sp + l_idx,
+                    top_sp + r,
+                    b as usize,
+                    top_buf,
+                    (top_sp as isize + t) as usize + c,
                     filter_type,
                 );
             }
             for x in n_left..refw {
                 let c = x * 2;
                 let r = c + 1;
-                let l_idx = if n_left > 0 { c - 1 } else { imax(c as i32 - 1, 0) as usize };
+                let l_idx = if n_left > 0 {
+                    c - 1
+                } else {
+                    imax(c as i32 - 1, 0) as usize
+                };
                 dst[dst_p + x - n_left] = cfl_filter(
-                    top_buf, top_sp + c, top_sp + l_idx, top_sp + r, b as usize,
-                    top_buf, (top_sp as isize + t) as usize + c,
+                    top_buf,
+                    top_sp + c,
+                    top_sp + l_idx,
+                    top_sp + r,
+                    b as usize,
+                    top_buf,
+                    (top_sp as isize + t) as usize + c,
                     filter_type,
                 );
             }
@@ -1119,20 +1465,38 @@ pub fn cfl_gen_y_420_8bpc(
         for x in 0..n_left {
             let c = x * 2;
             let r = c + 1;
-            let l_idx = if n_left & 1 != 0 { if c > 0 { c - 1 } else { 0 } } else { imax(c as i32 - 1, 0) as usize };
+            let l_idx = if n_left & 1 != 0 {
+                if c > 0 { c - 1 } else { 0 }
+            } else {
+                imax(c as i32 - 1, 0) as usize
+            };
             dst[dst_lp + x] = cfl_filter(
-                src, sp + c, sp + l_idx, sp + r, b as usize,
-                tb, tp + c,
+                src,
+                sp + c,
+                sp + l_idx,
+                sp + r,
+                b as usize,
+                tb,
+                tp + c,
                 filter_type,
             );
         }
         for x in n_left..n_left + tw {
             let c = x * 2;
             let r = c + 1;
-            let l_idx = if n_left > 0 { c - 1 } else { imax(c as i32 - 1, 0) as usize };
+            let l_idx = if n_left > 0 {
+                c - 1
+            } else {
+                imax(c as i32 - 1, 0) as usize
+            };
             dst[dst_p + x - n_left] = cfl_filter(
-                src, sp + c, sp + l_idx, sp + r, b as usize,
-                tb, tp + c,
+                src,
+                sp + c,
+                sp + l_idx,
+                sp + r,
+                b as usize,
+                tb,
+                tp + c,
                 filter_type,
             );
         }
@@ -1148,10 +1512,19 @@ pub fn cfl_gen_y_420_8bpc(
         for x in 0..n_left {
             let c = x * 2;
             let r = c + 1;
-            let l_idx = if n_left & 1 != 0 { if c > 0 { c - 1 } else { 0 } } else { imax(c as i32 - 1, 0) as usize };
+            let l_idx = if n_left & 1 != 0 {
+                if c > 0 { c - 1 } else { 0 }
+            } else {
+                imax(c as i32 - 1, 0) as usize
+            };
             dst[dst_lp + x] = cfl_filter(
-                src, sp + c, sp + l_idx, sp + r, b as usize,
-                src, top_sp_bl + c,
+                src,
+                sp + c,
+                sp + l_idx,
+                sp + r,
+                b as usize,
+                src,
+                top_sp_bl + c,
                 filter_type,
             );
         }
@@ -1186,7 +1559,9 @@ pub fn cfl_gen_mat_8bpc(
     let n_left = if has_l { 1 + dir_l as usize } else { 0 };
     let left_off = y_off + n_top * y_top_stride + 64 * 64;
 
-    for r in mat.iter_mut() { r.fill(0); }
+    for r in mat.iter_mut() {
+        r.fill(0);
+    }
 
     let mut n: usize = 0;
 
@@ -1209,7 +1584,10 @@ pub fn cfl_gen_mat_8bpc(
             n += 1;
         }
         let start: usize = if !dir_l && !has_l { 1 } else { 0 };
-        let end = imax(start as i32, refw as i32 - n_left as i32 - 1 - (start == 0) as i32) as usize;
+        let end = imax(
+            start as i32,
+            refw as i32 - n_left as i32 - 1 - (start == 0) as i32,
+        ) as usize;
         for i in start..end {
             let v0 = y[y_off + i] as i32;
             let yi = y_off + dir_t as usize * y_top_stride + i + dir_l as usize;
@@ -1319,9 +1697,13 @@ pub fn cfl_calc_alphas_8bpc(
         let nl2 = 31 - clz(n as u32) as i32;
         let mat_sh = 6 - nl2 - (n as i32 & ((1 << nl2) - 1) != 0) as i32;
         if mat_sh > 0 {
-            for a in alpha.iter_mut() { *a <<= mat_sh; }
+            for a in alpha.iter_mut() {
+                *a <<= mat_sh;
+            }
         } else if mat_sh < 0 {
-            for a in alpha.iter_mut() { *a >>= -mat_sh; }
+            for a in alpha.iter_mut() {
+                *a >>= -mat_sh;
+            }
         }
     }
 
@@ -1329,7 +1711,7 @@ pub fn cfl_calc_alphas_8bpc(
     let (mut scale, mut sh) = get_div_scale_sh(mat[0][0]);
     tmp[0][0] = mul32(mat[0][1], scale, sh);
     tmp[0][1] = mul32(mat[0][2], scale, sh);
-    alpha[0]  = mul32(alpha[0],  scale, sh);
+    alpha[0] = mul32(alpha[0], scale, sh);
     tmp[1][0] = mat[1][1] - mul32(mat[1][0], tmp[0][0], 16);
     tmp[1][1] = mat[1][2] - mul32(mat[1][0], tmp[0][1], 16);
     alpha[1] -= mul32(mat[1][0], alpha[0], 16);
@@ -1339,9 +1721,9 @@ pub fn cfl_calc_alphas_8bpc(
 
     (scale, sh) = get_div_scale_sh(tmp[1][0]);
     tmp[1][1] = mul32(tmp[1][1], scale, sh);
-    alpha[1]  = mul32(alpha[1],  scale, sh);
+    alpha[1] = mul32(alpha[1], scale, sh);
     tmp[2][1] -= mul32(tmp[2][0], tmp[1][1], 16);
-    alpha[2]  -= mul32(tmp[2][0], alpha[1],  16);
+    alpha[2] -= mul32(tmp[2][0], alpha[1], 16);
 
     (scale, sh) = get_div_scale_sh(tmp[2][1]);
     alpha[2] = mul32(alpha[2], scale, sh);
@@ -1380,7 +1762,8 @@ pub fn cfl_mhccp_pred_8bpc(
             let v1 = sqrnd_8bpc(src[sp + x] as i32);
             dst[dp + x] = iclip(
                 mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2,
-                0, 255,
+                0,
+                255,
             ) as u8;
         }
         sp += w;
@@ -1395,7 +1778,8 @@ pub fn cfl_mhccp_pred_8bpc(
             let v1 = sqrnd_8bpc(src[sp] as i32);
             dst[dp] = iclip(
                 mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2,
-                0, 255,
+                0,
+                255,
             ) as u8;
             x += 1;
         }
@@ -1411,7 +1795,8 @@ pub fn cfl_mhccp_pred_8bpc(
             let v1 = sqrnd_8bpc(src[sp + x] as i32);
             dst[dp + x] = iclip(
                 mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2,
-                0, 255,
+                0,
+                255,
             ) as u8;
             x += 1;
         }
@@ -1422,8 +1807,13 @@ pub fn cfl_mhccp_pred_8bpc(
 }
 
 fn cfl_luma_left(
-    ypx: &[u8], yleft: usize, ystride: isize,
-    ss_hor: usize, ss_ver: usize, flags: u32, y: usize,
+    ypx: &[u8],
+    yleft: usize,
+    ystride: isize,
+    ss_hor: usize,
+    ss_ver: usize,
+    flags: u32,
+    y: usize,
 ) -> i32 {
     if ss_hor | ss_ver == 0 {
         return (ypx[yleft] as i32) << 3;
@@ -1440,24 +1830,40 @@ fn cfl_luma_left(
     }
     let flt = flags & 3;
     if flt == CFL_FLT_TYPE_GAUSS as u32 {
-        let top = if y > 0 { (yleft as isize - ystride) as usize } else { yleft };
-        ypx[yleft - 1] as i32 + 4 * ypx[yleft] as i32 + ypx[yleft + 1] as i32 +
-        ypx[top] as i32 + ypx[(yleft as isize + ystride) as usize] as i32
+        let top = if y > 0 {
+            (yleft as isize - ystride) as usize
+        } else {
+            yleft
+        };
+        ypx[yleft - 1] as i32
+            + 4 * ypx[yleft] as i32
+            + ypx[yleft + 1] as i32
+            + ypx[top] as i32
+            + ypx[(yleft as isize + ystride) as usize] as i32
     } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
-        ypx[yleft - 1] as i32 + 2 * ypx[yleft] as i32 + ypx[yleft + 1] as i32 +
-        ypx[(yleft as isize + ystride) as usize - 1] as i32 +
-        2 * ypx[(yleft as isize + ystride) as usize] as i32 +
-        ypx[(yleft as isize + ystride) as usize + 1] as i32
+        ypx[yleft - 1] as i32
+            + 2 * ypx[yleft] as i32
+            + ypx[yleft + 1] as i32
+            + ypx[(yleft as isize + ystride) as usize - 1] as i32
+            + 2 * ypx[(yleft as isize + ystride) as usize] as i32
+            + ypx[(yleft as isize + ystride) as usize + 1] as i32
     } else {
-        (ypx[yleft] as i32 + ypx[yleft + 1] as i32 +
-         ypx[(yleft as isize + ystride) as usize] as i32 +
-         ypx[(yleft as isize + ystride) as usize + 1] as i32) << 1
+        (ypx[yleft] as i32
+            + ypx[yleft + 1] as i32
+            + ypx[(yleft as isize + ystride) as usize] as i32
+            + ypx[(yleft as isize + ystride) as usize + 1] as i32)
+            << 1
     }
 }
 
 fn cfl_luma_top(
-    ytop: &[u8], xl: usize, ystride: isize,
-    ss_hor: usize, ss_ver: usize, flags: u32, is_top_sb: bool,
+    ytop: &[u8],
+    xl: usize,
+    ystride: isize,
+    ss_hor: usize,
+    ss_ver: usize,
+    flags: u32,
+    is_top_sb: bool,
 ) -> i32 {
     if ss_hor | ss_ver == 0 {
         return (ytop[xl] as i32) << 3;
@@ -1467,7 +1873,10 @@ fn cfl_luma_top(
         return if flt == CFL_FLT_TYPE_GAUSS as u32 {
             (ytop[xl] as i32) << 3
         } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
-            (ytop[imax(0, xl as i32 - 1) as usize] as i32 + 2 * ytop[xl] as i32 + ytop[xl + 1] as i32) << 1
+            (ytop[imax(0, xl as i32 - 1) as usize] as i32
+                + 2 * ytop[xl] as i32
+                + ytop[xl + 1] as i32)
+                << 1
         } else {
             (ytop[xl] as i32 + ytop[xl + 1] as i32) << 2
         };
@@ -1475,21 +1884,36 @@ fn cfl_luma_top(
     let bottom = if is_top_sb { 0isize } else { ystride };
     let flt = flags & 3;
     if flt == CFL_FLT_TYPE_GAUSS as u32 {
-        ytop[imax(0, xl as i32 - 1) as usize] as i32 + 4 * ytop[xl] as i32 + ytop[xl + 1] as i32 +
-        ytop[(xl as isize - bottom) as usize] as i32 + ytop[(xl as isize + bottom) as usize] as i32
+        ytop[imax(0, xl as i32 - 1) as usize] as i32
+            + 4 * ytop[xl] as i32
+            + ytop[xl + 1] as i32
+            + ytop[(xl as isize - bottom) as usize] as i32
+            + ytop[(xl as isize + bottom) as usize] as i32
     } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
-        ytop[imax(0, xl as i32 - 1) as usize] as i32 + 2 * ytop[xl] as i32 + ytop[xl + 1] as i32 +
-        ytop[(imax(0, xl as i32 - 1) as isize + bottom) as usize] as i32 +
-        2 * ytop[(xl as isize + bottom) as usize] as i32 + ytop[(xl as isize + bottom) as usize + 1] as i32
+        ytop[imax(0, xl as i32 - 1) as usize] as i32
+            + 2 * ytop[xl] as i32
+            + ytop[xl + 1] as i32
+            + ytop[(imax(0, xl as i32 - 1) as isize + bottom) as usize] as i32
+            + 2 * ytop[(xl as isize + bottom) as usize] as i32
+            + ytop[(xl as isize + bottom) as usize + 1] as i32
     } else {
-        (ytop[xl] as i32 + ytop[xl + 1] as i32 +
-         ytop[(xl as isize + bottom) as usize] as i32 + ytop[(xl as isize + bottom) as usize + 1] as i32) << 1
+        (ytop[xl] as i32
+            + ytop[xl + 1] as i32
+            + ytop[(xl as isize + bottom) as usize] as i32
+            + ytop[(xl as isize + bottom) as usize + 1] as i32)
+            << 1
     }
 }
 
 fn cfl_luma_block(
-    ypx: &[u8], px: usize, xl: usize, ystride: isize,
-    ss_hor: usize, ss_ver: usize, flags: u32, y: usize,
+    ypx: &[u8],
+    px: usize,
+    xl: usize,
+    ystride: isize,
+    ss_hor: usize,
+    ss_ver: usize,
+    flags: u32,
+    y: usize,
 ) -> i32 {
     if ss_hor | ss_ver == 0 {
         return (ypx[px + xl] as i32) << 3;
@@ -1509,16 +1933,29 @@ fn cfl_luma_block(
     let left = imax((xl as i32) & -64, xl as i32 - 1) as usize;
     let flt = flags & 3;
     if flt == CFL_FLT_TYPE_GAUSS as u32 {
-        let top = if y & 31 == 0 { px + xl } else { (px as isize + xl as isize - ystride) as usize };
-        ypx[px + left] as i32 + 4 * ypx[px + xl] as i32 + ypx[px + xl + 1] as i32 +
-        ypx[top] as i32 + ypx[bot as usize] as i32
+        let top = if y & 31 == 0 {
+            px + xl
+        } else {
+            (px as isize + xl as isize - ystride) as usize
+        };
+        ypx[px + left] as i32
+            + 4 * ypx[px + xl] as i32
+            + ypx[px + xl + 1] as i32
+            + ypx[top] as i32
+            + ypx[bot as usize] as i32
     } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
-        ypx[px + left] as i32 + 2 * ypx[px + xl] as i32 + ypx[px + xl + 1] as i32 +
-        ypx[(px + left) as isize as usize + ystride as usize] as i32 +
-        2 * ypx[bot as usize] as i32 + ypx[bot as usize + 1] as i32
+        ypx[px + left] as i32
+            + 2 * ypx[px + xl] as i32
+            + ypx[px + xl + 1] as i32
+            + ypx[(px + left) as isize as usize + ystride as usize] as i32
+            + 2 * ypx[bot as usize] as i32
+            + ypx[bot as usize + 1] as i32
     } else {
-        (ypx[px + xl] as i32 + ypx[px + xl + 1] as i32 +
-         ypx[bot as usize] as i32 + ypx[bot as usize + 1] as i32) << 1
+        (ypx[px + xl] as i32
+            + ypx[px + xl + 1] as i32
+            + ypx[bot as usize] as i32
+            + ypx[bot as usize + 1] as i32)
+            << 1
     }
 }
 
@@ -1527,19 +1964,28 @@ fn cfl_luma_block(
 /// Buffer layout: `u_buf`/`v_buf` are the chroma planes. The block starts at
 /// `u_off`/`v_off`; the left neighbor column is at offset -1 from those.
 pub fn cfl_pred_8bpc(
-    ytop: &[u8], ytop_off: usize,
-    utop: &[u8], utop_off: usize,
-    vtop: &[u8], vtop_off: usize,
-    ypx: &[u8], ypx_off: usize,
-    u_buf: &mut [u8], u_off: usize,
-    v_buf: &mut [u8], v_off: usize,
+    ytop: &[u8],
+    ytop_off: usize,
+    utop: &[u8],
+    utop_off: usize,
+    vtop: &[u8],
+    vtop_off: usize,
+    ypx: &[u8],
+    ypx_off: usize,
+    u_buf: &mut [u8],
+    u_off: usize,
+    v_buf: &mut [u8],
+    v_off: usize,
     ystride: isize,
     cstride: isize,
-    wpad: usize, hpad: usize,
-    w: usize, h: usize,
+    wpad: usize,
+    hpad: usize,
+    w: usize,
+    h: usize,
     flags: u32,
     implicit: bool,
-    ss_hor: usize, ss_ver: usize,
+    ss_hor: usize,
+    ss_ver: usize,
 ) {
     let has_t = flags & CFL_HAS_TOP as u32 != 0;
     let has_l = flags & CFL_HAS_LEFT as u32 != 0;
@@ -1561,11 +2007,14 @@ pub fn cfl_pred_8bpc(
     if implicit {
         if has_t && has_l {
             if w > h * 2 {
-                n_top = 8; n_left = 0;
+                n_top = 8;
+                n_left = 0;
             } else if h > w * 2 {
-                n_top = 0; n_left = 8;
+                n_top = 0;
+                n_left = 8;
             } else {
-                n_top = 4; n_left = 4;
+                n_top = 4;
+                n_left = 4;
             }
         } else {
             n_top = if has_t { imin(8, w as i32) as usize } else { 0 };
@@ -1575,7 +2024,11 @@ pub fn cfl_pred_8bpc(
 
     if has_l {
         let mut yleft = ypx_off - (1 + ss_hor);
-        let step = if n_left > 0 { h >> ctz(n_left as u32) } else { 0 };
+        let step = if n_left > 0 {
+            h >> ctz(n_left as u32)
+        } else {
+            0
+        };
         let mut l = 0i32;
         let mut u_lp = u_off;
         let mut v_lp = v_off;
@@ -1617,7 +2070,15 @@ pub fn cfl_pred_8bpc(
         let mut l = 0i32;
         for x in 0..xlim {
             let xl = x << ss_hor;
-            l = cfl_luma_top(ytop, ytop_off + xl, ystride, ss_hor, ss_ver, flags, is_top_sb);
+            l = cfl_luma_top(
+                ytop,
+                ytop_off + xl,
+                ystride,
+                ss_hor,
+                ss_ver,
+                flags,
+                is_top_sb,
+            );
             if !skiph || x & 1 == 0 {
                 dc[0] += l;
                 dc[1] += utop[utop_off + x] as i32;
@@ -1650,8 +2111,8 @@ pub fn cfl_pred_8bpc(
         dc[1] = 128;
         dc[2] = 128;
     } else {
-        let npx = (if has_t { w >> skiph as usize } else { 0 }) +
-                  (if has_l { h >> skipv as usize } else { 0 });
+        let npx = (if has_t { w >> skiph as usize } else { 0 })
+            + (if has_l { h >> skipv as usize } else { 0 });
         if npx & (npx - 1) == 0 {
             dc[0] = (dc[0] + (npx as i32 >> 1)) >> ctz(npx as u32);
             dc[1] = (dc[1] + (npx as i32 >> 1)) >> ctz(npx as u32);
@@ -2022,11 +2483,23 @@ mod tests {
     #[test]
     fn test_ipred_z1_basic() {
         let mut tl = vec![128u8; 256];
-        for i in 0..64 { tl[i] = (128 + i) as u8; }
+        for i in 0..64 {
+            tl[i] = (128 + i) as u8;
+        }
         let mut dst = [0u8; 64];
         let w = make_ibp_weights();
-        ipred_z1(&mut dst, 8, &tl, 0, 8, 8,
-                 45 | ANGLE_IS_LUMA | ANGLE_HAS_TOP_FLAG, 8, 8, &w);
+        ipred_z1(
+            &mut dst,
+            8,
+            &tl,
+            0,
+            8,
+            8,
+            45 | ANGLE_IS_LUMA | ANGLE_HAS_TOP_FLAG,
+            8,
+            8,
+            &w,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2035,8 +2508,7 @@ mod tests {
         let tl = vec![150u8; 256];
         let mut dst = [0u8; 16];
         let w = make_ibp_weights();
-        ipred_z1(&mut dst, 4, &tl, 0, 4, 4,
-                 45 | ANGLE_HAS_TOP_FLAG, 4, 4, &w);
+        ipred_z1(&mut dst, 4, &tl, 0, 4, 4, 45 | ANGLE_HAS_TOP_FLAG, 4, 4, &w);
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2044,11 +2516,23 @@ mod tests {
     fn test_ipred_z3_basic() {
         let mut tl = vec![128u8; 256];
         let o = 128;
-        for i in 1..=64 { tl[o - i] = (128 + i) as u8; }
+        for i in 1..=64 {
+            tl[o - i] = (128 + i) as u8;
+        }
         let mut dst = [0u8; 64];
         let w = make_ibp_weights();
-        ipred_z3(&mut dst, 8, &tl, o, 8, 8,
-                 225 | ANGLE_IS_LUMA | ANGLE_HAS_LEFT_FLAG, 8, 8, &w);
+        ipred_z3(
+            &mut dst,
+            8,
+            &tl,
+            o,
+            8,
+            8,
+            225 | ANGLE_IS_LUMA | ANGLE_HAS_LEFT_FLAG,
+            8,
+            8,
+            &w,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2056,11 +2540,23 @@ mod tests {
     fn test_ipred_z3_chroma() {
         let mut tl = vec![150u8; 256];
         let o = 128;
-        for i in 1..=32 { tl[o - i] = 150; }
+        for i in 1..=32 {
+            tl[o - i] = 150;
+        }
         let mut dst = [0u8; 16];
         let w = make_ibp_weights();
-        ipred_z3(&mut dst, 4, &tl, o, 4, 4,
-                 225 | ANGLE_HAS_LEFT_FLAG, 4, 4, &w);
+        ipred_z3(
+            &mut dst,
+            4,
+            &tl,
+            o,
+            4,
+            4,
+            225 | ANGLE_HAS_LEFT_FLAG,
+            4,
+            4,
+            &w,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2068,11 +2564,24 @@ mod tests {
     fn test_z2_basic_luma() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..32 { tl[o + i] = 200; }
-        for i in 1..=32 { tl[o - i] = 100; }
+        for i in 0..32 {
+            tl[o + i] = 200;
+        }
+        for i in 1..=32 {
+            tl[o - i] = 100;
+        }
         let mut dst = [0u8; 16];
-        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
-                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 4, 4);
+        ipred_z2(
+            &mut dst,
+            4,
+            &tl,
+            o,
+            4,
+            4,
+            135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA,
+            4,
+            4,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2080,11 +2589,24 @@ mod tests {
     fn test_z2_basic_chroma() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..32 { tl[o + i] = 200; }
-        for i in 1..=32 { tl[o - i] = 100; }
+        for i in 0..32 {
+            tl[o + i] = 200;
+        }
+        for i in 1..=32 {
+            tl[o - i] = 100;
+        }
         let mut dst = [0u8; 16];
-        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
-                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG, 4, 4);
+        ipred_z2(
+            &mut dst,
+            4,
+            &tl,
+            o,
+            4,
+            4,
+            135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG,
+            4,
+            4,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2093,8 +2615,17 @@ mod tests {
         let tl = [128u8; 256];
         let o = 128;
         let mut dst = [0u8; 64];
-        ipred_z2(&mut dst, 8, &tl, o, 8, 8,
-                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 8, 8);
+        ipred_z2(
+            &mut dst,
+            8,
+            &tl,
+            o,
+            8,
+            8,
+            135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA,
+            8,
+            8,
+        );
         for &v in &dst[..64] {
             assert_eq!(v, 128);
         }
@@ -2104,11 +2635,24 @@ mod tests {
     fn test_z2_steep_angle() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..32 { tl[o + i] = 250; }
-        for i in 1..=32 { tl[o - i] = 50; }
+        for i in 0..32 {
+            tl[o + i] = 250;
+        }
+        for i in 1..=32 {
+            tl[o - i] = 50;
+        }
         let mut dst = [0u8; 16];
-        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
-                 170 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 4, 4);
+        ipred_z2(
+            &mut dst,
+            4,
+            &tl,
+            o,
+            4,
+            4,
+            170 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA,
+            4,
+            4,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2116,11 +2660,24 @@ mod tests {
     fn test_z2_shallow_angle() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..32 { tl[o + i] = 250; }
-        for i in 1..=32 { tl[o - i] = 50; }
+        for i in 0..32 {
+            tl[o + i] = 250;
+        }
+        for i in 1..=32 {
+            tl[o - i] = 50;
+        }
         let mut dst = [0u8; 16];
-        ipred_z2(&mut dst, 4, &tl, o, 4, 4,
-                 100 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 4, 4);
+        ipred_z2(
+            &mut dst,
+            4,
+            &tl,
+            o,
+            4,
+            4,
+            100 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA,
+            4,
+            4,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2128,11 +2685,24 @@ mod tests {
     fn test_z2_no_panic_8x8() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..64 { tl[o + i] = 200; }
-        for i in 1..=64 { tl[o - i] = 100; }
+        for i in 0..64 {
+            tl[o + i] = 200;
+        }
+        for i in 1..=64 {
+            tl[o - i] = 100;
+        }
         let mut dst = [0u8; 64];
-        ipred_z2(&mut dst, 8, &tl, o, 8, 8,
-                 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA, 8, 8);
+        ipred_z2(
+            &mut dst,
+            8,
+            &tl,
+            o,
+            8,
+            8,
+            135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_IS_LUMA,
+            8,
+            8,
+        );
         assert!(dst.iter().any(|&v| v > 0));
     }
 
@@ -2140,8 +2710,12 @@ mod tests {
     fn test_dip_mode0_8x8() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..64 { tl[o + 1 + i] = 200; }
-        for i in 1..=64 { tl[o - i] = 100; }
+        for i in 0..64 {
+            tl[o + 1 + i] = 200;
+        }
+        for i in 1..=64 {
+            tl[o - i] = 100;
+        }
         let mut dst = [0u8; 64];
         ipred_dip_8bpc(&mut dst, 8, &tl, o, 8, 8, 0);
         assert!(dst.iter().any(|&v| v > 0));
@@ -2151,8 +2725,12 @@ mod tests {
     fn test_dip_mode1_4x4() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..32 { tl[o + 1 + i] = 180; }
-        for i in 1..=32 { tl[o - i] = 80; }
+        for i in 0..32 {
+            tl[o + 1 + i] = 180;
+        }
+        for i in 1..=32 {
+            tl[o - i] = 80;
+        }
         let mut dst = [0u8; 16];
         ipred_dip_8bpc(&mut dst, 4, &tl, o, 4, 4, 1);
         assert!(dst.iter().any(|&v| v > 0));
@@ -2162,8 +2740,12 @@ mod tests {
     fn test_dip_transposed() {
         let mut tl = [128u8; 256];
         let o = 128;
-        for i in 0..64 { tl[o + 1 + i] = 200; }
-        for i in 1..=64 { tl[o - i] = 100; }
+        for i in 0..64 {
+            tl[o + 1 + i] = 200;
+        }
+        for i in 1..=64 {
+            tl[o - i] = 100;
+        }
         let mut dst = [0u8; 64];
         ipred_dip_8bpc(&mut dst, 8, &tl, o, 8, 8, 16);
         assert!(dst.iter().any(|&v| v > 0));
@@ -2220,8 +2802,18 @@ mod tests {
         let src = vec![100u8; 64 * 64];
         let mut dst = vec![0u8; 64 * 64 + 256];
         cfl_gen_y_420_8bpc(
-            &mut dst, 8, &src, 0, None, 64,
-            4, 4, 4, 4, 0, CFL_FLT_TYPE_UNIFORM,
+            &mut dst,
+            8,
+            &src,
+            0,
+            None,
+            64,
+            4,
+            4,
+            4,
+            4,
+            0,
+            CFL_FLT_TYPE_UNIFORM,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -2235,8 +2827,18 @@ mod tests {
         let src = vec![100u8; 64 * 64];
         let mut dst = vec![0u8; 64 * 64 + 256];
         cfl_gen_y_420_8bpc(
-            &mut dst, 8, &src, 0, None, 64,
-            4, 4, 4, 4, 0, CFL_FLT_TYPE_VSTRIP,
+            &mut dst,
+            8,
+            &src,
+            0,
+            None,
+            64,
+            4,
+            4,
+            4,
+            4,
+            0,
+            CFL_FLT_TYPE_VSTRIP,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -2250,8 +2852,18 @@ mod tests {
         let src = vec![100u8; 64 * 64];
         let mut dst = vec![0u8; 64 * 64 + 256];
         cfl_gen_y_420_8bpc(
-            &mut dst, 8, &src, 0, None, 64,
-            4, 4, 4, 4, 0, CFL_FLT_TYPE_GAUSS,
+            &mut dst,
+            8,
+            &src,
+            0,
+            None,
+            64,
+            4,
+            4,
+            4,
+            4,
+            0,
+            CFL_FLT_TYPE_GAUSS,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -2307,12 +2919,21 @@ mod tests {
     #[test]
     fn test_cfl_gen_mat_symmetric() {
         let mut y = vec![100u8; 64 * 64 + 512];
-        for i in 0..512 { y[64 * 64 + i] = 100; }
+        for i in 0..512 {
+            y[64 * 64 + i] = 100;
+        }
         let mut mat = [[0i32; 3]; 3];
         let mut imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
         cfl_gen_mat_8bpc(
-            &mut mat, &mut imat, &y, 0, 8, 4, 4,
-            CFL_HAS_TOP | CFL_HAS_LEFT, CflMhDir::Center,
+            &mut mat,
+            &mut imat,
+            &y,
+            0,
+            8,
+            4,
+            4,
+            CFL_HAS_TOP | CFL_HAS_LEFT,
+            CflMhDir::Center,
         );
         assert_eq!(mat[1][0], mat[0][1]);
         assert_eq!(mat[2][0], mat[0][2]);
@@ -2335,15 +2956,17 @@ mod tests {
         let c = vec![128u8; 64 * 64];
         let mut alpha = [0i32; 3];
         let mut mat = [[0i32; 3]; 3];
-        mat[0][0] = 100; mat[1][1] = 100; mat[2][2] = 100;
-        mat[0][1] = 0; mat[1][0] = 0;
-        mat[0][2] = 0; mat[2][0] = 0;
-        mat[1][2] = 0; mat[2][1] = 0;
+        mat[0][0] = 100;
+        mat[1][1] = 100;
+        mat[2][2] = 100;
+        mat[0][1] = 0;
+        mat[1][0] = 0;
+        mat[0][2] = 0;
+        mat[2][0] = 0;
+        mat[1][2] = 0;
+        mat[2][1] = 0;
         let imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
-        cfl_calc_alphas_8bpc(
-            &mut alpha, &c, 64, None, 64, 4, 4,
-            &mut mat, &imat, 0,
-        );
+        cfl_calc_alphas_8bpc(&mut alpha, &c, 64, None, 64, 4, 4, &mut mat, &imat, 0);
         assert_eq!(alpha, [0, 0, 0]);
     }
 
@@ -2354,16 +2977,32 @@ mod tests {
         c[stride - 1] = 100;
         let top = vec![120u8; 32];
         let mut mat = [[0i32; 3]; 3];
-        mat[0][0] = 1000; mat[1][1] = 1000; mat[2][2] = 1000;
-        mat[1][0] = 0; mat[0][1] = 0;
-        mat[2][0] = 0; mat[0][2] = 0;
-        mat[2][1] = 0; mat[1][2] = 0;
+        mat[0][0] = 1000;
+        mat[1][1] = 1000;
+        mat[2][2] = 1000;
+        mat[1][0] = 0;
+        mat[0][1] = 0;
+        mat[2][0] = 0;
+        mat[0][2] = 0;
+        mat[2][1] = 0;
+        mat[1][2] = 0;
         let mut imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
-        for i in 0..4 { imat[0][i] = 100; imat[1][i] = 50; }
+        for i in 0..4 {
+            imat[0][i] = 100;
+            imat[1][i] = 50;
+        }
         let mut alpha = [0i32; 3];
         cfl_calc_alphas_8bpc(
-            &mut alpha, &c, stride, Some((&top, 1)), stride, 4, 4,
-            &mut mat, &imat, CFL_HAS_TOP,
+            &mut alpha,
+            &c,
+            stride,
+            Some((&top, 1)),
+            stride,
+            4,
+            4,
+            &mut mat,
+            &imat,
+            CFL_HAS_TOP,
         );
         assert!(alpha[0] != 0 || alpha[1] != 0 || alpha[2] != 0);
     }
@@ -2373,10 +3012,7 @@ mod tests {
         let src = vec![128u8; 64 * 64 + 256];
         let alpha = [0i32; 3];
         let mut dst = vec![0u8; 64];
-        cfl_mhccp_pred_8bpc(
-            &mut dst, 8, &src, 0, 8, 4, 4,
-            &alpha, 0, CflMhDir::Center,
-        );
+        cfl_mhccp_pred_8bpc(&mut dst, 8, &src, 0, 8, 4, 4, &alpha, 0, CflMhDir::Center);
         for &v in &dst[..32] {
             assert_eq!(v, 0);
         }
@@ -2387,10 +3023,7 @@ mod tests {
         let src = vec![100u8; 64 * 64 + 256];
         let alpha = [1 << 16, 0, 0];
         let mut dst = vec![0u8; 64];
-        cfl_mhccp_pred_8bpc(
-            &mut dst, 8, &src, 0, 8, 4, 4,
-            &alpha, 0, CflMhDir::Center,
-        );
+        cfl_mhccp_pred_8bpc(&mut dst, 8, &src, 0, 8, 4, 4, &alpha, 0, CflMhDir::Center);
         for y in 0..4 {
             for x in 0..4 {
                 assert!(dst[y * 8 + x] > 0);
@@ -2411,11 +3044,8 @@ mod tests {
         let yoff = stride as usize + 1;
         let flags = CFL_HAS_TOP as u32 | CFL_HAS_LEFT as u32;
         cfl_pred_8bpc(
-            &ytop, 0, &utop, 0, &vtop, 0,
-            &ypx, yoff,
-            &mut u_buf, off, &mut v_buf, off,
-            stride, stride,
-            0, 0, 4, 4, flags, false, 0, 0,
+            &ytop, 0, &utop, 0, &vtop, 0, &ypx, yoff, &mut u_buf, off, &mut v_buf, off, stride,
+            stride, 0, 0, 4, 4, flags, false, 0, 0,
         );
         for y in 0..4 {
             for x in 0..4 {
@@ -2435,11 +3065,8 @@ mod tests {
         let mut v_buf = vec![0u8; 256];
         let off = 1usize;
         cfl_pred_8bpc(
-            &ytop, 0, &utop, 0, &vtop, 0,
-            &ypx, 0,
-            &mut u_buf, off, &mut v_buf, off,
-            16, 16,
-            0, 0, 4, 4, 0, false, 0, 0,
+            &ytop, 0, &utop, 0, &vtop, 0, &ypx, 0, &mut u_buf, off, &mut v_buf, off, 16, 16, 0, 0,
+            4, 4, 0, false, 0, 0,
         );
         for y in 0..4 {
             for x in 0..4 {

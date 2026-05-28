@@ -42,9 +42,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         ivf_hdr.width, ivf_hdr.height, ivf_hdr.num_frames
     );
 
-    let mut settings = Settings::default();
-    settings.n_threads = args.threads;
-    settings.apply_grain = !args.no_grain;
+    let settings = Settings {
+        n_threads: args.threads,
+        apply_grain: !args.no_grain,
+        ..Settings::default()
+    };
 
     let mut decoder = Decoder::open(&settings)?;
 
@@ -78,8 +80,16 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
                     if let Some(ref mut writer) = y4m_out {
                         if !header_written {
-                            let fps_num = if ivf_hdr.timebase_den > 0 { ivf_hdr.timebase_den } else { 30 };
-                            let fps_den = if ivf_hdr.timebase_num > 0 { ivf_hdr.timebase_num } else { 1 };
+                            let fps_num = if ivf_hdr.timebase_den > 0 {
+                                ivf_hdr.timebase_den
+                            } else {
+                                30
+                            };
+                            let fps_den = if ivf_hdr.timebase_num > 0 {
+                                ivf_hdr.timebase_num
+                            } else {
+                                1
+                            };
                             writer.write_header(
                                 pic.p.w as u32,
                                 pic.p.h as u32,
@@ -95,9 +105,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(y_ptr), Some(u_ptr), Some(v_ptr)) =
                             (pic.data[0], pic.data[1], pic.data[2])
                         {
-                            let y_plane = unsafe { std::slice::from_raw_parts(y_ptr.as_ptr(), y_size) };
-                            let u_plane = unsafe { std::slice::from_raw_parts(u_ptr.as_ptr(), uv_size) };
-                            let v_plane = unsafe { std::slice::from_raw_parts(v_ptr.as_ptr(), uv_size) };
+                            let y_plane =
+                                unsafe { std::slice::from_raw_parts(y_ptr.as_ptr(), y_size) };
+                            let u_plane =
+                                unsafe { std::slice::from_raw_parts(u_ptr.as_ptr(), uv_size) };
+                            let v_plane =
+                                unsafe { std::slice::from_raw_parts(v_ptr.as_ptr(), uv_size) };
                             writer.write_frame(&[y_plane, u_plane, v_plane])?;
                         }
                     }

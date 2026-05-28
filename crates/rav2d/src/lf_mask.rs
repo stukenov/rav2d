@@ -1,10 +1,8 @@
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Av2RestorationUnit {
     pub restoration_type: u8,
     pub ns_filter: [[i8; 32]; 16],
 }
-
 
 #[derive(Clone)]
 pub struct Av2Filter {
@@ -53,17 +51,11 @@ impl Default for Av2Restoration {
 use crate::intops::{iclip, imax, imin};
 use crate::levels::TxPartition;
 use crate::quantizer::dq_lookup;
-use crate::tables::{TxfmInfo, DEBLOCK_SIDE_THRESHOLDS};
+use crate::tables::{DEBLOCK_SIDE_THRESHOLDS, TxfmInfo};
 
 pub type FilterMasks = [[[u16; 4]; 5]; 64];
 
-pub fn mask_outer_edge_l(
-    masks: &mut [[u16; 4]],
-    by4: i32,
-    h4: i32,
-    bwl4c: u8,
-    l: &mut [u8],
-) {
+pub fn mask_outer_edge_l(masks: &mut [[u16; 4]], by4: i32, h4: i32, bwl4c: u8, l: &mut [u8]) {
     debug_assert!((bwl4c as u32) <= 3);
     let mut mask: u64 = 1 << by4;
     for y in 0..h4 as usize {
@@ -78,13 +70,7 @@ pub fn mask_outer_edge_l(
     }
 }
 
-pub fn mask_outer_edge_t(
-    masks: &mut [[u16; 4]],
-    bx4: i32,
-    w4: i32,
-    bhl4c: u8,
-    a: &mut [u8],
-) {
+pub fn mask_outer_edge_t(masks: &mut [[u16; 4]], bx4: i32, w4: i32, bhl4c: u8, a: &mut [u8]) {
     debug_assert!((bhl4c as u32) <= 3);
     let mut mask: u64 = 1 << bx4;
     for x in 0..w4 as usize {
@@ -117,10 +103,18 @@ pub fn mask_inner_edges_v(
     let mut x = xoff;
     while x < w4 {
         let idx = (bx4 + x) as usize;
-        if inner1 != 0 { masks[0][idx][t][0] |= inner1; }
-        if inner2 != 0 { masks[0][idx][t][1] |= inner2; }
-        if inner3 != 0 { masks[0][idx][t][2] |= inner3; }
-        if inner4 != 0 { masks[0][idx][t][3] |= inner4; }
+        if inner1 != 0 {
+            masks[0][idx][t][0] |= inner1;
+        }
+        if inner2 != 0 {
+            masks[0][idx][t][1] |= inner2;
+        }
+        if inner3 != 0 {
+            masks[0][idx][t][2] |= inner3;
+        }
+        if inner4 != 0 {
+            masks[0][idx][t][3] |= inner4;
+        }
         x += hstep;
     }
 }
@@ -143,10 +137,18 @@ pub fn mask_inner_edges_h(
     let mut y = yoff;
     while y < h4 {
         let idx = (by4 + y) as usize;
-        if inner1 != 0 { masks[1][idx][t][0] |= inner1; }
-        if inner2 != 0 { masks[1][idx][t][1] |= inner2; }
-        if inner3 != 0 { masks[1][idx][t][2] |= inner3; }
-        if inner4 != 0 { masks[1][idx][t][3] |= inner4; }
+        if inner1 != 0 {
+            masks[1][idx][t][0] |= inner1;
+        }
+        if inner2 != 0 {
+            masks[1][idx][t][1] |= inner2;
+        }
+        if inner3 != 0 {
+            masks[1][idx][t][2] |= inner3;
+        }
+        if inner4 != 0 {
+            masks[1][idx][t][3] |= inner4;
+        }
         y += vstep;
     }
 }
@@ -183,7 +185,13 @@ pub fn mask_edges_part(
     } else if tx_part as u8 == TxPartition::H5 as u8 {
         debug_assert!(th4 * 4 >= h4 && tw4 * 2 >= w4);
         mask_outer_edge_t(&mut masks[1][by4 as usize], bx4, w4, thl4c as u8, a);
-        mask_outer_edge_l(&mut masks[0][bx4 as usize], by4, imin(th4, h4), twl4c as u8, l);
+        mask_outer_edge_l(
+            &mut masks[0][bx4 as usize],
+            by4,
+            imin(th4, h4),
+            twl4c as u8,
+            l,
+        );
         if h4 > th4 {
             mask_outer_edge_l(
                 &mut masks[0][bx4 as usize],
@@ -211,7 +219,13 @@ pub fn mask_edges_part(
     } else {
         debug_assert!(tx_part as u8 == TxPartition::V5 as u8 && tw4 * 4 >= w4 && th4 * 2 >= h4);
         mask_outer_edge_l(&mut masks[0][bx4 as usize], by4, h4, twl4c as u8, l);
-        mask_outer_edge_t(&mut masks[1][by4 as usize], bx4, imin(tw4, w4), thl4c as u8, a);
+        mask_outer_edge_t(
+            &mut masks[1][by4 as usize],
+            bx4,
+            imin(tw4, w4),
+            thl4c as u8,
+            a,
+        );
         if w4 > tw4 {
             mask_outer_edge_t(
                 &mut masks[1][by4 as usize],
@@ -346,10 +360,8 @@ pub fn transpose_lossless_mask(
 }
 
 use crate::headers::{FrameHeader, PixelLayout, SequenceHeader};
-use crate::levels::{
-    Av2Block, BlockSize, CompInterPredMode, CompInterType, TxfmSize, TIP_FRAME,
-};
-use crate::tables::{BLOCK_DIMENSIONS, MAX_TXFM_SIZE_FOR_BS, TXFM_DIMENSIONS, TX_PART_TBL};
+use crate::levels::{Av2Block, BlockSize, CompInterPredMode, CompInterType, TIP_FRAME, TxfmSize};
+use crate::tables::{BLOCK_DIMENSIONS, MAX_TXFM_SIZE_FOR_BS, TX_PART_TBL, TXFM_DIMENSIONS};
 
 const FILTER_8TAP_SHARP: u8 = 2;
 
@@ -367,8 +379,7 @@ fn subpu_flt_lvl(
         // do nothing
     } else if r[0] == TIP_FRAME as i8 {
         let opfl = seq_hdr.tip_refine_mv
-            && (frame_hdr.tip.frame_mode == 1
-                || frame_hdr.tip.subpel_filter == FILTER_8TAP_SHARP);
+            && (frame_hdr.tip.frame_mode == 1 || frame_hdr.tip.subpel_filter == FILTER_8TAP_SHARP);
         return 1 + if frame_hdr.tip.frame_mode == 2 {
             !opfl as i32
         } else {
@@ -409,7 +420,15 @@ pub fn create_db_mask(
     let by4 = (by & 63) >> ss_ver;
     assert!(bw4 > 0 && bh4 > 0);
 
-    let subpu_l2 = subpu_flt_lvl(seq_hdr, frame_hdr, bs, b_dim[0] as i32, b_dim[1] as i32, b, 3);
+    let subpu_l2 = subpu_flt_lvl(
+        seq_hdr,
+        frame_hdr,
+        bs,
+        b_dim[0] as i32,
+        b_dim[1] as i32,
+        b,
+        3,
+    );
     let ds_subpu_mask = (frame_hdr.tip.frame_mode != 2) as i32 * 15;
     let twl4c;
     let thl4c;
@@ -429,8 +448,7 @@ pub fn create_db_mask(
                 TxfmSize::Tx4x4 as usize
             }
         } else if chroma {
-            MAX_TXFM_SIZE_FOR_BS[bs as usize]
-                [PixelLayout::I444 as usize - layout as usize] as usize
+            MAX_TXFM_SIZE_FOR_BS[bs as usize][PixelLayout::I444 as usize - layout as usize] as usize
         } else {
             TX_PART_TBL[bs as usize][tx_part as usize] as usize
         };
@@ -506,7 +524,9 @@ mod tests {
         let mut l = [2u8; 4];
         mask_outer_edge_l(&mut masks, 0, 4, 1, &mut l);
         assert_eq!(masks[1][0], 0b1111);
-        for i in 0..4 { assert_eq!(l[i], 1); }
+        for i in 0..4 {
+            assert_eq!(l[i], 1);
+        }
     }
 
     #[test]
@@ -516,7 +536,9 @@ mod tests {
         mask_outer_edge_l(&mut masks, 0, 2, 3, &mut l);
         assert_eq!(masks[1][0], 0b11);
         assert_eq!(masks[3][0], 0);
-        for i in 0..2 { assert_eq!(l[i], 3); }
+        for i in 0..2 {
+            assert_eq!(l[i], 3);
+        }
     }
 
     #[test]
@@ -536,7 +558,9 @@ mod tests {
         let mut a = [3u8; 4];
         mask_outer_edge_t(&mut masks, 0, 4, 2, &mut a);
         assert_eq!(masks[2][0], 0b1111);
-        for i in 0..4 { assert_eq!(a[i], 2); }
+        for i in 0..4 {
+            assert_eq!(a[i], 2);
+        }
     }
 
     #[test]
@@ -563,7 +587,11 @@ mod tests {
         let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
         mask_inner_edges_v(&mut masks, 0, 0, 8, 1, 4, 4);
         for row in &masks[0] {
-            for lvl in row { for s in lvl { assert_eq!(*s, 0); } }
+            for lvl in row {
+                for s in lvl {
+                    assert_eq!(*s, 0);
+                }
+            }
         }
     }
 
@@ -583,7 +611,11 @@ mod tests {
         let mut masks = [[[[0u16; 4]; 5]; 64]; 2];
         mask_inner_edges_h(&mut masks, 0, 0, 8, 1, 4, 4);
         for row in &masks[1] {
-            for lvl in row { for s in lvl { assert_eq!(*s, 0); } }
+            for lvl in row {
+                for s in lvl {
+                    assert_eq!(*s, 0);
+                }
+            }
         }
     }
 
@@ -599,11 +631,29 @@ mod tests {
     }
 
     fn dim_8x8() -> TxfmInfo {
-        TxfmInfo { w: 2, h: 2, lw: 1, lh: 1, min: 1, max: 1, sub: 0, ctx: 1 }
+        TxfmInfo {
+            w: 2,
+            h: 2,
+            lw: 1,
+            lh: 1,
+            min: 1,
+            max: 1,
+            sub: 0,
+            ctx: 1,
+        }
     }
 
     fn dim_4x4() -> TxfmInfo {
-        TxfmInfo { w: 1, h: 1, lw: 0, lh: 0, min: 0, max: 0, sub: 0, ctx: 0 }
+        TxfmInfo {
+            w: 1,
+            h: 1,
+            lw: 0,
+            lh: 0,
+            min: 0,
+            max: 0,
+            sub: 0,
+            ctx: 0,
+        }
     }
 
     #[test]
@@ -612,7 +662,19 @@ mod tests {
         let mut a = [0u8; 2];
         let mut l = [0u8; 2];
         let dim = dim_8x8();
-        mask_edges_part(&mut masks, 0, 0, 2, 2, TxPartition::None, &dim, 3, 3, &mut a, &mut l);
+        mask_edges_part(
+            &mut masks,
+            0,
+            0,
+            2,
+            2,
+            TxPartition::None,
+            &dim,
+            3,
+            3,
+            &mut a,
+            &mut l,
+        );
         assert_ne!(masks[0][0][0][0], 0);
         assert_ne!(masks[1][0][0][0], 0);
     }
@@ -623,7 +685,19 @@ mod tests {
         let mut a = [0u8; 4];
         let mut l = [0u8; 4];
         let dim = dim_4x4();
-        mask_edges_part(&mut masks, 0, 0, 4, 4, TxPartition::None, &dim, 3, 3, &mut a, &mut l);
+        mask_edges_part(
+            &mut masks,
+            0,
+            0,
+            4,
+            4,
+            TxPartition::None,
+            &dim,
+            3,
+            3,
+            &mut a,
+            &mut l,
+        );
         assert_ne!(masks[0][1][0][0], 0);
         assert_ne!(masks[1][1][0][0], 0);
     }
@@ -634,7 +708,19 @@ mod tests {
         let mut a = [0u8; 4];
         let mut l = [0u8; 8];
         let dim = dim_8x8();
-        mask_edges_part(&mut masks, 0, 0, 4, 8, TxPartition::H5, &dim, 3, 3, &mut a, &mut l);
+        mask_edges_part(
+            &mut masks,
+            0,
+            0,
+            4,
+            8,
+            TxPartition::H5,
+            &dim,
+            3,
+            3,
+            &mut a,
+            &mut l,
+        );
         assert_ne!(masks[1][0][0][0], 0);
         assert_ne!(masks[0][0][0][0], 0);
     }
@@ -645,7 +731,19 @@ mod tests {
         let mut a = [0u8; 8];
         let mut l = [0u8; 4];
         let dim = dim_8x8();
-        mask_edges_part(&mut masks, 0, 0, 8, 4, TxPartition::V5, &dim, 3, 3, &mut a, &mut l);
+        mask_edges_part(
+            &mut masks,
+            0,
+            0,
+            8,
+            4,
+            TxPartition::V5,
+            &dim,
+            3,
+            3,
+            &mut a,
+            &mut l,
+        );
         assert_ne!(masks[0][0][0][0], 0);
         assert_ne!(masks[1][0][0][0], 0);
     }
@@ -656,7 +754,19 @@ mod tests {
         let mut a = [0u8; 2];
         let mut l = [0u8; 2];
         let dim = dim_8x8();
-        mask_edges_part(&mut masks, 0, 0, 2, 2, TxPartition::None, &dim, 3, 3, &mut a, &mut l);
+        mask_edges_part(
+            &mut masks,
+            0,
+            0,
+            2,
+            2,
+            TxPartition::None,
+            &dim,
+            3,
+            3,
+            &mut a,
+            &mut l,
+        );
         assert_eq!(a[0], 1);
         assert_eq!(a[1], 1);
         assert_eq!(l[0], 1);
@@ -669,7 +779,11 @@ mod tests {
         mask_subpu_edges(&mut masks, 0, 0, 8, 4, 1, 1, 4, 0, 15);
         assert_ne!(masks[0][4][1][0], 0);
         for row in &masks[1] {
-            for lvl in row { for s in lvl { assert_eq!(*s, 0); } }
+            for lvl in row {
+                for s in lvl {
+                    assert_eq!(*s, 0);
+                }
+            }
         }
     }
 
@@ -679,7 +793,11 @@ mod tests {
         mask_subpu_edges(&mut masks, 0, 0, 4, 8, 1, 1, 0, 4, 15);
         assert_ne!(masks[1][4][1][0], 0);
         for row in &masks[0] {
-            for lvl in row { for s in lvl { assert_eq!(*s, 0); } }
+            for lvl in row {
+                for s in lvl {
+                    assert_eq!(*s, 0);
+                }
+            }
         }
     }
 
@@ -810,7 +928,10 @@ mod tests {
             &mut masks,
             &b,
             BlockSize::Bs8x8,
-            0, 0, 64, 64,
+            0,
+            0,
+            64,
+            64,
             PixelLayout::I420,
             false,
             &mut a,
@@ -820,8 +941,12 @@ mod tests {
         );
         // intra block with skip_txfm=0 should set some mask bits
         // At minimum, outer edges should be marked
-        let has_any_mask = masks[0].iter().any(|row| row.iter().any(|col| col.iter().any(|&v| v != 0)))
-            || masks[1].iter().any(|row| row.iter().any(|col| col.iter().any(|&v| v != 0)));
+        let has_any_mask = masks[0]
+            .iter()
+            .any(|row| row.iter().any(|col| col.iter().any(|&v| v != 0)))
+            || masks[1]
+                .iter()
+                .any(|row| row.iter().any(|col| col.iter().any(|&v| v != 0)));
         assert!(has_any_mask);
     }
 }

@@ -43,7 +43,10 @@ mod tests {
                 for x in 0..16 {
                     assert!(w[m][y][x] < 255, "weight overflow at [{m}][{y}][{x}]");
                 }
-                assert!(w[m][y][0] > 0, "first column should be nonzero at [{m}][{y}]");
+                assert!(
+                    w[m][y][0] > 0,
+                    "first column should be nonzero at [{m}][{y}]"
+                );
             }
         }
     }

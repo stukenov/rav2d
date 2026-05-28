@@ -114,11 +114,17 @@ pub mod txtp {
     pub const FLIPDDT_ADST: u8 = txtp!(2, 5, 0);
 
     #[inline(always)]
-    pub const fn hor_1d(t: u8) -> u8 { t & 7 }
+    pub const fn hor_1d(t: u8) -> u8 {
+        t & 7
+    }
     #[inline(always)]
-    pub const fn ver_1d(t: u8) -> u8 { t >> 5 }
+    pub const fn ver_1d(t: u8) -> u8 {
+        t >> 5
+    }
     #[inline(always)]
-    pub const fn class(t: u8) -> u8 { (t >> 3) & 3 }
+    pub const fn class(t: u8) -> u8 {
+        (t >> 3) & 3
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -493,9 +499,9 @@ mod tests {
         assert_eq!(txtp::H_DCT, 0 | (2 << 3) | (1 << 5));
         assert_eq!(txtp::hor_1d(txtp::ADST_DCT), 0); // hor is DCT
         assert_eq!(txtp::ver_1d(txtp::ADST_DCT), 2); // ver is ADST
-        assert_eq!(txtp::class(txtp::V_DCT), 3);     // ClassV
-        assert_eq!(txtp::class(txtp::H_DCT), 2);     // ClassH
-        assert_eq!(txtp::class(txtp::IDTX), 0);      // Class2D
-        assert_eq!(txtp::class(txtp::IDTX_INV), 1);  // Class2DInv
+        assert_eq!(txtp::class(txtp::V_DCT), 3); // ClassV
+        assert_eq!(txtp::class(txtp::H_DCT), 2); // ClassH
+        assert_eq!(txtp::class(txtp::IDTX), 0); // Class2D
+        assert_eq!(txtp::class(txtp::IDTX_INV), 1); // Class2DInv
     }
 }

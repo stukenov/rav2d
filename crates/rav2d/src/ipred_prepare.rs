@@ -56,15 +56,19 @@ pub fn intra_prediction_edge(mode: u8) -> EdgeMask {
 }
 
 pub fn prepare_intra_edges_8bpc(
-    x: i32, y: i32,
-    w: i32, h: i32,
-    n_tr: i32, n_bl: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    n_tr: i32,
+    n_bl: i32,
     dst: &[u8],
     dst_off: usize,
     stride: usize,
     prefilter_toplevel_sb_edge: Option<&[u8]>,
     mode: u8,
-    tw4: i32, th4: i32,
+    tw4: i32,
+    th4: i32,
     intra_flags: i32,
     tl: &mut [u8],
     tl_o: usize,
@@ -103,8 +107,10 @@ pub fn prepare_intra_edges_8bpc(
                 };
             }
             tl_filter = (Z1_PRED..=Z3_PRED).contains(&mode)
-                && have_left && have_top
-                && mrl_idx == 0 && enable_edge_filter
+                && have_left
+                && have_top
+                && mrl_idx == 0
+                && enable_edge_filter
                 && tw4 + th4 >= 6;
         }
         0 => {
@@ -149,7 +155,11 @@ pub fn prepare_intra_edges_8bpc(
 
     let tw = (tw4 as usize) << 2;
     let th = (th4 as usize) << 2;
-    let diag_mrl_idx = if (Z1_PRED..=Z3_PRED).contains(&mode) { mrl_idx } else { 0 };
+    let diag_mrl_idx = if (Z1_PRED..=Z3_PRED).contains(&mode) {
+        mrl_idx
+    } else {
+        0
+    };
     let e_stride = (tw + th) * 2 + diag_mrl_idx * 3 + 1;
     let o = tl_o as isize;
 
@@ -273,7 +283,11 @@ pub fn prepare_intra_edges_8bpc(
                 }
             }
         } else {
-            let fill_val = if have_left { dst[dst_off - 1 - mrl_idx] } else { 127 };
+            let fill_val = if have_left {
+                dst[dst_off - 1 - mrl_idx]
+            } else {
+                127
+            };
             tl[top_base..top_base + sz].fill(fill_val);
             if mrl_mul {
                 let fill_val2 = if have_left { dst[dst_off - 1] } else { 127 };
@@ -298,13 +312,13 @@ pub fn prepare_intra_edges_8bpc(
         debug_assert!(diag_mrl_idx == mrl_idx);
         if have_top && have_left {
             for i in (-(mrl_idx as isize))..0 {
-                tl[(o + i) as usize] = top_buf[(dst_top_off as isize
-                    - mrl_idx as isize - 1
-                    + (-i) * top_stride_val as isize) as usize];
+                tl[(o + i) as usize] = top_buf[(dst_top_off as isize - mrl_idx as isize - 1
+                    + (-i) * top_stride_val as isize)
+                    as usize];
             }
             for i in 0..=mrl_idx as isize {
-                tl[(o + i) as usize] = top_buf[(dst_top_off as isize
-                    - mrl_idx as isize - 1 + i) as usize];
+                tl[(o + i) as usize] =
+                    top_buf[(dst_top_off as isize - mrl_idx as isize - 1 + i) as usize];
             }
         } else {
             let v = if have_left {
@@ -330,8 +344,8 @@ pub fn prepare_intra_edges_8bpc(
         };
 
         if tl_filter {
-            let c = tl[tl_o] as i32
-                + (tl[tl_o - 1] as i32 + tl[tl_o] as i32 + tl[tl_o + 1] as i32) * 5;
+            let c =
+                tl[tl_o] as i32 + (tl[tl_o - 1] as i32 + tl[tl_o] as i32 + tl[tl_o + 1] as i32) * 5;
             tl[tl_o] = ((c + 8) >> 4) as u8;
         }
     }
@@ -425,9 +439,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_LEFT_FLAG | ANGLE_HAS_TOP_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            0, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 0, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, IntraPredMode::DcPred as u8);
         assert_eq!(tl[o - 1], dst[dst_off - 1]);
@@ -448,9 +460,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_TOP_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            0, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 0, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, TOP_DC_PRED);
         assert_eq!(tl[o + 1], dst[dst_off - stride]);
@@ -464,9 +474,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_LEFT_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            0, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 0, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, LEFT_DC_PRED);
         assert_eq!(tl[o - 1], dst[dst_off - 1]);
@@ -479,9 +487,7 @@ mod tests {
         let mut tl = vec![0u8; 512];
         let o = 256usize;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            0, 1, 1, 0, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 0, 1, 1, 0, &mut tl, o,
         );
         assert_eq!(result, DC_128_PRED);
     }
@@ -494,9 +500,7 @@ mod tests {
         let o = 256usize;
         let flags = 45 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 2, 0,
-            &dst, dst_off, stride, None,
-            1, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 2, 0, &dst, dst_off, stride, None, 1, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, Z1_PRED);
         assert_eq!(tl[o + 1], dst[dst_off - stride]);
@@ -511,9 +515,7 @@ mod tests {
         let o = 256usize;
         let flags = 135 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            1, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 1, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, Z2_PRED);
     }
@@ -526,9 +528,7 @@ mod tests {
         let o = 256usize;
         let flags = 200 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 2,
-            &dst, dst_off, stride, None,
-            1, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 2, &dst, dst_off, stride, None, 1, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, Z3_PRED);
         assert_eq!(tl[o - 1], dst[dst_off - 1]);
@@ -543,9 +543,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_DIP_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 2, 2,
-            &dst, dst_off, stride, None,
-            0, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 2, 2, &dst, dst_off, stride, None, 0, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, DIP_PRED);
         assert_eq!(tl[o - 1], dst[dst_off - 1]);
@@ -561,9 +559,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_TOP_FLAG;
         prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            0, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 0, 1, 1, flags, &mut tl, o,
         );
         let top_val = dst[dst_off - stride];
         assert_eq!(tl[o + 1], top_val);
@@ -577,9 +573,7 @@ mod tests {
         let o = 256usize;
         let flags = 45 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_USE_EDGE_FILTER_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            1, 3, 3, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 1, 3, 3, flags, &mut tl, o,
         );
         assert_eq!(result, Z1_PRED);
         let raw_tl = dst[dst_off - stride - 1] as i32;
@@ -597,9 +591,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG;
         let result = prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            12, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 12, 1, 1, flags, &mut tl, o,
         );
         assert_eq!(result, IntraPredMode::PaethPred as u8);
         assert_eq!(tl[o], dst[dst_off - stride - 1]);
@@ -613,9 +605,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG;
         prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 0, 1,
-            &dst, dst_off, stride, None,
-            10, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 0, 1, &dst, dst_off, stride, None, 10, 1, 1, flags, &mut tl, o,
         );
         let th = 4usize;
         assert_eq!(tl[o - 1 - th], dst[dst_off + stride * th - 1]);
@@ -629,9 +619,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG;
         prepare_intra_edges_8bpc(
-            1, 1, 4, 4, 1, 0,
-            &dst, dst_off, stride, None,
-            11, 1, 1, flags, &mut tl, o,
+            1, 1, 4, 4, 1, 0, &dst, dst_off, stride, None, 11, 1, 1, flags, &mut tl, o,
         );
         let tw = 4usize;
         assert_eq!(tl[o + 1 + tw], dst[dst_off - stride + tw]);
@@ -645,9 +633,7 @@ mod tests {
         let o = 256usize;
         let flags = ANGLE_HAS_LEFT_FLAG | ANGLE_HAS_TOP_FLAG;
         prepare_intra_edges_8bpc(
-            1, 3, 4, 4, 0, 0,
-            &dst, dst_off, stride, None,
-            0, 1, 1, flags, &mut tl, o,
+            1, 3, 4, 4, 0, 0, &dst, dst_off, stride, None, 0, 1, 1, flags, &mut tl, o,
         );
         let px_have = imin(4, (4 - 3) << 2) as usize;
         assert_eq!(px_have, 4);

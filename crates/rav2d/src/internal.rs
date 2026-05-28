@@ -1,12 +1,12 @@
-use std::sync::atomic::{AtomicI32, AtomicU32};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU32};
 
 use crate::cdf::CdfContext;
 use crate::dsp::{DSPContext, PalDSPContext, RefmvsDSPContext};
 use crate::env::{BlockContext, SBEdgeCtx};
 use crate::headers::{
-    ContentInterpretation, ContentLightLevel, FilmGrainData, FrameHeader, MasteringDisplay,
-    SequenceHeader, WarpedMotionParams, MAX_SEGMENTS,
+    ContentInterpretation, ContentLightLevel, FilmGrainData, FrameHeader, MAX_SEGMENTS,
+    MasteringDisplay, SequenceHeader, WarpedMotionParams,
 };
 use crate::levels::{Av2Block, BlockSize, N_RECT_TX_SIZES, RefPair};
 use crate::lf_mask::{Av2Filter, Av2Restoration, Av2RestorationUnit};
@@ -58,7 +58,6 @@ pub struct NsWienerBank {
     pub bank_idx: [u8; 16],
     pub filter: [[[i8; 32]; 16]; 4],
 }
-
 
 pub struct TileState {
     pub cdf: CdfContext,
@@ -172,7 +171,6 @@ pub struct LoopFilterState {
     pub pc_subclass_lut: Vec<u8>,
     pub pc_filters: Vec<[i16; 13]>,
 }
-
 
 pub struct FrameContext {
     pub seq_hdr: Arc<SequenceHeader>,
@@ -337,7 +335,6 @@ pub struct RefState {
     pub refpoc: [u8; 7],
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,7 +348,10 @@ mod tests {
     #[test]
     fn test_pass_flags() {
         assert_eq!(PASS_ALL, 7);
-        assert_eq!(Pass::Entropy as u8 | Pass::MvRes as u8 | Pass::Recon as u8, 7);
+        assert_eq!(
+            Pass::Entropy as u8 | Pass::MvRes as u8 | Pass::Recon as u8,
+            7
+        );
     }
 
     #[test]

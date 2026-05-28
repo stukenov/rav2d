@@ -82,7 +82,9 @@ impl Default for SBEdgeCtx {
 pub fn reset_context(ctx: &mut BlockContext, keyframe: bool, is_tip_frame: bool) {
     ctx.tx_lpf_y.fill(3);
     ctx.tx_lpf_uv.fill(2);
-    if is_tip_frame { return; }
+    if is_tip_frame {
+        return;
+    }
     ctx.midx.fill(0xff);
     ctx.intra.fill(keyframe as u8);
     ctx.uvmode.fill(0); // DC_PRED
@@ -109,11 +111,7 @@ pub fn reset_context(ctx: &mut BlockContext, keyframe: bool, is_tip_frame: bool)
 }
 
 #[inline(always)]
-pub fn get_intra_ctx(
-    nx: [&BlockContext; 2],
-    xoff: [usize; 2],
-    n_ctx: i32,
-) -> i32 {
+pub fn get_intra_ctx(nx: [&BlockContext; 2], xoff: [usize; 2], n_ctx: i32) -> i32 {
     if n_ctx == 0 {
         return 0;
     }
@@ -187,12 +185,10 @@ pub fn get_warpmv_2d(
 ) -> MvXY {
     let x = bx4 * 4 + bw4 * 2 - 1;
     let y = by4 * 4 + bh4 * 2 - 1;
-    let xc = (matrix[2] as i64 - (1 << 16)) * x as i64
-        + matrix[3] as i64 * y as i64
-        + matrix[0] as i64;
-    let yc = (matrix[5] as i64 - (1 << 16)) * y as i64
-        + matrix[4] as i64 * x as i64
-        + matrix[1] as i64;
+    let xc =
+        (matrix[2] as i64 - (1 << 16)) * x as i64 + matrix[3] as i64 * y as i64 + matrix[0] as i64;
+    let yc =
+        (matrix[5] as i64 - (1 << 16)) * y as i64 + matrix[4] as i64 * x as i64 + matrix[1] as i64;
     let not_epel = (mv_precision < 6) as i32;
     let shift = 13 + not_epel;
     let rnd = (1i64 << shift) >> 1;
@@ -230,7 +226,12 @@ pub fn get_gmv_2d(
         WarpedMotionType::Affine | WarpedMotionType::RotZoom => {
             let mut res = get_warpmv_2d(
                 &gmv.matrix,
-                bx4, by4, bw4, bh4, iw4, ih4,
+                bx4,
+                by4,
+                bw4,
+                bh4,
+                iw4,
+                ih4,
                 hdr.mv_precision as i32 + 3,
             );
             if hdr.force_integer_mv != 0 {
@@ -304,14 +305,8 @@ pub fn get_partition2_ctx(
 }
 
 #[inline(always)]
-pub fn get_filter_ctx(
-    nb: [&BlockContext; 2],
-    boff: [i32; 2],
-    r: RefPair,
-) -> i32 {
-    let (r_ref, comp) = unsafe {
-        (r.r[0], (r.r[1] != -1) as i32)
-    };
+pub fn get_filter_ctx(nb: [&BlockContext; 2], boff: [i32; 2], r: RefPair) -> i32 {
+    let (r_ref, comp) = unsafe { (r.r[0], (r.r[1] != -1) as i32) };
     let flt0 = if boff[0] != -1 {
         let i = boff[0] as usize;
         if nb[0].r#ref[0][i] == r_ref || nb[0].r#ref[1][i] == r_ref {
@@ -343,12 +338,7 @@ pub fn get_filter_ctx(
 }
 
 #[inline(always)]
-pub fn get_comp_ctx(
-    nx: [&BlockContext; 2],
-    xoff: [usize; 2],
-    n_ctx: i32,
-    refdir: &[i8],
-) -> i32 {
+pub fn get_comp_ctx(nx: [&BlockContext; 2], xoff: [usize; 2], n_ctx: i32, refdir: &[i8]) -> i32 {
     match n_ctx {
         2 => {
             let refa2 = nx[0].r#ref[1][xoff[0]];
@@ -436,15 +426,19 @@ pub fn get_warp_ctx(
 }
 
 const NEWMV0_MODE_MASK: u32 =
-    (1 << 15) | (1 << 20) | (1 << 22) | (1 << 23) |
-    (1 << 26) | (1 << 27) | (1 << 28);
+    (1 << 15) | (1 << 20) | (1 << 22) | (1 << 23) | (1 << 26) | (1 << 27) | (1 << 28);
 
-const NEWMV1_MODE_MASK: u32 =
-    (1 << 19) | (1 << 22) | (1 << 25) | (1 << 27);
+const NEWMV1_MODE_MASK: u32 = (1 << 19) | (1 << 22) | (1 << 25) | (1 << 27);
 
-const NEWMV_COMP_MODE_MASK: u32 =
-    (1 << 15) | (1 << 19) | (1 << 20) | (1 << 22) | (1 << 23) |
-    (1 << 25) | (1 << 26) | (1 << 27) | (1 << 28);
+const NEWMV_COMP_MODE_MASK: u32 = (1 << 15)
+    | (1 << 19)
+    | (1 << 20)
+    | (1 << 22)
+    | (1 << 23)
+    | (1 << 25)
+    | (1 << 26)
+    | (1 << 27)
+    | (1 << 28);
 
 #[inline(always)]
 pub fn get_snglref_ctx(
@@ -513,9 +507,7 @@ pub fn get_compref_ctx(
 
     macro_rules! add_matching {
         ($dir:expr, $cnt:expr, $idx:expr) => {
-            if $dir.r#ref[0][$idx] == TIP_FRAME as i8
-                && tip0 == ref0 && tip1 == ref1
-            {
+            if $dir.r#ref[0][$idx] == TIP_FRAME as i8 && tip0 == ref0 && tip1 == ref1 {
                 $cnt += 1;
                 newmv += ($dir.mode[$idx] == 15) as i32; // NEWMV
             } else if $dir.r#ref[0][$idx] == ref0 && $dir.r#ref[1][$idx] == ref1 {

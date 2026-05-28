@@ -50,7 +50,8 @@ fn ccso_padding_8bpc(
             let v = if src_y < 0 {
                 top[(top_off as i32 + src_x + (2 + src_y) * src_stride as i32) as usize]
             } else if src_y >= h as i32 {
-                bottom[(bottom_off as i32 + src_x + (src_y - h as i32) * src_stride as i32) as usize]
+                bottom
+                    [(bottom_off as i32 + src_x + (src_y - h as i32) * src_stride as i32) as usize]
             } else if src_x < 0 {
                 left[src_y as usize][(2 + src_x) as usize]
             } else {
@@ -92,10 +93,20 @@ pub fn ccso_prep_8bpc(
     let o = 2 * tmp_stride + 2;
 
     ccso_padding_8bpc(
-        &mut tmp_buf, tmp_stride, o,
-        src, src_stride, src_off,
-        left, top, top_off, bottom, bottom_off,
-        w << ss_hor, h << ss_ver, edges,
+        &mut tmp_buf,
+        tmp_stride,
+        o,
+        src,
+        src_stride,
+        src_off,
+        left,
+        top,
+        top_off,
+        bottom,
+        bottom_off,
+        w << ss_hor,
+        h << ss_ver,
+        edges,
     );
 
     for y in 0..h {
@@ -109,11 +120,13 @@ pub fn ccso_prep_8bpc(
             } else {
                 let cls0 = ccso_score(
                     tmp_buf[(ti as isize + luma_offset) as usize] as i32 - c,
-                    quant_step, edge_clf,
+                    quant_step,
+                    edge_clf,
                 );
                 let cls1 = ccso_score(
                     tmp_buf[(ti as isize - luma_offset) as usize] as i32 - c,
-                    quant_step, edge_clf,
+                    quant_step,
+                    edge_clf,
                 );
                 dst[y * dst_stride + x] = ((cls0 << 5) | (cls1 << 3)) as u8 | band;
             }
@@ -146,7 +159,8 @@ pub fn ccso_add_8bpc(
                         let offset_idx = (7 & (offset_idxs[byte_idx] >> (4 * half_idx))) as usize;
                         dst[y * dst_stride + x] = iclip(
                             dst[y * dst_stride + x] as i32 + offset_lut[offset_idx] as i32,
-                            0, 255,
+                            0,
+                            255,
                         ) as u8;
                     }
                 }
@@ -197,11 +211,26 @@ mod tests {
         let bottom = vec![128u8; 32];
         let mut dst = vec![0u8; 64];
         ccso_prep_8bpc(
-            &mut dst, 8, &src, 16, 0,
-            &left, &top, 2, &bottom, 2,
-            4, 0, 10, 0, true,
+            &mut dst,
+            8,
+            &src,
+            16,
+            0,
+            &left,
+            &top,
+            2,
+            &bottom,
+            2,
+            4,
+            0,
+            10,
+            0,
+            true,
             CDEF_HAVE_TOP | CDEF_HAVE_BOTTOM | CDEF_HAVE_LEFT | CDEF_HAVE_RIGHT,
-            8, 8, 0, 0,
+            8,
+            8,
+            0,
+            0,
         );
         for &v in &dst[..64] {
             assert_eq!(v, 128 >> (8 - 4));
@@ -216,11 +245,26 @@ mod tests {
         let bottom = vec![128u8; 32];
         let mut dst = vec![0u8; 64];
         ccso_prep_8bpc(
-            &mut dst, 8, &src, 16, 0,
-            &left, &top, 2, &bottom, 2,
-            4, 0, 10, 0, false,
+            &mut dst,
+            8,
+            &src,
+            16,
+            0,
+            &left,
+            &top,
+            2,
+            &bottom,
+            2,
+            4,
+            0,
+            10,
+            0,
+            false,
             CDEF_HAVE_TOP | CDEF_HAVE_BOTTOM | CDEF_HAVE_LEFT | CDEF_HAVE_RIGHT,
-            8, 8, 0, 0,
+            8,
+            8,
+            0,
+            0,
         );
         for &v in &dst[..64] {
             let band = v & 0x1F;
@@ -235,7 +279,17 @@ mod tests {
         let offset_idxs = vec![0x21u8; 8];
         let offset_lut = [0i8, 5, -5, 10, -10, 15, -15, 20];
         let ll_mask = vec![[0u16; 4]; 1];
-        ccso_add_8bpc(&mut dst, 4, &idx, 4, &offset_idxs, &offset_lut, 4, 4, &ll_mask);
+        ccso_add_8bpc(
+            &mut dst,
+            4,
+            &idx,
+            4,
+            &offset_idxs,
+            &offset_lut,
+            4,
+            4,
+            &ll_mask,
+        );
         assert_eq!(dst[0], 133);
     }
 
@@ -246,7 +300,17 @@ mod tests {
         let offset_idxs = vec![0u8; 8];
         let offset_lut = [10i8; 8];
         let ll_mask = vec![[0xFFFFu16; 4]; 1];
-        ccso_add_8bpc(&mut dst, 4, &idx, 4, &offset_idxs, &offset_lut, 4, 4, &ll_mask);
+        ccso_add_8bpc(
+            &mut dst,
+            4,
+            &idx,
+            4,
+            &offset_idxs,
+            &offset_lut,
+            4,
+            4,
+            &ll_mask,
+        );
         assert!(dst.iter().all(|&v| v == 128));
     }
 

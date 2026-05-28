@@ -33,7 +33,9 @@ fn main() {
         return;
     }
 
-    eprintln!("dav2d not found. Build it first: cd dav2d && mkdir build && cd build && meson setup .. && ninja");
+    eprintln!(
+        "dav2d not found. Build it first: cd dav2d && mkdir build && cd build && meson setup .. && ninja"
+    );
     std::process::exit(1);
 }
 

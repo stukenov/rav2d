@@ -3,24 +3,23 @@ use crate::ctx::{memset_pow2, set_ctx};
 use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::env::{BlockContext, get_partition_ctx, get_partition2_ctx, warp_type};
 use crate::headers::{
-    AdaptiveBoolean, FrameHeader, NSWienerPlane, RestorationType,
-    WarpedMotionParams, WarpedMotionType, MAX_SEGMENTS,
+    AdaptiveBoolean, FrameHeader, MAX_SEGMENTS, NSWienerPlane, RestorationType, WarpedMotionParams,
+    WarpedMotionType,
 };
 use crate::internal::{LoopFilterState, NsWienerBank, Pass, ScalableMotionParams};
-use crate::lf_mask::Av2RestorationUnit;
 use crate::intops::{apply_sign64, iclip, imax, imin, inv_recenter};
 use crate::levels::{
-    Av2Block, BlockPartition, BlockSize, CFL_PRED, CompInterPredMode, Mv, MvXY,
-    RefPair, TxPartition, N_BS_SIZES, INVALID_MV, InterPredMode, MotionMode, TIP_FRAME,
+    Av2Block, BlockPartition, BlockSize, CFL_PRED, CompInterPredMode, INVALID_MV, InterPredMode,
+    MotionMode, Mv, MvXY, N_BS_SIZES, RefPair, TIP_FRAME, TxPartition,
 };
-use crate::pal::pal_idx_finish;
+use crate::lf_mask::Av2RestorationUnit;
 use crate::msac::MsacContext;
+use crate::pal::pal_idx_finish;
 use crate::quantizer::dq_lookup;
 use crate::refmvs;
 use crate::tables::{
-    BLOCK_DIMENSIONS, DEFAULT_WM_PARAMS,
-    NS_WIENER_COEF_RANGE_Y, NS_WIENER_COEF_RANGE_UV,
-    SUBSET_MASKS_Y, SUBSET_MASKS_UV,
+    BLOCK_DIMENSIONS, DEFAULT_WM_PARAMS, NS_WIENER_COEF_RANGE_UV, NS_WIENER_COEF_RANGE_Y,
+    SUBSET_MASKS_UV, SUBSET_MASKS_Y,
 };
 use crate::warpmv::{find_affine_int, get_shear_params, set_affine_mv2d};
 
@@ -144,7 +143,11 @@ pub fn init_quant_tables(
     qidx: i32,
     dq: &mut [[[u32; 2]; 3]; MAX_SEGMENTS],
 ) {
-    let n = if frame_hdr.segmentation.enabled != 0 { 8 } else { 1 };
+    let n = if frame_hdr.segmentation.enabled != 0 {
+        8
+    } else {
+        1
+    };
     for i in 0..n {
         let yac = if frame_hdr.segmentation.enabled != 0 {
             qidx + frame_hdr.segmentation.d.delta_q[i] as i32
@@ -304,16 +307,11 @@ pub fn setup_tile_bounds(
     }
 }
 
-pub fn setup_tile_wiener_banks(
-    ts: &mut crate::internal::TileState,
-    frame_hdr: &FrameHeader,
-) {
+pub fn setup_tile_wiener_banks(ts: &mut crate::internal::TileState, frame_hdr: &FrameHeader) {
     use crate::headers::RestorationType;
     for pl in 0..3 {
         let rtype = frame_hdr.restoration.p[pl].restoration_type;
-        if rtype == RestorationType::NsWiener as u8
-            || rtype == RestorationType::Switchable as u8
-        {
+        if rtype == RestorationType::NsWiener as u8 || rtype == RestorationType::Switchable as u8 {
             let n_classes = frame_hdr.restoration.p[pl].ns.num_classes as usize;
             init_ns_wiener_bank(&mut ts.ns_wiener_bank[pl], pl, n_classes);
         }
@@ -345,7 +343,17 @@ pub fn setup_tile(
     ts.msac_buf = data.to_vec();
     ts.tile_start_off = tile_start_off;
 
-    setup_tile_bounds(ts, tile_row, tile_col, col_start_sb, row_start_sb, sb_shift, bw, bh, n_tc);
+    setup_tile_bounds(
+        ts,
+        tile_row,
+        tile_col,
+        col_start_sb,
+        row_start_sb,
+        sb_shift,
+        bw,
+        bh,
+        n_tc,
+    );
     setup_tile_wiener_banks(ts, frame_hdr);
 }
 
@@ -501,10 +509,10 @@ pub static SIZE_GROUP: [u8; N_BS_SIZES] = {
 
 // { Y+U+V, Y+U } multiplier per pixel layout
 pub static SS_SIZE_MUL: [[u8; 2]; 4] = [
-    [4, 4],   // I400
-    [6, 5],   // I420
-    [8, 6],   // I422
-    [12, 8],  // I444
+    [4, 4],  // I400
+    [6, 5],  // I420
+    [8, 6],  // I422
+    [12, 8], // I444
 ];
 
 // TX partition size group per block size
@@ -663,20 +671,16 @@ pub static REORDERED_NONDIR_Y_MODE: [u8; 5] = [0, 9, 10, 11, 12];
 pub static REORDERED_DIR_Y_MODE: [u8; 8] = [3, 8, 1, 5, 4, 6, 2, 7];
 
 pub static DEFAULT_MODE_LIST_Y: [u8; 56] = [
-    17, 45, 3, 10, 24, 31, 38, 52,
-    15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
-    16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53,
-    14, 20, 42, 48, 0, 6, 7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
+    17, 45, 3, 10, 24, 31, 38, 52, 15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54, 16,
+    18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53, 14, 20, 42, 48, 0, 6, 7, 13, 21, 27,
+    28, 34, 35, 41, 49, 55,
 ];
 
 pub static DEFAULT_MODE_LIST_UV: [u8; 8] = [1, 2, 3, 4, 8, 5, 6, 7];
 
 pub static INTRA_DIR_MODE_Y_TO_UV_IDX: [u8; 8] = [2, 4, 0, 5, 3, 6, 1, 7];
 
-pub static MV_PREC_TBL: [[u8; 3]; 2] = [
-    [3, 1, 0],
-    [4, 3, 1],
-];
+pub static MV_PREC_TBL: [[u8; 3]; 2] = [[3, 1, 0], [4, 3, 1]];
 
 use crate::levels::N_PARTITIONS;
 
@@ -695,26 +699,26 @@ pub static PARTITION_LIM: [[u8; 2]; N_PARTITIONS] = [
 ];
 
 pub static WEDGE_ANGLE_DIST2IDX: [[i8; 4]; 20] = [
-    [-1,  0,  1,  2],  // WEDGE_0
-    [ 3,  4,  5,  6],  // WEDGE_14
-    [ 7,  8,  9, 10],  // WEDGE_27
-    [11, 12, 13, 14],  // WEDGE_45
-    [15, 16, 17, 18],  // WEDGE_63
-    [-1, 19, 20, 21],  // WEDGE_90
-    [22, 23, 24, 25],  // WEDGE_117
-    [26, 27, 28, 29],  // WEDGE_135
-    [30, 31, 32, 33],  // WEDGE_153
-    [34, 35, 36, 37],  // WEDGE_166
-    [-1, 38, 39, 40],  // WEDGE_180
-    [-1, 41, 42, 43],  // WEDGE_194
-    [-1, 44, 45, 46],  // WEDGE_207
-    [-1, 47, 48, 49],  // WEDGE_225
-    [-1, 50, 51, 52],  // WEDGE_243
-    [-1, 53, 54, 55],  // WEDGE_270
-    [-1, 56, 57, 58],  // WEDGE_297
-    [-1, 59, 60, 61],  // WEDGE_315
-    [-1, 62, 63, 64],  // WEDGE_333
-    [-1, 65, 66, 67],  // WEDGE_346
+    [-1, 0, 1, 2],    // WEDGE_0
+    [3, 4, 5, 6],     // WEDGE_14
+    [7, 8, 9, 10],    // WEDGE_27
+    [11, 12, 13, 14], // WEDGE_45
+    [15, 16, 17, 18], // WEDGE_63
+    [-1, 19, 20, 21], // WEDGE_90
+    [22, 23, 24, 25], // WEDGE_117
+    [26, 27, 28, 29], // WEDGE_135
+    [30, 31, 32, 33], // WEDGE_153
+    [34, 35, 36, 37], // WEDGE_166
+    [-1, 38, 39, 40], // WEDGE_180
+    [-1, 41, 42, 43], // WEDGE_194
+    [-1, 44, 45, 46], // WEDGE_207
+    [-1, 47, 48, 49], // WEDGE_225
+    [-1, 50, 51, 52], // WEDGE_243
+    [-1, 53, 54, 55], // WEDGE_270
+    [-1, 56, 57, 58], // WEDGE_297
+    [-1, 59, 60, 61], // WEDGE_315
+    [-1, 62, 63, 64], // WEDGE_333
+    [-1, 65, 66, 67], // WEDGE_346
 ];
 
 #[derive(Clone, Copy)]
@@ -727,51 +731,60 @@ const I: i8 = -1; // BS_INVALID shorthand
 use BlockSize::*;
 
 pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
-    let mut t = [PartitionConstants { part: [[I; 4]; 2], ctx: [I; 2] }; N_BS_SIZES];
+    let mut t = [PartitionConstants {
+        part: [[I; 4]; 2],
+        ctx: [I; 2],
+    }; N_BS_SIZES];
 
     t[Bs256x256 as usize] = PartitionConstants {
-        part: [[Bs256x128 as i8, I, I, Bs128x128 as i8],
-               [Bs128x256 as i8, I, I, Bs128x128 as i8]],
+        part: [
+            [Bs256x128 as i8, I, I, Bs128x128 as i8],
+            [Bs128x256 as i8, I, I, Bs128x128 as i8],
+        ],
         ctx: [9, 12],
     };
     t[Bs256x128 as usize] = PartitionConstants {
-        part: [[I, I, I, I],
-               [Bs128x128 as i8, I, I, I]],
+        part: [[I, I, I, I], [Bs128x128 as i8, I, I, I]],
         ctx: [8, I],
     };
     t[Bs128x256 as usize] = PartitionConstants {
-        part: [[Bs128x128 as i8, I, I, I],
-               [I, I, I, I]],
+        part: [[Bs128x128 as i8, I, I, I], [I, I, I, I]],
         ctx: [7, I],
     };
     t[Bs128x128 as usize] = PartitionConstants {
-        part: [[Bs128x64 as i8, I, I, Bs64x64 as i8],
-               [Bs64x128 as i8, I, I, Bs64x64 as i8]],
+        part: [
+            [Bs128x64 as i8, I, I, Bs64x64 as i8],
+            [Bs64x128 as i8, I, I, Bs64x64 as i8],
+        ],
         ctx: [6, 9],
     };
     t[Bs128x64 as usize] = PartitionConstants {
-        part: [[I, I, I, I],
-               [Bs64x64 as i8, I, I, I]],
+        part: [[I, I, I, I], [Bs64x64 as i8, I, I, I]],
         ctx: [5, I],
     };
     t[Bs64x128 as usize] = PartitionConstants {
-        part: [[Bs64x64 as i8, I, I, I],
-               [I, I, I, I]],
+        part: [[Bs64x64 as i8, I, I, I], [I, I, I, I]],
         ctx: [4, I],
     };
     t[Bs64x64 as usize] = PartitionConstants {
-        part: [[Bs64x32 as i8, Bs64x16 as i8, Bs64x8 as i8, Bs32x32 as i8],
-               [Bs32x64 as i8, Bs16x64 as i8, Bs8x64 as i8, Bs32x32 as i8]],
+        part: [
+            [Bs64x32 as i8, Bs64x16 as i8, Bs64x8 as i8, Bs32x32 as i8],
+            [Bs32x64 as i8, Bs16x64 as i8, Bs8x64 as i8, Bs32x32 as i8],
+        ],
         ctx: [3, 6],
     };
     t[Bs64x32 as usize] = PartitionConstants {
-        part: [[Bs64x16 as i8, Bs64x8 as i8, Bs64x4 as i8, Bs32x16 as i8],
-               [Bs32x32 as i8, Bs16x32 as i8, Bs8x32 as i8, Bs32x16 as i8]],
+        part: [
+            [Bs64x16 as i8, Bs64x8 as i8, Bs64x4 as i8, Bs32x16 as i8],
+            [Bs32x32 as i8, Bs16x32 as i8, Bs8x32 as i8, Bs32x16 as i8],
+        ],
         ctx: [3, 5],
     };
     t[Bs64x16 as usize] = PartitionConstants {
-        part: [[Bs64x8 as i8, Bs64x4 as i8, I, Bs32x8 as i8],
-               [Bs32x16 as i8, Bs16x16 as i8, Bs8x16 as i8, Bs32x8 as i8]],
+        part: [
+            [Bs64x8 as i8, Bs64x4 as i8, I, Bs32x8 as i8],
+            [Bs32x16 as i8, Bs16x16 as i8, Bs8x16 as i8, Bs32x8 as i8],
+        ],
         ctx: [15, 14],
     };
     t[Bs64x8 as usize] = PartitionConstants {
@@ -783,23 +796,31 @@ pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
         ctx: [0, I],
     };
     t[Bs32x64 as usize] = PartitionConstants {
-        part: [[Bs32x32 as i8, Bs32x16 as i8, Bs32x8 as i8, Bs16x32 as i8],
-               [Bs16x64 as i8, Bs8x64 as i8, Bs4x64 as i8, Bs16x32 as i8]],
+        part: [
+            [Bs32x32 as i8, Bs32x16 as i8, Bs32x8 as i8, Bs16x32 as i8],
+            [Bs16x64 as i8, Bs8x64 as i8, Bs4x64 as i8, Bs16x32 as i8],
+        ],
         ctx: [3, 4],
     };
     t[Bs32x32 as usize] = PartitionConstants {
-        part: [[Bs32x16 as i8, Bs32x8 as i8, Bs32x4 as i8, Bs16x16 as i8],
-               [Bs16x32 as i8, Bs8x32 as i8, Bs4x32 as i8, Bs16x16 as i8]],
+        part: [
+            [Bs32x16 as i8, Bs32x8 as i8, Bs32x4 as i8, Bs16x16 as i8],
+            [Bs16x32 as i8, Bs8x32 as i8, Bs4x32 as i8, Bs16x16 as i8],
+        ],
         ctx: [2, 3],
     };
     t[Bs32x16 as usize] = PartitionConstants {
-        part: [[Bs32x8 as i8, Bs32x4 as i8, I, Bs16x8 as i8],
-               [Bs16x16 as i8, Bs8x16 as i8, Bs4x16 as i8, Bs16x8 as i8]],
+        part: [
+            [Bs32x8 as i8, Bs32x4 as i8, I, Bs16x8 as i8],
+            [Bs16x16 as i8, Bs8x16 as i8, Bs4x16 as i8, Bs16x8 as i8],
+        ],
         ctx: [2, 2],
     };
     t[Bs32x8 as usize] = PartitionConstants {
-        part: [[Bs32x4 as i8, I, I, I],
-               [Bs16x8 as i8, Bs8x8 as i8, Bs4x8 as i8, Bs16x4 as i8]],
+        part: [
+            [Bs32x4 as i8, I, I, I],
+            [Bs16x8 as i8, Bs8x8 as i8, Bs4x8 as i8, Bs16x4 as i8],
+        ],
         ctx: [13, 14],
     };
     t[Bs32x4 as usize] = PartitionConstants {
@@ -807,28 +828,35 @@ pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
         ctx: [0, I],
     };
     t[Bs16x64 as usize] = PartitionConstants {
-        part: [[Bs16x32 as i8, Bs16x16 as i8, Bs16x8 as i8, Bs8x32 as i8],
-               [Bs8x64 as i8, Bs4x64 as i8, I, Bs8x32 as i8]],
+        part: [
+            [Bs16x32 as i8, Bs16x16 as i8, Bs16x8 as i8, Bs8x32 as i8],
+            [Bs8x64 as i8, Bs4x64 as i8, I, Bs8x32 as i8],
+        ],
         ctx: [14, 13],
     };
     t[Bs16x32 as usize] = PartitionConstants {
-        part: [[Bs16x16 as i8, Bs16x8 as i8, Bs16x4 as i8, Bs8x16 as i8],
-               [Bs8x32 as i8, Bs4x32 as i8, I, Bs8x16 as i8]],
+        part: [
+            [Bs16x16 as i8, Bs16x8 as i8, Bs16x4 as i8, Bs8x16 as i8],
+            [Bs8x32 as i8, Bs4x32 as i8, I, Bs8x16 as i8],
+        ],
         ctx: [2, 1],
     };
     t[Bs16x16 as usize] = PartitionConstants {
-        part: [[Bs16x8 as i8, Bs16x4 as i8, I, Bs8x8 as i8],
-               [Bs8x16 as i8, Bs4x16 as i8, I, Bs8x8 as i8]],
+        part: [
+            [Bs16x8 as i8, Bs16x4 as i8, I, Bs8x8 as i8],
+            [Bs8x16 as i8, Bs4x16 as i8, I, Bs8x8 as i8],
+        ],
         ctx: [1, 0],
     };
     t[Bs16x8 as usize] = PartitionConstants {
-        part: [[Bs16x4 as i8, I, I, I],
-               [Bs8x8 as i8, Bs4x8 as i8, I, Bs8x4 as i8]],
+        part: [
+            [Bs16x4 as i8, I, I, I],
+            [Bs8x8 as i8, Bs4x8 as i8, I, Bs8x4 as i8],
+        ],
         ctx: [1, 2],
     };
     t[Bs16x4 as usize] = PartitionConstants {
-        part: [[I, I, I, I],
-               [Bs8x4 as i8, I, I, I]],
+        part: [[I, I, I, I], [Bs8x4 as i8, I, I, I]],
         ctx: [11, I],
     };
     t[Bs8x64 as usize] = PartitionConstants {
@@ -836,23 +864,25 @@ pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
         ctx: [0, 0],
     };
     t[Bs8x32 as usize] = PartitionConstants {
-        part: [[Bs8x16 as i8, Bs8x8 as i8, Bs8x4 as i8, Bs4x16 as i8],
-               [Bs4x32 as i8, I, I, I]],
+        part: [
+            [Bs8x16 as i8, Bs8x8 as i8, Bs8x4 as i8, Bs4x16 as i8],
+            [Bs4x32 as i8, I, I, I],
+        ],
         ctx: [12, 13],
     };
     t[Bs8x16 as usize] = PartitionConstants {
-        part: [[Bs8x8 as i8, Bs8x4 as i8, I, Bs4x8 as i8],
-               [Bs4x16 as i8, I, I, I]],
+        part: [
+            [Bs8x8 as i8, Bs8x4 as i8, I, Bs4x8 as i8],
+            [Bs4x16 as i8, I, I, I],
+        ],
         ctx: [1, 1],
     };
     t[Bs8x8 as usize] = PartitionConstants {
-        part: [[Bs8x4 as i8, I, I, I],
-               [Bs4x8 as i8, I, I, I]],
+        part: [[Bs8x4 as i8, I, I, I], [Bs4x8 as i8, I, I, I]],
         ctx: [0, 0],
     };
     t[Bs8x4 as usize] = PartitionConstants {
-        part: [[I, I, I, I],
-               [Bs4x4 as i8, I, I, I]],
+        part: [[I, I, I, I], [Bs4x4 as i8, I, I, I]],
         ctx: [0, I],
     };
     t[Bs4x64 as usize] = PartitionConstants {
@@ -864,13 +894,11 @@ pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
         ctx: [0, I],
     };
     t[Bs4x16 as usize] = PartitionConstants {
-        part: [[Bs4x8 as i8, I, I, I],
-               [I, I, I, I]],
+        part: [[Bs4x8 as i8, I, I, I], [I, I, I, I]],
         ctx: [10, I],
     };
     t[Bs4x8 as usize] = PartitionConstants {
-        part: [[Bs4x4 as i8, I, I, I],
-               [I, I, I, I]],
+        part: [[Bs4x4 as i8, I, I, I], [I, I, I, I]],
         ctx: [0, I],
     };
     t[Bs4x4 as usize] = PartitionConstants {
@@ -900,10 +928,7 @@ pub static FSC_BSIZE_GROUPS: [u8; N_BS_SIZES] = {
     t
 };
 
-pub static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] = [
-    [8, 12, 4, 10, 6],
-    [8, 12, 4, 20, -4],
-];
+pub static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] = [[8, 12, 4, 10, 6], [8, 12, 4, 20, -4]];
 
 // indexed by inter_mode - CompInterPredMode::NearMvNewMv
 pub static AMVD_MODE_CONTEXT: [u8; 10] = {
@@ -924,8 +949,7 @@ pub static AMVD_MODE_CONTEXT: [u8; 10] = {
 
 pub fn read_wedge_idx(msac: &mut MsacContext, cdf_m: &mut CdfModeContext) -> i8 {
     let quad = msac.decode_symbol_adapt(cdf_m.wedge_quad(), 3) as usize;
-    let angle = 5 * quad
-        + msac.decode_symbol_adapt(cdf_m.wedge_angle(quad), 4) as usize;
+    let angle = 5 * quad + msac.decode_symbol_adapt(cdf_m.wedge_angle(quad), 4) as usize;
     let dist = if (angle.wrapping_sub(1)) >= 9 || angle == 5 {
         1 + msac.decode_symbol_adapt(cdf_m.wedge_dist2(), 2) as usize
     } else {
@@ -937,7 +961,8 @@ pub fn read_wedge_idx(msac: &mut MsacContext, cdf_m: &mut CdfModeContext) -> i8 
 pub fn decode_4way(msac: &mut MsacContext, r: i32, cdf: &mut [u16], n_bits: i32) -> i32 {
     debug_assert!(n_bits >= 4);
     let bin = msac.decode_symbol_adapt(cdf, 3) as i32;
-    let rem = msac.decode_bools_bypass((n_bits + bin + if bin == 0 { 1 } else { 0 } - 4) as u32) as i32;
+    let rem =
+        msac.decode_bools_bypass((n_bits + bin + if bin == 0 { 1 } else { 0 } - 4) as u32) as i32;
     let v = (if bin != 0 { 1 << (n_bits + bin - 4) } else { 0 }) + rem;
     let n = 1 << n_bits;
     if r * 2 <= n {
@@ -947,11 +972,7 @@ pub fn decode_4way(msac: &mut MsacContext, r: i32, cdf: &mut [u16], n_bits: i32)
     }
 }
 
-pub fn read_amvd_raw(
-    msac: &mut MsacContext,
-    amvd_joint: &mut [u16],
-    amvd_index: &mut [u16],
-) -> Mv {
+pub fn read_amvd_raw(msac: &mut MsacContext, amvd_joint: &mut [u16], amvd_index: &mut [u16]) -> Mv {
     let joint = msac.decode_symbol_adapt(amvd_joint, 3) as i32;
     if joint == 0 {
         return Mv { n: 0 };
@@ -983,7 +1004,8 @@ pub fn read_mv_residual(
     let mut sh_class;
     if msac.decode_bool_adapt(cdf_mv.shell_set()) != 0 {
         let h_syms2 = n_syms - h_syms;
-        sh_class = h_syms + 1
+        sh_class = h_syms
+            + 1
             + msac.decode_symbol_adapt(
                 cdf_mv.shell_upper(mv_prec as usize),
                 imin(h_syms2, 7) as usize,
@@ -992,17 +1014,13 @@ pub fn read_mv_residual(
             sh_class += msac.decode_bool_adapt(shell_tip) as i32;
         }
     } else {
-        sh_class = msac.decode_symbol_adapt(
-            cdf_mv.shell_lower(mv_prec as usize),
-            h_syms as usize,
-        ) as i32;
+        sh_class =
+            msac.decode_symbol_adapt(cdf_mv.shell_lower(mv_prec as usize), h_syms as usize) as i32;
     }
 
     let mut sh_index;
     if sh_class < 2 {
-        sh_index = msac.decode_bool_adapt(
-            cdf_mv.shell_offset_low(sh_class as usize),
-        ) as i32;
+        sh_index = msac.decode_bool_adapt(cdf_mv.shell_offset_low(sh_class as usize)) as i32;
     } else if sh_class == 2 {
         sh_index = msac.decode_bool_adapt(cdf_mv.shell_offset_cl2()) as i32;
         if sh_index != 0 {
@@ -1015,8 +1033,7 @@ pub fn read_mv_residual(
         sh_index = 0;
         let mut m = 1i32;
         for i in 0..sh_class {
-            sh_index |= m
-                * msac.decode_bool_adapt(cdf_mv.shell_offset_hi(i as usize)) as i32;
+            sh_index |= m * msac.decode_bool_adapt(cdf_mv.shell_offset_hi(i as usize)) as i32;
             m <<= 1;
         }
     }
@@ -1034,8 +1051,7 @@ pub fn read_mv_residual(
         if pair_index != 0 && sh_index >= 4 {
             pair_index += msac.decode_bool_adapt(cdf_mv.col_component(1)) as i32;
             if pair_index == 2 && sh_index >= 6 {
-                pair_index +=
-                    msac.decode_uniform((sh_index as u32 >> 1) - 1) as i32;
+                pair_index += msac.decode_uniform((sh_index as u32 >> 1) - 1) as i32;
             }
         }
     }
@@ -1043,11 +1059,11 @@ pub fn read_mv_residual(
     let sh = 6 - mv_prec;
     if pair_index * 2 == sh_index {
         let v = (sh_index >> 1) << sh;
-        Mv { c: MvXY { y: v, x: v } }
+        Mv {
+            c: MvXY { y: v, x: v },
+        }
     } else {
-        let b = msac.decode_bool_adapt(
-            cdf_mv.col_index(imin(sh_class, 3) as usize),
-        );
+        let b = msac.decode_bool_adapt(cdf_mv.col_index(imin(sh_class, 3) as usize));
         if b != 0 {
             Mv {
                 c: MvXY {
@@ -1082,11 +1098,15 @@ pub fn read_amvd(msac: &mut MsacContext, cdf_m: &mut CdfModeContext) -> Mv {
     let y = if joint & 2 != 0 {
         let s = msac.decode_symbol_adapt(cdf_m.amvd_index(0), 7) as i32;
         if s < 3 { 2 + s * 2 } else { 1 << s }
-    } else { 0 };
+    } else {
+        0
+    };
     let x = if joint & 1 != 0 {
         let s = msac.decode_symbol_adapt(cdf_m.amvd_index(1), 7) as i32;
         if s < 3 { 2 + s * 2 } else { 1 << s }
-    } else { 0 };
+    } else {
+        0
+    };
     Mv { c: MvXY { y, x } }
 }
 
@@ -1098,8 +1118,7 @@ pub fn read_pal_indices(
     pal_sz: i32,
     sz: &[i32; 4],
 ) -> i32 {
-    let dir = (imax(sz[2], sz[3]) < 64) as u32
-        & msac.decode_bool_bypass();
+    let dir = (imax(sz[2], sz[3]) < 64) as u32 & msac.decode_bool_bypass();
     let strides: [isize; 2] = if dir != 0 {
         [1, sz[2] as isize]
     } else {
@@ -1124,10 +1143,7 @@ pub fn read_pal_indices(
     } else {
         let mut prev_h = prev_v;
         for m in 1..lim2 {
-            let v = msac.decode_symbol_adapt(
-                cdf_m.pal_idx(pal_cdf_base, 0),
-                nsym,
-            ) as i32;
+            let v = msac.decode_symbol_adapt(cdf_m.pal_idx(pal_cdf_base, 0), nsym) as i32;
             prev_h = if v == 0 {
                 prev_h
             } else {
@@ -1147,11 +1163,12 @@ pub fn read_pal_indices(
                 scratch[dst] = scratch[src];
             }
         } else {
-            let v = msac.decode_symbol_adapt(
-                cdf_m.pal_idx(pal_cdf_base, 0),
-                nsym,
-            ) as i32;
-            let next_v = if v == 0 { prev_v } else { v - (v <= prev_v) as i32 };
+            let v = msac.decode_symbol_adapt(cdf_m.pal_idx(pal_cdf_base, 0), nsym) as i32;
+            let next_v = if v == 0 {
+                prev_v
+            } else {
+                v - (v <= prev_v) as i32
+            };
             scratch[off as usize] = next_v as u8;
 
             if copy == 1 {
@@ -1162,20 +1179,22 @@ pub fn read_pal_indices(
                 let mut prev_tl = prev_v;
                 let mut prev_l = next_v;
                 for m in 1..lim2 {
-                    let prev_t = scratch[(off - strides[0] + m as isize * strides[1]) as usize] as i32;
+                    let prev_t =
+                        scratch[(off - strides[0] + m as isize * strides[1]) as usize] as i32;
                     let ctx = if prev_t == prev_l {
                         3 + (prev_tl == prev_l) as usize
                     } else {
                         1 + (prev_t == prev_tl || prev_l == prev_tl) as usize
                     };
-                    let v = msac.decode_symbol_adapt(
-                        cdf_m.pal_idx(pal_cdf_base, ctx),
-                        nsym,
-                    ) as i32;
+                    let v = msac.decode_symbol_adapt(cdf_m.pal_idx(pal_cdf_base, ctx), nsym) as i32;
                     let p = match ctx {
                         1 => match v {
                             0 | 1 => {
-                                if v == dir as i32 { prev_l } else { prev_t }
+                                if v == dir as i32 {
+                                    prev_l
+                                } else {
+                                    prev_t
+                                }
                             }
                             2 => prev_tl,
                             _ => {
@@ -1204,12 +1223,15 @@ pub fn read_pal_indices(
                             1 => prev_tl,
                             _ => {
                                 let s = (prev_l < prev_tl) as i32;
-                                v - (v <= prev_l + s) as i32
-                                    - (v <= prev_tl + 1 - s) as i32
+                                v - (v <= prev_l + s) as i32 - (v <= prev_tl + 1 - s) as i32
                             }
                         },
                         4 => {
-                            if v == 0 { prev_l } else { v - (v <= prev_l) as i32 }
+                            if v == 0 {
+                                prev_l
+                            } else {
+                                v - (v <= prev_l) as i32
+                            }
                         }
                         _ => unreachable!(),
                     };
@@ -1223,7 +1245,14 @@ pub fn read_pal_indices(
         off += strides[0];
     }
 
-    pal_idx_finish(pal_out, scratch, sz[2] as usize, sz[3] as usize, sz[0] as usize, sz[1] as usize);
+    pal_idx_finish(
+        pal_out,
+        scratch,
+        sz[2] as usize,
+        sz[3] as usize,
+        sz[0] as usize,
+        sz[1] as usize,
+    );
     0
 }
 
@@ -1254,43 +1283,34 @@ pub fn read_tx_part(
         {
             let szctx = SIZE_GROUP[bs_idx] as usize;
             let inter = (b.is_intra == 0 || b.intrabc != 0) as usize;
-            b.tx_size_ll =
-                msac.decode_bool_adapt(cdf_m.txsz_lossless(szctx, inter)) as u8;
+            b.tx_size_ll = msac.decode_bool_adapt(cdf_m.txsz_lossless(szctx, inter)) as u8;
         }
-    } else if b.skip_txfm == 0
-        && txfm_switchable && bs != BlockSize::Bs4x4 && imax(bw4, bh4) <= 16 {
-            let inter = (b.is_intra == 0 || b.intrabc != 0) as usize;
-            let szctx = TX_PART_GROUP[bs_idx] as usize;
-            let is_split = msac.decode_bool_adapt(
-                cdf_m.tx_split(b.fsc as usize, inter, szctx),
-            );
-            if is_split != 0 {
-                if imin(bw4, bh4) >= 2 {
-                    let ctx = TX_TYPE_GROUP_VH[bs_idx] as usize;
-                    b.tx_part = 1
-                        + msac.decode_symbol_adapt(
-                            cdf_m.tx_part_2d(b.fsc as usize, inter, ctx),
-                            6,
-                        ) as u8;
-                } else if imax(bw4, bh4) >= 4 {
-                    let ctx = (bw4 >= 4) as usize;
-                    let tx_part_4way = msac.decode_bool_adapt(
-                        cdf_m.tx_part_1d(b.fsc as usize, inter, ctx),
-                    );
-                    b.tx_part =
-                        TxPartition::H as u8 + ctx as u8 + tx_part_4way as u8 * 2;
+    } else if b.skip_txfm == 0 && txfm_switchable && bs != BlockSize::Bs4x4 && imax(bw4, bh4) <= 16
+    {
+        let inter = (b.is_intra == 0 || b.intrabc != 0) as usize;
+        let szctx = TX_PART_GROUP[bs_idx] as usize;
+        let is_split = msac.decode_bool_adapt(cdf_m.tx_split(b.fsc as usize, inter, szctx));
+        if is_split != 0 {
+            if imin(bw4, bh4) >= 2 {
+                let ctx = TX_TYPE_GROUP_VH[bs_idx] as usize;
+                b.tx_part = 1 + msac
+                    .decode_symbol_adapt(cdf_m.tx_part_2d(b.fsc as usize, inter, ctx), 6)
+                    as u8;
+            } else if imax(bw4, bh4) >= 4 {
+                let ctx = (bw4 >= 4) as usize;
+                let tx_part_4way =
+                    msac.decode_bool_adapt(cdf_m.tx_part_1d(b.fsc as usize, inter, ctx));
+                b.tx_part = TxPartition::H as u8 + ctx as u8 + tx_part_4way as u8 * 2;
+            } else {
+                debug_assert!(bs == BlockSize::Bs4x8 || bs == BlockSize::Bs8x4);
+                b.tx_part = if bs == BlockSize::Bs4x8 {
+                    TxPartition::H as u8
                 } else {
-                    debug_assert!(
-                        bs == BlockSize::Bs4x8 || bs == BlockSize::Bs8x4
-                    );
-                    b.tx_part = if bs == BlockSize::Bs4x8 {
-                        TxPartition::H as u8
-                    } else {
-                        TxPartition::V as u8
-                    };
-                }
+                    TxPartition::V as u8
+                };
             }
         }
+    }
 }
 
 pub fn read_restoration_info(
@@ -1324,7 +1344,11 @@ pub fn read_restoration_info(
             cdf_m.rst_pc_wiener()
         };
         let t = msac.decode_bool_adapt(cdf);
-        lr.restoration_type = if t != 0 { frame_type as u8 } else { RestorationType::None as u8 };
+        lr.restoration_type = if t != 0 {
+            frame_type as u8
+        } else {
+            RestorationType::None as u8
+        };
     }
 
     if lr.restoration_type == RestorationType::NsWiener as u8 && ns_plane.frame_filters_on == 0 {
@@ -1347,7 +1371,11 @@ pub fn read_restoration_info(
             bank_refs[n] = r_idx;
         }
 
-        let masks: &[u32] = if is_uv != 0 { &SUBSET_MASKS_UV } else { &SUBSET_MASKS_Y };
+        let masks: &[u32] = if is_uv != 0 {
+            &SUBSET_MASKS_UV
+        } else {
+            &SUBSET_MASKS_Y
+        };
         let cf_range: &[[i8; 2]] = if is_uv != 0 {
             &NS_WIENER_COEF_RANGE_UV
         } else {
@@ -1376,9 +1404,7 @@ pub fn read_restoration_info(
                 s += 1;
             }
             let mask = masks[s];
-            let asym = is_uv != 0
-                && s != 0
-                && msac.decode_bool_adapt(cdf_m.wiener_ns_sym()) != 0;
+            let asym = is_uv != 0 && s != 0 && msac.decode_bool_adapt(cdf_m.wiener_ns_sym()) != 0;
 
             let ref_filter = &bank.filter[r][n];
             let mut i = 0usize;
@@ -1416,10 +1442,14 @@ pub fn read_restoration_info(
 
 pub fn derive_warpmv(
     rt: &refmvs::Tile,
-    bx: i32, by: i32,
-    have_top: bool, have_left: bool,
-    bw4: i32, bh4: i32,
-    w4: i32, h4: i32,
+    bx: i32,
+    by: i32,
+    have_top: bool,
+    have_left: bool,
+    bw4: i32,
+    bh4: i32,
+    w4: i32,
+    h4: i32,
     ref_idx: i8,
     mv: Mv,
     wmp: &mut WarpedMotionParams,
@@ -1435,13 +1465,17 @@ pub fn derive_warpmv(
             let bd = &BLOCK_DIMENSIONS[rp.bs as usize];
             let rmv = if rp.mf & 2 != 0 { &rp.lmv } else { &rp.mv };
             for n in 0..2usize {
-                if unsafe { rp.r#ref.r[n] } != ref_idx { continue; }
+                if unsafe { rp.r#ref.r[n] } != ref_idx {
+                    continue;
+                }
                 pts[np][0][0] = 16 * (2 * ($dx as i32) + ($sx as i32) * bd[0] as i32) - 8;
                 pts[np][0][1] = 16 * (2 * ($dy as i32) + ($sy as i32) * bd[1] as i32) - 8;
                 pts[np][1][0] = pts[np][0][0] + unsafe { rmv[n].c.x };
                 pts[np][1][1] = pts[np][0][1] + unsafe { rmv[n].c.y };
                 np += 1;
-                if np == 8 { break; }
+                if np == 8 {
+                    break;
+                }
             }
         }};
     }
@@ -1477,8 +1511,7 @@ pub fn derive_warpmv(
                 0
             };
             let tr_ext = (bx + bw4) & (sb_step - 1) != 0
-                && (rt.ra[ra_off + ((bx + bw4) >> 1) as usize].ox4 != 0
-                    || init_odd != 0);
+                && (rt.ra[ra_off + ((bx + bw4) >> 1) as usize].ox4 != 0 || init_odd != 0);
             let tr_ext_i = tr_ext as i32;
             while off < w4 + tr_ext_i && np < 8 {
                 let off8 = ra_off + ((bx + off) >> 1) as usize;
@@ -1496,9 +1529,7 @@ pub fn derive_warpmv(
             && (!is_not_sb_boundary
                 || ((bx + bw4) & (sb_step - 1) != 0
                     && unsafe {
-                        rt.r[((by - 1) & 63) as usize * 128
-                            + ((bx + bw4) & 127) as usize]
-                            .mv[0]
+                        rt.r[((by - 1) & 63) as usize * 128 + ((bx + bw4) & 127) as usize].mv[0]
                             .c
                             .y
                     } != INVALID_MV));
@@ -1537,9 +1568,7 @@ pub fn derive_warpmv(
             } else {
                 &rt.ra_tl
             };
-            if BLOCK_DIMENSIONS[r2.bs as usize][0] as i32 + init_odd
-                == r2.ox4 as i32 + 2
-            {
+            if BLOCK_DIMENSIONS[r2.bs as usize][0] as i32 + init_odd == r2.ox4 as i32 + 2 {
                 add_sample!(0, 0, -1, -1, r2);
             }
         }
@@ -1564,8 +1593,10 @@ pub fn derive_warpmv(
 
 pub fn extend_warpmv(
     rt: &refmvs::Tile,
-    bx: i32, by: i32,
-    x_off: i32, y_off: i32,
+    bx: i32,
+    by: i32,
+    x_off: i32,
+    y_off: i32,
     b_dim: &[u8],
     ref0: i8,
     mv0: Mv,
@@ -1616,11 +1647,7 @@ pub fn extend_warpmv(
         let m3 = ((px - apx + bh4 as i64 - (px < apx) as i64) >> sh) as i32;
         let m5 = ((py - apy + bh4 as i64 - (py < apy) as i64) >> sh) as i32;
         m[3] = iclip((m3 + 0x20 - (m3 < 0) as i32) & !0x3f, -0x7fc0, 0x7fc0);
-        m[5] = iclip(
-            (m5 + 0x20 - (m5 < 0x10000) as i32) & !0x3f,
-            0x8040,
-            0x17fc0,
-        );
+        m[5] = iclip((m5 + 0x20 - (m5 < 0x10000) as i32) & !0x3f, 0x8040, 0x17fc0);
     } else {
         debug_assert!(x_off == -1 || (by & (sb_step - 1)) == 0);
         let ax = bx * 4 - 1;
@@ -1629,11 +1656,7 @@ pub fn extend_warpmv(
         let lpy = m[4] as i64 * ax as i64 + m[5] as i64 * sy as i64 + m[1] as i64;
         let m2 = ((px - lpx + bw4 as i64 - (px < lpx) as i64) >> sh) as i32;
         let m4 = ((py - lpy + bw4 as i64 - (py < lpy) as i64) >> sh) as i32;
-        m[2] = iclip(
-            (m2 + 0x20 - (m2 < 0x10000) as i32) & !0x3f,
-            0x8040,
-            0x17fc0,
-        );
+        m[2] = iclip((m2 + 0x20 - (m2 < 0x10000) as i32) & !0x3f, 0x8040, 0x17fc0);
         m[4] = iclip((m4 + 0x20 - (m4 < 0) as i32) & !0x3f, -0x7fc0, 0x7fc0);
     }
 
@@ -1713,14 +1736,19 @@ pub struct SbFrameInfo {
 }
 
 fn get_snglref_ctx(
-    a: &BlockContext, l: &BlockContext,
-    yb4: usize, xb4: usize,
-    have_top: bool, have_left: bool,
-    have_top_right: bool, have_bottom_left: bool,
-    b_dim: &[u8], ref_idx: i8,
+    a: &BlockContext,
+    l: &BlockContext,
+    yb4: usize,
+    xb4: usize,
+    have_top: bool,
+    have_left: bool,
+    have_top_right: bool,
+    have_bottom_left: bool,
+    b_dim: &[u8],
+    ref_idx: i8,
 ) -> usize {
-    const NEWMV0_MASK: u32 = (1 << 15) | (1 << 20) | (1 << 22) | (1 << 23)
-        | (1 << 26) | (1 << 27) | (1 << 28);
+    const NEWMV0_MASK: u32 =
+        (1 << 15) | (1 << 20) | (1 << 22) | (1 << 23) | (1 << 26) | (1 << 27) | (1 << 28);
     const NEWMV1_MASK: u32 = (1 << 19) | (1 << 22) | (1 << 25) | (1 << 27);
 
     let mut row = 0i32;
@@ -1755,8 +1783,11 @@ fn get_snglref_ctx(
 }
 
 fn get_filter_ctx(
-    a: &BlockContext, l: &BlockContext,
-    nb_boff: &[i32; 2], ref0: i8, is_comp: bool,
+    a: &BlockContext,
+    l: &BlockContext,
+    nb_boff: &[i32; 2],
+    ref0: i8,
+    is_comp: bool,
 ) -> usize {
     const N_SWITCHABLE: u8 = 3;
     let comp_val = is_comp as usize * 4;
@@ -1765,15 +1796,23 @@ fn get_filter_ctx(
         let off = nb_boff[0] as usize;
         if l.r#ref[0][off] == ref0 || l.r#ref[1][off] == ref0 {
             l.filter[off]
-        } else { N_SWITCHABLE }
-    } else { N_SWITCHABLE };
+        } else {
+            N_SWITCHABLE
+        }
+    } else {
+        N_SWITCHABLE
+    };
 
     let flt1 = if nb_boff[1] != -1 {
         let off = nb_boff[1] as usize;
         if a.r#ref[0][off] == ref0 || a.r#ref[1][off] == ref0 {
             a.filter[off]
-        } else { N_SWITCHABLE }
-    } else { N_SWITCHABLE };
+        } else {
+            N_SWITCHABLE
+        }
+    } else {
+        N_SWITCHABLE
+    };
 
     if flt0 == flt1 || flt1 == N_SWITCHABLE {
         comp_val + flt0 as usize
@@ -1787,8 +1826,10 @@ fn get_filter_ctx(
 #[allow(unused)]
 fn decode_b(
     fi: &SbFrameInfo,
-    bx: i32, by: i32,
-    cbx: i32, cby: i32,
+    bx: i32,
+    by: i32,
+    cbx: i32,
+    cby: i32,
     intra_region: i32,
     _sdp_cfl_disallowed: i32,
     _pass: u8,
@@ -1820,14 +1861,27 @@ fn decode_b(
     let has_chroma = cbs != BlockSize::Invalid;
 
     let mut b = Av2Block::default();
-    if has_luma { b.bs = lbs as i8; }
-    if has_chroma { b.cbs = cbs as i8; }
+    if has_luma {
+        b.bs = lbs as i8;
+    }
+    if has_chroma {
+        b.cbs = cbs as i8;
+    }
 
     // Pre-compute cross-SB boundary neighbour context values.
     // The C code uses nx[2] pointers into a/l; here we read out
     // the values we need before any mutable operations.
-    let (nx_skip_mode, nx_skip_txfm, nx_intra, nx_intrabc, nx_xoff, n_ctx,
-         nx_ref0, nx_ref1, nx_amvd) = {
+    let (
+        nx_skip_mode,
+        nx_skip_txfm,
+        nx_intra,
+        nx_intrabc,
+        nx_xoff,
+        n_ctx,
+        nx_ref0,
+        nx_ref1,
+        nx_amvd,
+    ) = {
         let mut sm = [0u8; 2];
         let mut st = [0u8; 2];
         let mut intra_vals = [0u8; 2];
@@ -1842,7 +1896,11 @@ fn decode_b(
             let off = (by4 + bh4 as usize).saturating_sub(1);
             sm[0] = l.skip_mode[off];
             st[0] = l.skip_txfm[off];
-            intra_vals[0] = if l.intra[off] != 0 && l.intrabc[off] == 0 { 1 } else { 0 };
+            intra_vals[0] = if l.intra[off] != 0 && l.intrabc[off] == 0 {
+                1
+            } else {
+                0
+            };
             ibc_vals[0] = l.intrabc[off];
             r0[0] = l.r#ref[0][off];
             r1[0] = l.r#ref[1][off];
@@ -1854,7 +1912,11 @@ fn decode_b(
             let off = (bx4 + bw4 as usize).saturating_sub(1);
             sm[idx] = a.skip_mode[off];
             st[idx] = a.skip_txfm[off];
-            intra_vals[idx] = if a.intra[off] != 0 && a.intrabc[off] == 0 { 1 } else { 0 };
+            intra_vals[idx] = if a.intra[off] != 0 && a.intrabc[off] == 0 {
+                1
+            } else {
+                0
+            };
             ibc_vals[idx] = a.intrabc[off];
             r0[idx] = a.r#ref[0][off];
             r1[idx] = a.r#ref[1][off];
@@ -1865,7 +1927,11 @@ fn decode_b(
         if idx < 2 && have_left {
             sm[idx] = l.skip_mode[by4];
             st[idx] = l.skip_txfm[by4];
-            intra_vals[idx] = if l.intra[by4] != 0 && l.intrabc[by4] == 0 { 1 } else { 0 };
+            intra_vals[idx] = if l.intra[by4] != 0 && l.intrabc[by4] == 0 {
+                1
+            } else {
+                0
+            };
             ibc_vals[idx] = l.intrabc[by4];
             r0[idx] = l.r#ref[0][by4];
             r1[idx] = l.r#ref[1][by4];
@@ -1876,7 +1942,11 @@ fn decode_b(
         if idx < 2 {
             sm[idx] = a.skip_mode[bx4];
             st[idx] = a.skip_txfm[bx4];
-            intra_vals[idx] = if a.intra[bx4] != 0 && a.intrabc[bx4] == 0 { 1 } else { 0 };
+            intra_vals[idx] = if a.intra[bx4] != 0 && a.intrabc[bx4] == 0 {
+                1
+            } else {
+                0
+            };
             ibc_vals[idx] = a.intrabc[bx4];
             r0[idx] = a.r#ref[0][bx4];
             r1[idx] = a.r#ref[1][bx4];
@@ -1887,10 +1957,14 @@ fn decode_b(
                 st[1] = st[0];
                 intra_vals[1] = intra_vals[0];
                 ibc_vals[1] = ibc_vals[0];
-                r0[1] = r0[0]; r1[1] = r1[0]; amvd_v[1] = amvd_v[0];
+                r0[1] = r0[0];
+                r1[1] = r1[0];
+                amvd_v[1] = amvd_v[0];
                 xoff[1] = xoff[0];
             }
-            if have_top { idx += 1; }
+            if have_top {
+                idx += 1;
+            }
         }
         (sm, st, intra_vals, ibc_vals, xoff, idx, r0, r1, amvd_v)
     };
@@ -1928,50 +2002,85 @@ fn decode_b(
     // These are used by intrabc, FSC, MRL, multi_mrl, DIP, morph_pred.
     // boff[i] = -1 means unavailable.
     let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
-    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_boff) = if has_luma {
-        let mut fsc = [0u8; 2];
-        let mut mrl = [0u8; 2];
-        let mut mmrl = [0u8; 2];
-        let mut ibc = [0u8; 2];
-        let mut mid = [0xffu8; 2];
-        let mut mvp = [0u8; 2];
-        let mut mm = [0u8; 2];
-        let mut boff = [-1i32; 2];
-        let mut idx = 0usize;
+    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_boff) =
+        if has_luma {
+            let mut fsc = [0u8; 2];
+            let mut mrl = [0u8; 2];
+            let mut mmrl = [0u8; 2];
+            let mut ibc = [0u8; 2];
+            let mut mid = [0xffu8; 2];
+            let mut mvp = [0u8; 2];
+            let mut mm = [0u8; 2];
+            let mut boff = [-1i32; 2];
+            let mut idx = 0usize;
 
-        if have_left && bh4 == h4 {
-            let off = (by4 + bh4 as usize).saturating_sub(1);
-            fsc[0] = l.fsc[off]; mrl[0] = l.mrl[off]; mmrl[0] = l.multi_mrl[off];
-            ibc[0] = l.intrabc[off]; mid[0] = l.midx[off];
-            mvp[0] = l.mvprec[off]; mm[0] = l.motion_mode[off];
-            boff[0] = off as i32; idx += 1;
-        }
-        if have_top_in_sb && bw4 == w4 {
-            let off = (bx4 + bw4 as usize).saturating_sub(1);
-            fsc[idx] = a.fsc[off]; mrl[idx] = a.mrl[off]; mmrl[idx] = a.multi_mrl[off];
-            ibc[idx] = a.intrabc[off]; mid[idx] = a.midx[off];
-            mvp[idx] = a.mvprec[off]; mm[idx] = a.motion_mode[off];
-            boff[idx] = off as i32; idx += 1;
-        }
-        if have_left && idx < 2 {
-            fsc[idx] = l.fsc[by4]; mrl[idx] = l.mrl[by4]; mmrl[idx] = l.multi_mrl[by4];
-            ibc[idx] = l.intrabc[by4]; mid[idx] = l.midx[by4];
-            mvp[idx] = l.mvprec[by4]; mm[idx] = l.motion_mode[by4];
-            boff[idx] = by4 as i32; idx += 1;
-        }
-        if have_top_in_sb && idx < 2 {
-            fsc[idx] = a.fsc[bx4]; mrl[idx] = a.mrl[bx4]; mmrl[idx] = a.multi_mrl[bx4];
-            ibc[idx] = a.intrabc[bx4]; mid[idx] = a.midx[bx4];
-            mvp[idx] = a.mvprec[bx4]; mm[idx] = a.motion_mode[bx4];
-            boff[idx] = bx4 as i32;
-            if idx == 0 { fsc[1] = fsc[0]; mrl[1] = mrl[0]; mmrl[1] = mmrl[0];
-                          ibc[1] = ibc[0]; mid[1] = mid[0];
-                          mvp[1] = mvp[0]; mm[1] = mm[0]; }
-        }
-        (fsc, mrl, mmrl, ibc, mid, mvp, mm, boff)
-    } else {
-        ([0u8; 2], [0u8; 2], [0u8; 2], [0u8; 2], [0xffu8; 2], [0u8; 2], [0u8; 2], [-1i32; 2])
-    };
+            if have_left && bh4 == h4 {
+                let off = (by4 + bh4 as usize).saturating_sub(1);
+                fsc[0] = l.fsc[off];
+                mrl[0] = l.mrl[off];
+                mmrl[0] = l.multi_mrl[off];
+                ibc[0] = l.intrabc[off];
+                mid[0] = l.midx[off];
+                mvp[0] = l.mvprec[off];
+                mm[0] = l.motion_mode[off];
+                boff[0] = off as i32;
+                idx += 1;
+            }
+            if have_top_in_sb && bw4 == w4 {
+                let off = (bx4 + bw4 as usize).saturating_sub(1);
+                fsc[idx] = a.fsc[off];
+                mrl[idx] = a.mrl[off];
+                mmrl[idx] = a.multi_mrl[off];
+                ibc[idx] = a.intrabc[off];
+                mid[idx] = a.midx[off];
+                mvp[idx] = a.mvprec[off];
+                mm[idx] = a.motion_mode[off];
+                boff[idx] = off as i32;
+                idx += 1;
+            }
+            if have_left && idx < 2 {
+                fsc[idx] = l.fsc[by4];
+                mrl[idx] = l.mrl[by4];
+                mmrl[idx] = l.multi_mrl[by4];
+                ibc[idx] = l.intrabc[by4];
+                mid[idx] = l.midx[by4];
+                mvp[idx] = l.mvprec[by4];
+                mm[idx] = l.motion_mode[by4];
+                boff[idx] = by4 as i32;
+                idx += 1;
+            }
+            if have_top_in_sb && idx < 2 {
+                fsc[idx] = a.fsc[bx4];
+                mrl[idx] = a.mrl[bx4];
+                mmrl[idx] = a.multi_mrl[bx4];
+                ibc[idx] = a.intrabc[bx4];
+                mid[idx] = a.midx[bx4];
+                mvp[idx] = a.mvprec[bx4];
+                mm[idx] = a.motion_mode[bx4];
+                boff[idx] = bx4 as i32;
+                if idx == 0 {
+                    fsc[1] = fsc[0];
+                    mrl[1] = mrl[0];
+                    mmrl[1] = mmrl[0];
+                    ibc[1] = ibc[0];
+                    mid[1] = mid[0];
+                    mvp[1] = mvp[0];
+                    mm[1] = mm[0];
+                }
+            }
+            (fsc, mrl, mmrl, ibc, mid, mvp, mm, boff)
+        } else {
+            (
+                [0u8; 2],
+                [0u8; 2],
+                [0u8; 2],
+                [0u8; 2],
+                [0xffu8; 2],
+                [0u8; 2],
+                [0u8; 2],
+                [-1i32; 2],
+            )
+        };
 
     // intrabc
     if has_luma {
@@ -1987,11 +2096,11 @@ fn decode_b(
     if fi.seg_skip_mask & (1 << b.seg_id) != 0 {
         b.skip_txfm = 1;
     } else if b.is_intra != 0 && !intrabc {
-        if has_luma { b.skip_txfm = 0; }
+        if has_luma {
+            b.skip_txfm = 0;
+        }
     } else {
-        let ctx = nx_skip_txfm[0] as usize
-            + nx_skip_txfm[1] as usize
-            + b.skip_mode as usize * 3;
+        let ctx = nx_skip_txfm[0] as usize + nx_skip_txfm[1] as usize + b.skip_mode as usize * 3;
         b.skip_txfm = msac.decode_bool_adapt(cdf_m.skip_txfm(ctx)) as u8;
     }
 
@@ -2002,15 +2111,13 @@ fn decode_b(
     let mut luma_midx = 0xffu8;
     if b.is_intra != 0 && !intrabc && has_luma {
         const DEFAULT_MODE_LIST_Y: [u8; 56] = [
-            17, 45, 3, 10, 24, 31, 38, 52,
-            15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50, 54,
-            16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53,
-            14, 20, 42, 48, 0, 6, 7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
+            17, 45, 3, 10, 24, 31, 38, 52, 15, 19, 43, 47, 1, 5, 8, 12, 22, 26, 29, 33, 36, 40, 50,
+            54, 16, 18, 44, 46, 2, 4, 9, 11, 23, 25, 30, 32, 37, 39, 51, 53, 14, 20, 42, 48, 0, 6,
+            7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
         ];
 
         // DPCM (lossless mode)
-        let dpcm = fi.any_lossless
-            && msac.decode_bool_adapt(cdf_m.dpcm(0)) != 0;
+        let dpcm = fi.any_lossless && msac.decode_bool_adapt(cdf_m.dpcm(0)) != 0;
         let (y_mode, y_angle, midx);
 
         if dpcm {
@@ -2022,8 +2129,12 @@ fn decode_b(
                 midx = 17u8;
             }
             y_angle = 0i8;
-            unsafe { b.data.intra.mrl_index = 0; }
-            unsafe { b.data.intra.multi_mrl = 0; }
+            unsafe {
+                b.data.intra.mrl_index = 0;
+            }
+            unsafe {
+                b.data.intra.multi_mrl = 0;
+            }
         } else {
             let y_set = msac.decode_symbol_adapt(cdf_m.intra_y_set(), 3) as usize;
             let y_mode_idx;
@@ -2031,12 +2142,11 @@ fn decode_b(
             if y_set == 0 {
                 let y_mode_ctx =
                     (w4 == bw4 && a.midx[(bx4 + bw4 as usize).saturating_sub(1)] != 0xff) as usize
-                    + (h4 == bh4 && l.midx[(by4 + bh4 as usize).saturating_sub(1)] != 0xff) as usize;
-                let mut idx0 = msac.decode_symbol_adapt(
-                    cdf_m.intra_y_idx0(y_mode_ctx), 7) as usize;
+                        + (h4 == bh4 && l.midx[(by4 + bh4 as usize).saturating_sub(1)] != 0xff)
+                            as usize;
+                let mut idx0 = msac.decode_symbol_adapt(cdf_m.intra_y_idx0(y_mode_ctx), 7) as usize;
                 if idx0 == 7 {
-                    idx0 += msac.decode_symbol_adapt(
-                        cdf_m.intra_y_idx1(y_mode_ctx), 5) as usize;
+                    idx0 += msac.decode_symbol_adapt(cdf_m.intra_y_idx1(y_mode_ctx), 5) as usize;
                 }
                 y_mode_idx = idx0;
             } else {
@@ -2155,16 +2265,24 @@ fn decode_b(
         }
 
         // MRL (Multi-Reference Line) index
-        unsafe { b.data.intra.mrl_index = 0; }
-        unsafe { b.data.intra.multi_mrl = 0; }
+        unsafe {
+            b.data.intra.mrl_index = 0;
+        }
+        unsafe {
+            b.data.intra.multi_mrl = 0;
+        }
         if !dpcm && midx != 0xff && fi.mrls {
             let mrl_ctx = (nb_mrl[0] + nb_mrl[1]) as usize;
             let mrl_idx = msac.decode_symbol_adapt(cdf_m.mrl_index(mrl_ctx), 3) as u8;
-            unsafe { b.data.intra.mrl_index = mrl_idx; }
+            unsafe {
+                b.data.intra.mrl_index = mrl_idx;
+            }
             if mrl_idx > 0 {
                 let mmrl_ctx = (nb_multi_mrl[0] + nb_multi_mrl[1]) as usize;
                 let mmrl = msac.decode_bool_adapt(cdf_m.multi_mrl(mmrl_ctx)) as u8;
-                unsafe { b.data.intra.multi_mrl = mmrl; }
+                unsafe {
+                    b.data.intra.multi_mrl = mmrl;
+                }
             }
         }
 
@@ -2183,8 +2301,8 @@ fn decode_b(
 
         // DPCM for chroma
         unsafe {
-            b.data.intra.dpcm[1] = (fi.any_lossless
-                && msac.decode_bool_adapt(cdf_m.dpcm(1)) != 0) as u8;
+            b.data.intra.dpcm[1] =
+                (fi.any_lossless && msac.decode_bool_adapt(cdf_m.dpcm(1)) != 0) as u8;
         }
         let chroma_dpcm = unsafe { b.data.intra.dpcm[1] } != 0;
 
@@ -2214,8 +2332,8 @@ fn decode_b(
                 && imax(cbw4, cbh4) <= if ll { 1 } else { 16 };
 
             let is_cfl = cfl_allowed && {
-                let cfl_ctx = (a.uvmode[cbx4] == CFL_PRED) as usize
-                    + (l.uvmode[cby4] == CFL_PRED) as usize;
+                let cfl_ctx =
+                    (a.uvmode[cbx4] == CFL_PRED) as usize + (l.uvmode[cby4] == CFL_PRED) as usize;
                 msac.decode_bool_adapt(cdf_m.cfl(cfl_ctx)) != 0
             };
 
@@ -2228,9 +2346,7 @@ fn decode_b(
                 // CFL parameters
                 const CFL_EXPLICIT: i8 = 0;
                 const CFL_MHCCP: i8 = 2;
-                if mhccp_allowed
-                    && (!fi.cfl || msac.decode_bool_adapt(cdf_m.mhccp()) != 0)
-                {
+                if mhccp_allowed && (!fi.cfl || msac.decode_bool_adapt(cdf_m.mhccp()) != 0) {
                     let sz_ctx = SIZE_GROUP[bs as u8 as usize] as usize;
                     unsafe {
                         b.data.intra.cfl_type = CFL_MHCCP;
@@ -2239,29 +2355,41 @@ fn decode_b(
                     }
                 } else {
                     let cfl_type = msac.decode_bool_adapt(cdf_m.cfl_type()) as i8;
-                    unsafe { b.data.intra.cfl_type = cfl_type; }
+                    unsafe {
+                        b.data.intra.cfl_type = cfl_type;
+                    }
                     if cfl_type == CFL_EXPLICIT {
                         let sign = msac.decode_symbol_adapt(cdf_m.cfl_sign(), 7) as i32 + 1;
                         let sign_u = (sign * 0x56) >> 8;
                         let sign_v = sign - sign_u * 3;
                         if sign_u != 0 {
                             let ctx = (sign_u == 2) as usize * 3 + sign_v as usize;
-                            let mut alpha = msac.decode_symbol_adapt(cdf_m.cfl_alpha(ctx), 7) as i8 + 1;
-                            if sign_u == 1 { alpha = -alpha; }
-                            unsafe { b.data.intra.cfl.cfl_alpha[0] = alpha; }
+                            let mut alpha =
+                                msac.decode_symbol_adapt(cdf_m.cfl_alpha(ctx), 7) as i8 + 1;
+                            if sign_u == 1 {
+                                alpha = -alpha;
+                            }
+                            unsafe {
+                                b.data.intra.cfl.cfl_alpha[0] = alpha;
+                            }
                         }
                         if sign_v != 0 {
                             let ctx = (sign_v == 2) as usize * 3 + sign_u as usize;
-                            let mut alpha = msac.decode_symbol_adapt(cdf_m.cfl_alpha(ctx), 7) as i8 + 1;
-                            if sign_v == 1 { alpha = -alpha; }
-                            unsafe { b.data.intra.cfl.cfl_alpha[1] = alpha; }
+                            let mut alpha =
+                                msac.decode_symbol_adapt(cdf_m.cfl_alpha(ctx), 7) as i8 + 1;
+                            if sign_v == 1 {
+                                alpha = -alpha;
+                            }
+                            unsafe {
+                                b.data.intra.cfl.cfl_alpha[1] = alpha;
+                            }
                         }
                     }
                 }
             } else {
                 let uv_mode_ctx = (midx != 0xff) as usize;
-                let mut uv_mode_idx = msac.decode_symbol_adapt(
-                    cdf_m.intra_uv_mode(uv_mode_ctx), 7) as usize;
+                let mut uv_mode_idx =
+                    msac.decode_symbol_adapt(cdf_m.intra_uv_mode(uv_mode_ctx), 7) as usize;
                 if uv_mode_idx == 7 {
                     uv_mode_idx += msac.decode_bools_bypass(3) as usize;
                 }
@@ -2290,7 +2418,8 @@ fn decode_b(
 
                     let mut idx = (uv_mode_idx - 5 - uv_mode_ctx) as i32;
                     if uv_mode_ctx != 0 {
-                        idx += (idx >= INTRA_DIR_MODE_Y_TO_UV_IDX[(midx / 7) as usize] as i32) as i32;
+                        idx +=
+                            (idx >= INTRA_DIR_MODE_Y_TO_UV_IDX[(midx / 7) as usize] as i32) as i32;
                     }
                     unsafe {
                         b.data.intra.uv_mode = DEFAULT_MODE_LIST_UV[idx as usize];
@@ -2304,7 +2433,9 @@ fn decode_b(
     // Palette and DIP (has_luma intra path)
     if b.is_intra != 0 && !intrabc && has_luma {
         let y_mode = unsafe { b.data.intra.y_mode };
-        unsafe { b.data.intra.pal_sz = 0; }
+        unsafe {
+            b.data.intra.pal_sz = 0;
+        }
 
         if fi.allow_screen_content_tools
             && y_mode == 0 // DC_PRED
@@ -2315,12 +2446,16 @@ fn decode_b(
             if use_y_pal {
                 // STUB: read palette colors from bitstream (AV2 §5.11.15)
                 let pal_sz = msac.decode_symbol_adapt(cdf_m.pal_sz(), 6) as u8 + 2;
-                unsafe { b.data.intra.pal_sz = pal_sz; }
+                unsafe {
+                    b.data.intra.pal_sz = pal_sz;
+                }
             }
         }
 
         // DIP (Directional Intra Prediction enhancement)
-        unsafe { b.data.intra.dip = 0; }
+        unsafe {
+            b.data.intra.dip = 0;
+        }
         let pal_sz = unsafe { b.data.intra.pal_sz };
         if y_mode == 0 // DC_PRED
             && fi.intra_dip
@@ -2328,14 +2463,24 @@ fn decode_b(
             && imin(bw4, bh4) >= 2
             && bw4 * bh4 >= 8
         {
-            let nb_dip_0 = if have_left { l.dip[(by4 + bh4 as usize).saturating_sub(1)] } else { 0 };
-            let nb_dip_1 = if have_top { a.dip[(bx4 + bw4 as usize).saturating_sub(1)] } else { 0 };
+            let nb_dip_0 = if have_left {
+                l.dip[(by4 + bh4 as usize).saturating_sub(1)]
+            } else {
+                0
+            };
+            let nb_dip_1 = if have_top {
+                a.dip[(bx4 + bw4 as usize).saturating_sub(1)]
+            } else {
+                0
+            };
             let ctx = (nb_dip_0 != 0) as usize + (nb_dip_1 != 0) as usize;
             let dip_flag = msac.decode_bool_adapt(cdf_m.dip(ctx)) != 0;
             if dip_flag {
                 let tp = msac.decode_bools_bypass(1) as u8;
                 let m = msac.decode_symbol_adapt(cdf_m.dip_mode(), 5) as u8;
-                unsafe { b.data.intra.dip = (tp << 4) | (m + 1); }
+                unsafe {
+                    b.data.intra.dip = (tp << 4) | (m + 1);
+                }
             }
         }
     }
@@ -2439,18 +2584,30 @@ fn decode_b(
 
     // IntraBC path
     if intrabc {
-        unsafe { b.data.intra.is_refmv = msac.decode_bool_adapt(cdf_m.intrabc_mode()) as u8; }
+        unsafe {
+            b.data.intra.is_refmv = msac.decode_bool_adapt(cdf_m.intrabc_mode()) as u8;
+        }
 
-        unsafe { b.data.inter.drl_idx[0] = 0; }
+        unsafe {
+            b.data.inter.drl_idx[0] = 0;
+        }
         for _ in 0..fi.max_bvp_drl_bits {
-            if msac.decode_bools_bypass(1) == 0 { break; }
-            unsafe { b.data.inter.drl_idx[0] += 1; }
+            if msac.decode_bools_bypass(1) == 0 {
+                break;
+            }
+            unsafe {
+                b.data.inter.drl_idx[0] += 1;
+            }
         }
 
         let is_refmv = unsafe { b.data.intra.is_refmv };
-        unsafe { b.data.intra.is_qpel = (!fi.force_integer_mv) as u8; }
+        unsafe {
+            b.data.intra.is_qpel = (!fi.force_integer_mv) as u8;
+        }
         if is_refmv == 0 && !fi.force_integer_mv {
-            unsafe { b.data.intra.is_qpel = msac.decode_bool_adapt(cdf_m.intrabc_precision()) as u8; }
+            unsafe {
+                b.data.intra.is_qpel = msac.decode_bool_adapt(cdf_m.intrabc_precision()) as u8;
+            }
         }
 
         // IntraBC MV residual
@@ -2472,12 +2629,24 @@ fn decode_b(
         read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
 
         // morph_pred for IntraBC
-        unsafe { b.data.intra.morph_pred = 0; }
+        unsafe {
+            b.data.intra.morph_pred = 0;
+        }
         if !fi.is_inter_or_switch && fi.bawp && fi.allow_screen_content_tools {
-            let nb_mp_0 = if have_left { l.morph_pred[(by4 + bh4 as usize).saturating_sub(1)] } else { 0 };
-            let nb_mp_1 = if have_top { a.morph_pred[(bx4 + bw4 as usize).saturating_sub(1)] } else { 0 };
+            let nb_mp_0 = if have_left {
+                l.morph_pred[(by4 + bh4 as usize).saturating_sub(1)]
+            } else {
+                0
+            };
+            let nb_mp_1 = if have_top {
+                a.morph_pred[(bx4 + bw4 as usize).saturating_sub(1)]
+            } else {
+                0
+            };
             let ctx = nb_mp_0 as usize + nb_mp_1 as usize;
-            unsafe { b.data.intra.morph_pred = msac.decode_bool_adapt(cdf_m.morph_pred(ctx)) as u8; }
+            unsafe {
+                b.data.intra.morph_pred = msac.decode_bool_adapt(cdf_m.morph_pred(ctx)) as u8;
+            }
         }
         let morph_pred = unsafe { b.data.intra.morph_pred };
 
@@ -2551,22 +2720,29 @@ fn decode_b(
         }
 
         // TIP decision
-        let is_tip = if b.skip_mode == 0 && fi.tip_frame_mode != 0
-            && cbs == lbs && imax(bw4, bh4) >= 2
-        {
-            let ctx = (if n_ctx >= 1 { (nx_ref0[0] == TIP_FRAME as i8) as usize } else { 0 })
-                + (if n_ctx >= 2 { (nx_ref0[1] == TIP_FRAME as i8) as usize } else { 0 });
-            msac.decode_bool_adapt(cdf_m.tip(ctx)) != 0
-        } else {
-            false
-        };
+        let is_tip =
+            if b.skip_mode == 0 && fi.tip_frame_mode != 0 && cbs == lbs && imax(bw4, bh4) >= 2 {
+                let ctx = (if n_ctx >= 1 {
+                    (nx_ref0[0] == TIP_FRAME as i8) as usize
+                } else {
+                    0
+                }) + (if n_ctx >= 2 {
+                    (nx_ref0[1] == TIP_FRAME as i8) as usize
+                } else {
+                    0
+                });
+                msac.decode_bool_adapt(cdf_m.tip(ctx)) != 0
+            } else {
+                false
+            };
 
         // Compound decision
         let is_comp = if b.skip_mode != 0 {
             true
         } else if !is_tip
             && (fi.seg_globalmv_mask | fi.seg_skip_mask) & (1 << b.seg_id) == 0
-            && fi.switchable_comp_refs && bw4 * bh4 >= 4
+            && fi.switchable_comp_refs
+            && bw4 * bh4 >= 4
         {
             // simplified comp context
             let ctx = 0usize;
@@ -2577,14 +2753,20 @@ fn decode_b(
 
         if b.skip_mode != 0 {
             // skip_mode DRL index
-            unsafe { b.data.inter.drl_idx[0] = 0; }
+            unsafe {
+                b.data.inter.drl_idx[0] = 0;
+            }
             let mut ctx = 0usize;
             for _ in 0..fi.max_drl_bits {
                 if msac.decode_bool_adapt(cdf_m.skip_mode_drl_idx(ctx)) == 0 {
                     break;
                 }
-                unsafe { b.data.inter.drl_idx[0] += 1; }
-                if ctx < 2 { ctx += 1; }
+                unsafe {
+                    b.data.inter.drl_idx[0] += 1;
+                }
+                if ctx < 2 {
+                    ctx += 1;
+                }
             }
             b.ref_pair = fi.skip_mode_refs;
             unsafe {
@@ -2630,7 +2812,9 @@ fn decode_b(
                     if bit != 0 {
                         refs[n as usize] = i as i8;
                         n += 1;
-                        if n == 2 { break; }
+                        if n == 2 {
+                            break;
+                        }
                         dir = fi.refdir[i as usize];
                     }
                     if maybe_same_ref != 0 {
@@ -2648,9 +2832,11 @@ fn decode_b(
                         refs[0] = (n_refs - 1 - (same_refs < n_refs) as i32) as i8;
                     }
                 }
-                ref0 = refs[0]; ref1 = refs[1];
+                ref0 = refs[0];
+                ref1 = refs[1];
             } else {
-                ref0 = 0; ref1 = 0;
+                ref0 = 0;
+                ref1 = 0;
             }
             unsafe {
                 b.ref_pair.r[0] = ref0;
@@ -2663,7 +2849,9 @@ fn decode_b(
             if ref0 == ref1 {
                 let sym = msac.decode_symbol_adapt(cdf_m.comp_mode_sameref(comp_ctx), 3) as u8;
                 let mut m = CompInterPredMode::NearMvNearMv as u8 + sym;
-                if m > CompInterPredMode::NearMvNewMv as u8 { m += 1; } // skip newmv_nearmv
+                if m > CompInterPredMode::NearMvNewMv as u8 {
+                    m += 1;
+                } // skip newmv_nearmv
                 inter_mode = m;
             } else {
                 let joint_ctx = (fi.refdist[ref0 as usize] != -fi.refdist[ref1 as usize]) as usize;
@@ -2684,10 +2872,13 @@ fn decode_b(
             {
                 let ctx = (inter_mode > CompInterPredMode::NearMvNearMv as u8) as usize;
                 if msac.decode_bool_adapt(cdf_m.opfl(ctx)) != 0 {
-                    final_inter_mode += 6 - (inter_mode >= CompInterPredMode::GlobalMvGlobalMv as u8) as u8;
+                    final_inter_mode +=
+                        6 - (inter_mode >= CompInterPredMode::GlobalMvGlobalMv as u8) as u8;
                 }
             }
-            unsafe { b.data.inter.inter_mode = final_inter_mode; }
+            unsafe {
+                b.data.inter.inter_mode = final_inter_mode;
+            }
 
             // --- compound AMVD ---
             use crate::tables::COMP_INTER_PRED_MODES;
@@ -2697,8 +2888,8 @@ fn decode_b(
             } else {
                 [InterPredMode::NearMv as u8; 2]
             };
-            let is_newmv_mode = m_pair[0] == InterPredMode::NewMv as u8
-                || m_pair[1] == InterPredMode::NewMv as u8;
+            let is_newmv_mode =
+                m_pair[0] == InterPredMode::NewMv as u8 || m_pair[1] == InterPredMode::NewMv as u8;
             if fi.adaptive_mvd && is_newmv_mode {
                 let amvd_mode_ctx = match final_inter_mode {
                     x if x == CompInterPredMode::NearMvNewMv as u8 => 0usize,
@@ -2712,9 +2903,14 @@ fn decode_b(
                     _ => 0,
                 };
                 let ctx = (nx_ref0[0] == ref0 && nx_amvd[0] != 0) as usize
-                    + (if n_ctx > 1 { nx_ref0[1] == ref0 && nx_amvd[1] != 0 } else { false }) as usize;
+                    + (if n_ctx > 1 {
+                        nx_ref0[1] == ref0 && nx_amvd[1] != 0
+                    } else {
+                        false
+                    }) as usize;
                 unsafe {
-                    b.data.inter.amvd = msac.decode_bool_adapt(cdf_m.amvd(amvd_mode_ctx, ctx)) as i8;
+                    b.data.inter.amvd =
+                        msac.decode_bool_adapt(cdf_m.amvd(amvd_mode_ctx, ctx)) as i8;
                 }
             }
             let amvd_val = unsafe { b.data.inter.amvd };
@@ -2731,7 +2927,9 @@ fn decode_b(
             }
 
             // --- compound DRL ---
-            unsafe { b.data.inter.drl_idx = [0; 2]; }
+            unsafe {
+                b.data.inter.drl_idx = [0; 2];
+            }
             if final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8 {
                 let n_drls = 1 + (final_inter_mode <= CompInterPredMode::NearMvNewMv as u8) as i32;
                 let max_drl = fi.max_drl_bits as i32;
@@ -2743,9 +2941,13 @@ fn decode_b(
                             break;
                         }
                         n += 1;
-                        if ctx < 2 { ctx += 1; }
+                        if ctx < 2 {
+                            ctx += 1;
+                        }
                     }
-                    unsafe { b.data.inter.drl_idx[r as usize] = n as u8; }
+                    unsafe {
+                        b.data.inter.drl_idx[r as usize] = n as u8;
+                    }
                     if final_inter_mode == CompInterPredMode::NearMvNearMv as u8 && ref0 == ref1 {
                         let drl0 = unsafe { b.data.inter.drl_idx[0] } as i32;
                         n = drl0 + (drl0 < max_drl) as i32;
@@ -2755,7 +2957,9 @@ fn decode_b(
                     ctx = (n as usize).min(2);
                 }
                 if n_drls == 1 {
-                    unsafe { b.data.inter.drl_idx[1] = b.data.inter.drl_idx[0]; }
+                    unsafe {
+                        b.data.inter.drl_idx[1] = b.data.inter.drl_idx[0];
+                    }
                 }
             }
 
@@ -2767,13 +2971,16 @@ fn decode_b(
                 let ctx1 = ((mvprec1 & 1) + (mvprec2 & 1)) as usize;
                 if msac.decode_bool_adapt(cdf_m.mvprec_def(ctx1)) == 0 {
                     let ctx2 = ((mvprec1 | mvprec2) >> 1) as usize;
-                    let idx = msac.decode_symbol_adapt(
-                        cdf_m.mvprec_rem(ctx2, (mv_prec - 4) as usize), 2) as usize;
+                    let idx = msac
+                        .decode_symbol_adapt(cdf_m.mvprec_rem(ctx2, (mv_prec - 4) as usize), 2)
+                        as usize;
                     mv_prec = MV_PREC_TBL[(mv_prec == 6) as usize][idx] as i32;
                     mvprec_def = 2;
                 }
             }
-            unsafe { b.data.inter.mv_prec = mv_prec as i8; }
+            unsafe {
+                b.data.inter.mv_prec = mv_prec as i8;
+            }
 
             // --- MV residuals + sign derivation ---
             if final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8 {
@@ -2790,7 +2997,9 @@ fn decode_b(
                 let mut sum_mvd = 0i32;
                 let mut nnzc = 0i32;
                 for n in start..end {
-                    if m_pair.get(n).copied() != Some(InterPredMode::NewMv as u8) { continue; }
+                    if m_pair.get(n).copied() != Some(InterPredMode::NewMv as u8) {
+                        continue;
+                    }
                     let mv = if amvd_val != 0 {
                         read_amvd(msac, cdf_m)
                     } else {
@@ -2819,10 +3028,13 @@ fn decode_b(
                         || final_inter_mode == CompInterPredMode::OpflJointNewMv as u8;
                     let drl0 = unsafe { b.data.inter.drl_idx[0] };
                     let drl1 = unsafe { b.data.inter.drl_idx[1] };
-                    if !fi.mvd_sign_derive || drl0 != 0 || drl1 != 0
+                    if !fi.mvd_sign_derive
+                        || drl0 != 0
+                        || drl1 != 0
                         || nnzc < 3 * (end as i32 - start as i32) - 2
                         || fi.allow_screen_content_tools
-                        || fi.mv_precision == 3 || mv_prec >= 5
+                        || fi.mv_precision == 3
+                        || mv_prec >= 5
                         || !bidir_newmv
                         || unsafe { b.data.inter.motion_mode } != MotionMode::Translation as u8
                     {
@@ -2831,28 +3043,48 @@ fn decode_b(
                     sum_mvd >>= 6 - mv_prec;
                     let mut nnzc2 = 0i32;
                     for n in start..end {
-                        if m_pair.get(n).copied() != Some(InterPredMode::NewMv as u8) { continue; }
+                        if m_pair.get(n).copied() != Some(InterPredMode::NewMv as u8) {
+                            continue;
+                        }
                         let cur_y = unsafe { b.data.inter.mv[n].c.y };
                         if cur_y != 0 {
                             nnzc2 += 1;
-                            let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
-                                    else { msac.decode_bool_bypass() != 0 };
-                            if s { unsafe { b.data.inter.mv[n].c.y = -cur_y; } }
+                            let s = if nnzc2 == nnzc {
+                                (sum_mvd & 1) != 0
+                            } else {
+                                msac.decode_bool_bypass() != 0
+                            };
+                            if s {
+                                unsafe {
+                                    b.data.inter.mv[n].c.y = -cur_y;
+                                }
+                            }
                         }
                         let cur_x = unsafe { b.data.inter.mv[n].c.x };
                         if cur_x != 0 {
                             nnzc2 += 1;
-                            let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
-                                    else { msac.decode_bool_bypass() != 0 };
-                            if s { unsafe { b.data.inter.mv[n].c.x = -cur_x; } }
+                            let s = if nnzc2 == nnzc {
+                                (sum_mvd & 1) != 0
+                            } else {
+                                msac.decode_bool_bypass() != 0
+                            };
+                            if s {
+                                unsafe {
+                                    b.data.inter.mv[n].c.x = -cur_x;
+                                }
+                            }
                         }
                     }
                 }
             }
 
             // --- refine_mv ---
-            unsafe { b.data.inter.refine_mv = 0; }
-            if fi.refine_mv_enabled && imin(bw4, bh4) >= 2 && bw4 * bh4 > 4
+            unsafe {
+                b.data.inter.refine_mv = 0;
+            }
+            if fi.refine_mv_enabled
+                && imin(bw4, bh4) >= 2
+                && bw4 * bh4 > 4
                 && final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8
                 && fi.refdist[ref0 as usize] == -fi.refdist[ref1 as usize]
             {
@@ -2861,7 +3093,9 @@ fn decode_b(
                     || final_inter_mode == CompInterPredMode::OpflNearMvNearMv as u8
                     || final_inter_mode == CompInterPredMode::OpflJointNewMv as u8;
                 if nearmv_nearmv {
-                    unsafe { b.data.inter.refine_mv = 2; }
+                    unsafe {
+                        b.data.inter.refine_mv = 2;
+                    }
                 } else if !is_opfl_mode || fi.opfl_refine_type != 1 {
                     let ctx = (final_inter_mode - CompInterPredMode::NearMvNearMv as u8) as usize;
                     let ctx_clamped = ctx.min(10);
@@ -2877,14 +3111,18 @@ fn decode_b(
             let has_subpel_filter = final_inter_mode <= CompInterPredMode::JointNewMv as u8
                 && refine_mv_val == 0
                 && unsafe { b.data.inter.motion_mode } == MotionMode::Translation as u8
-                && (final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8 || imin(bw4, bh4) == 1);
+                && (final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8
+                    || imin(bw4, bh4) == 1);
 
             // --- compound type ---
-            unsafe { b.data.inter.comp_type = 1; } // COMP_AVG
+            unsafe {
+                b.data.inter.comp_type = 1;
+            } // COMP_AVG
             if final_inter_mode <= CompInterPredMode::JointNewMv as u8
                 && refine_mv_val != 1
                 && !(final_inter_mode == CompInterPredMode::JointNewMv as u8 && amvd_val != 0)
-                && fi.masked_compound && imin(bw4, bh4) >= 2
+                && fi.masked_compound
+                && imin(bw4, bh4) >= 2
             {
                 // simplified comp_type context
                 let ctx = 0usize;
@@ -2908,15 +3146,21 @@ fn decode_b(
             }
 
             // --- CWP (compound weighted prediction) ---
-            unsafe { b.data.inter.cwp_idx = 8; }
+            unsafe {
+                b.data.inter.cwp_idx = 8;
+            }
             let comp_type_val = unsafe { b.data.inter.comp_type };
-            if refine_mv_val == 0 && fi.cwp && comp_type_val == 1
+            if refine_mv_val == 0
+                && fi.cwp
+                && comp_type_val == 1
                 && (final_inter_mode == CompInterPredMode::NearMvNearMv as u8
                     || final_inter_mode == CompInterPredMode::JointNewMv as u8)
             {
                 let mut n = 0u8;
                 while n < 4 {
-                    if msac.decode_bool_adapt(cdf_m.cwp_idx(n as usize)) == 0 { break; }
+                    if msac.decode_bool_adapt(cdf_m.cwp_idx(n as usize)) == 0 {
+                        break;
+                    }
                     n += 1;
                 }
                 static CWP_WEIGHT_SAME: [i8; 5] = [8, 12, 4, 10, 6];
@@ -2933,19 +3177,27 @@ fn decode_b(
 
             // --- subpel filter ---
             if refine_mv_val != 0 || final_inter_mode >= CompInterPredMode::OpflNearMvNearMv as u8 {
-                unsafe { b.data.inter.filter = 2; } // SHARP
+                unsafe {
+                    b.data.inter.filter = 2;
+                } // SHARP
             } else if fi.subpel_filter_mode == 4 && has_subpel_filter {
                 let fctx = 0usize; // simplified
                 unsafe {
                     b.data.inter.filter = msac.decode_symbol_adapt(cdf_m.filter(fctx), 2) as u8;
                 }
             } else if fi.subpel_filter_mode == 4 {
-                unsafe { b.data.inter.filter = 0; }
+                unsafe {
+                    b.data.inter.filter = 0;
+                }
             } else {
-                unsafe { b.data.inter.filter = fi.subpel_filter_mode; }
+                unsafe {
+                    b.data.inter.filter = fi.subpel_filter_mode;
+                }
             }
         } else {
-            unsafe { b.data.inter.comp_type = 0; } // COMP_INTER_NONE
+            unsafe {
+                b.data.inter.comp_type = 0;
+            } // COMP_INTER_NONE
 
             // --- single ref selection ---
             let ref0: i8;
@@ -2966,8 +3218,7 @@ fn decode_b(
                             cnt[(nx_ref1[1] + 1) as usize] += 1;
                         }
                     }
-                    let mut cnt_rem = (n_ctx as i32) * 2
-                        - cnt[0] as i32 - cnt[8] as i32;
+                    let mut cnt_rem = (n_ctx as i32) * 2 - cnt[0] as i32 - cnt[8] as i32;
                     loop {
                         let cnt_cur = cnt[i as usize + 1] as i32;
                         cnt_rem -= cnt_cur;
@@ -2976,7 +3227,9 @@ fn decode_b(
                             break;
                         }
                         i += 1;
-                        if i >= n_refs - 1 { break; }
+                        if i >= n_refs - 1 {
+                            break;
+                        }
                     }
                 }
                 ref0 = i as i8;
@@ -2988,8 +3241,16 @@ fn decode_b(
 
             // --- sngl_ctx ---
             let sngl_ctx = get_snglref_ctx(
-                a, l, by4, bx4, have_top, have_left,
-                have_top_right, have_bottom_left, b_dim, ref0,
+                a,
+                l,
+                by4,
+                bx4,
+                have_top,
+                have_left,
+                have_top_right,
+                have_bottom_left,
+                b_dim,
+                ref0,
             );
 
             // --- inter_mode ---
@@ -3006,9 +3267,7 @@ fn decode_b(
                     allow_warp = msac.decode_bool_adapt(cdf_m.warp(warp_ctx)) != 0;
                 }
                 if allow_warp {
-                    if !fi.force_integer_mv
-                        && msac.decode_bool_adapt(cdf_m.warp_newmv()) == 0
-                    {
+                    if !fi.force_integer_mv && msac.decode_bool_adapt(cdf_m.warp_newmv()) == 0 {
                         inter_mode = InterPredMode::WarpNewMv as u8;
                     } else {
                         inter_mode = InterPredMode::WarpMv as u8;
@@ -3018,12 +3277,18 @@ fn decode_b(
                         + msac.decode_symbol_adapt(cdf_m.inter_mode(sngl_ctx), 2) as u8;
                 }
             };
-            unsafe { b.data.inter.inter_mode = inter_mode; }
+            unsafe {
+                b.data.inter.inter_mode = inter_mode;
+            }
 
             // --- AMVD ---
             if fi.adaptive_mvd && inter_mode == InterPredMode::NewMv as u8 {
                 let ctx = (nx_ref0[0] == ref0 && nx_amvd[0] != 0) as usize
-                    + (if n_ctx > 1 { nx_ref0[1] == ref0 && nx_amvd[1] != 0 } else { false }) as usize;
+                    + (if n_ctx > 1 {
+                        nx_ref0[1] == ref0 && nx_amvd[1] != 0
+                    } else {
+                        false
+                    }) as usize;
                 unsafe {
                     b.data.inter.amvd = msac.decode_bool_adapt(cdf_m.amvd(4, ctx)) as i8;
                 }
@@ -3040,26 +3305,26 @@ fn decode_b(
 
             if !is_tip && inter_mode <= InterPredMode::NewMv as u8 {
                 // --- BAWP (block-adaptive weighted prediction) ---
-                if fi.bawp
-                    && inter_mode != InterPredMode::GlobalMv as u8
-                    && imin(bw4, bh4) >= 2
-                {
+                if fi.bawp && inter_mode != InterPredMode::GlobalMv as u8 && imin(bw4, bh4) >= 2 {
                     let bawp0 = msac.decode_bool_adapt(cdf_m.bawp(0)) as u8;
                     if bawp0 != 0 {
                         let ctx = if inter_mode == InterPredMode::NewMv as u8 {
                             2 - amvd_val as usize
-                        } else { 0 };
+                        } else {
+                            0
+                        };
                         let explicit = msac.decode_bool_adapt(cdf_m.bawp_explicit(ctx)) as u8;
                         let mut val = bawp0 + explicit;
                         if val == 2 {
                             val += msac.decode_bool_adapt(cdf_m.bawp_explicit_scale()) as u8;
                             val |= (ctx as u8) << 2;
                         }
-                        unsafe { b.data.inter.bawp[0] = val; }
+                        unsafe {
+                            b.data.inter.bawp[0] = val;
+                        }
                         if has_chroma {
                             unsafe {
-                                b.data.inter.bawp[1] =
-                                    msac.decode_bool_adapt(cdf_m.bawp(1)) as u8;
+                                b.data.inter.bawp[1] = msac.decode_bool_adapt(cdf_m.bawp(1)) as u8;
                             }
                         }
                     }
@@ -3085,25 +3350,39 @@ fn decode_b(
                         if imin(bw4, bh4) > 1
                             && msac.decode_bool_adapt(cdf_m.interintra_wedge()) != 0
                         {
-                            unsafe { b.data.inter.wedge_idx = read_wedge_idx(msac, cdf_m); }
+                            unsafe {
+                                b.data.inter.wedge_idx = read_wedge_idx(msac, cdf_m);
+                            }
                         }
                     }
                 }
             } else if !is_tip {
                 // --- warp motion mode for WARPMV/WARPNEWMV ---
-                unsafe { b.data.inter.motion_mode = MotionMode::WarpDelta as u8; }
+                unsafe {
+                    b.data.inter.motion_mode = MotionMode::WarpDelta as u8;
+                }
 
                 if inter_mode == InterPredMode::WarpNewMv as u8 {
                     // warp extend / causal decision
-                    let x1 = if nb_boff[0] == -1 { 0 } else { nb_motion_mode[0] };
-                    let x2 = if nb_boff[1] == -1 { 0 } else { nb_motion_mode[1] };
+                    let x1 = if nb_boff[0] == -1 {
+                        0
+                    } else {
+                        nb_motion_mode[0]
+                    };
+                    let x2 = if nb_boff[1] == -1 {
+                        0
+                    } else {
+                        nb_motion_mode[1]
+                    };
                     let ext_ctx = (x1 >= MotionMode::WarpCausal as u8) as usize
                         + (x2 >= MotionMode::WarpCausal as u8) as usize;
                     let mm_flags = fi.motion_modes;
                     if mm_flags & (1 << MotionMode::WarpExtend as u8) != 0
                         && msac.decode_bool_adapt(cdf_m.warp_extend(ext_ctx)) != 0
                     {
-                        unsafe { b.data.inter.motion_mode = MotionMode::WarpExtend as u8; }
+                        unsafe {
+                            b.data.inter.motion_mode = MotionMode::WarpExtend as u8;
+                        }
                     } else if (mm_flags & (3 << MotionMode::WarpCausal as u8))
                         == (3 << MotionMode::WarpCausal as u8)
                     {
@@ -3111,10 +3390,14 @@ fn decode_b(
                             + (x1 == MotionMode::WarpCausal as u8) as usize
                             + (x2 == MotionMode::WarpCausal as u8) as usize;
                         if msac.decode_bool_adapt(cdf_m.warp_causal(cs_ctx)) != 0 {
-                            unsafe { b.data.inter.motion_mode = MotionMode::WarpCausal as u8; }
+                            unsafe {
+                                b.data.inter.motion_mode = MotionMode::WarpCausal as u8;
+                            }
                         }
                     } else if mm_flags & (1 << MotionMode::WarpCausal as u8) != 0 {
-                        unsafe { b.data.inter.motion_mode = MotionMode::WarpCausal as u8; }
+                        unsafe {
+                            b.data.inter.motion_mode = MotionMode::WarpCausal as u8;
+                        }
                     }
                 }
 
@@ -3128,7 +3411,9 @@ fn decode_b(
                         }
                         wri += 1;
                     }
-                    unsafe { b.data.inter.warp_ref_idx = wri; }
+                    unsafe {
+                        b.data.inter.warp_ref_idx = wri;
+                    }
                 }
 
                 // warpmv_with_mvd
@@ -3142,7 +3427,9 @@ fn decode_b(
             }
 
             // --- DRL index ---
-            unsafe { b.data.inter.drl_idx[0] = 0; }
+            unsafe {
+                b.data.inter.drl_idx[0] = 0;
+            }
             if inter_mode != InterPredMode::WarpMv as u8
                 && inter_mode != InterPredMode::GlobalMv as u8
             {
@@ -3155,16 +3442,24 @@ fn decode_b(
                     } else {
                         cdf_m.drl_idx(ctx, sngl_ctx)
                     };
-                    if msac.decode_bool_adapt(cdf) == 0 { break; }
+                    if msac.decode_bool_adapt(cdf) == 0 {
+                        break;
+                    }
                     n += 1;
-                    if ctx < 2 { ctx += 1; }
+                    if ctx < 2 {
+                        ctx += 1;
+                    }
                 }
-                unsafe { b.data.inter.drl_idx[0] = n as u8; }
+                unsafe {
+                    b.data.inter.drl_idx[0] = n as u8;
+                }
             }
 
             // --- MV precision ---
             let mut mv_prec = 3i32 + fi.mv_precision as i32;
-            if mv_prec > 3 && amvd_val == 0 && fi.flex_mvres
+            if mv_prec > 3
+                && amvd_val == 0
+                && fi.flex_mvres
                 && (inter_mode == InterPredMode::NewMv as u8
                     || inter_mode == InterPredMode::WarpNewMv as u8)
             {
@@ -3173,13 +3468,16 @@ fn decode_b(
                 let ctx1 = ((mvprec1 & 1) + (mvprec2 & 1)) as usize;
                 if msac.decode_bool_adapt(cdf_m.mvprec_def(ctx1)) == 0 {
                     let ctx2 = ((mvprec1 | mvprec2) >> 1) as usize;
-                    let idx = msac.decode_symbol_adapt(
-                        cdf_m.mvprec_rem(ctx2, (mv_prec - 4) as usize), 2) as usize;
+                    let idx = msac
+                        .decode_symbol_adapt(cdf_m.mvprec_rem(ctx2, (mv_prec - 4) as usize), 2)
+                        as usize;
                     mv_prec = MV_PREC_TBL[(mv_prec == 6) as usize][idx] as i32;
                     mvprec_def = 2;
                 }
             }
-            unsafe { b.data.inter.mv_prec = mv_prec as i8; }
+            unsafe {
+                b.data.inter.mv_prec = mv_prec as i8;
+            }
 
             // --- MV residual ---
             let warpmv_with_mvd = unsafe { b.data.inter.warpmv_with_mvd };
@@ -3207,11 +3505,13 @@ fn decode_b(
                     } else {
                         let nx = (mv.c.x != 0) as i32 + (mv.c.y != 0) as i32;
                         sum_mvd = (mv.c.x + mv.c.y) >> (6 - mv_prec);
-                        if inter_mode == InterPredMode::WarpMv as u8 || nx == 0
+                        if inter_mode == InterPredMode::WarpMv as u8
+                            || nx == 0
                             || !fi.mvd_sign_derive
                             || b.data.inter.motion_mode != MotionMode::Translation as u8
                             || fi.allow_screen_content_tools
-                            || fi.mv_precision == 3 || mv_prec >= 5
+                            || fi.mv_precision == 3
+                            || mv_prec >= 5
                         {
                             nnzc = 3;
                         } else {
@@ -3223,16 +3523,30 @@ fn decode_b(
                 let cur_mv_y = unsafe { b.data.inter.mv[0].c.y };
                 if cur_mv_y != 0 {
                     nnzc2 += 1;
-                    let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
-                            else { msac.decode_bool_bypass() != 0 };
-                    if s { unsafe { b.data.inter.mv[0].c.y = -cur_mv_y; } }
+                    let s = if nnzc2 == nnzc {
+                        (sum_mvd & 1) != 0
+                    } else {
+                        msac.decode_bool_bypass() != 0
+                    };
+                    if s {
+                        unsafe {
+                            b.data.inter.mv[0].c.y = -cur_mv_y;
+                        }
+                    }
                 }
                 let cur_mv_x = unsafe { b.data.inter.mv[0].c.x };
                 if cur_mv_x != 0 {
                     nnzc2 += 1;
-                    let s = if nnzc2 == nnzc { (sum_mvd & 1) != 0 }
-                            else { msac.decode_bool_bypass() != 0 };
-                    if s { unsafe { b.data.inter.mv[0].c.x = -cur_mv_x; } }
+                    let s = if nnzc2 == nnzc {
+                        (sum_mvd & 1) != 0
+                    } else {
+                        msac.decode_bool_bypass() != 0
+                    };
+                    if s {
+                        unsafe {
+                            b.data.inter.mv[0].c.x = -cur_mv_x;
+                        }
+                    }
                 }
             }
 
@@ -3244,15 +3558,17 @@ fn decode_b(
                 && ((fi.six_param_warp_delta && warp_ref_idx == 1) || warp_ref_idx == 0)
             {
                 let prec = msac.decode_bool_adapt(cdf_m.warp_delta_prec(bs_idx));
-                let np = if fi.six_param_warp_delta && warp_ref_idx == 1 { 4 } else { 2 };
+                let np = if fi.six_param_warp_delta && warp_ref_idx == 1 {
+                    4
+                } else {
+                    2
+                };
                 let step = 2i8 >> prec;
                 for n in 0..np {
                     let ctx = if n == 0 || n == 3 { 1 } else { 0 };
-                    let mut val = msac.decode_symbol_adapt(
-                        cdf_m.warp_delta_param(0, ctx), 7) as i8;
+                    let mut val = msac.decode_symbol_adapt(cdf_m.warp_delta_param(0, ctx), 7) as i8;
                     if val == 7 && prec != 0 {
-                        val += msac.decode_symbol_adapt(
-                            cdf_m.warp_delta_param(1, ctx), 7) as i8;
+                        val += msac.decode_symbol_adapt(cdf_m.warp_delta_param(1, ctx), 7) as i8;
                     }
                     if val != 0 {
                         if msac.decode_bool_adapt(cdf_m.warp_delta_sign()) != 0 {
@@ -3260,10 +3576,14 @@ fn decode_b(
                         }
                         val *= step;
                     }
-                    unsafe { b.data.inter.matrix[n] = val; }
+                    unsafe {
+                        b.data.inter.matrix[n] = val;
+                    }
                 }
                 if np == 2 {
-                    unsafe { b.data.inter.matrix[2] = -0x80; }
+                    unsafe {
+                        b.data.inter.matrix[2] = -0x80;
+                    }
                 }
             } else if motion_mode_val == MotionMode::WarpDelta as u8 {
                 unsafe {
@@ -3272,9 +3592,12 @@ fn decode_b(
             }
 
             // --- warp_ii ---
-            unsafe { b.data.inter.warp_ii = 0; }
+            unsafe {
+                b.data.inter.warp_ii = 0;
+            }
             if inter_mode == InterPredMode::WarpMv as u8
-                && imin(bw4, bh4) >= 2 && imax(bw4, bh4) <= 16
+                && imin(bw4, bh4) >= 2
+                && imax(bw4, bh4) <= 16
             {
                 let ctx = SIZE_GROUP[bs_idx] as usize;
                 if msac.decode_bool_adapt(cdf_m.warp_interintra(ctx)) != 0 {
@@ -3285,7 +3608,9 @@ fn decode_b(
                         b.data.inter.wedge_idx =
                             if msac.decode_bool_adapt(cdf_m.interintra_wedge()) != 0 {
                                 read_wedge_idx(msac, cdf_m)
-                            } else { -1 };
+                            } else {
+                                -1
+                            };
                     }
                 }
             }
@@ -3295,21 +3620,26 @@ fn decode_b(
                 && inter_mode <= InterPredMode::NewMv as u8
                 && (inter_mode != InterPredMode::GlobalMv as u8 || imin(bw4, bh4) == 1);
             if b.skip_mode != 0 || ref0 == TIP_FRAME as i8 {
-                unsafe { b.data.inter.filter = 2; } // SHARP
+                unsafe {
+                    b.data.inter.filter = 2;
+                } // SHARP
             } else if fi.subpel_filter_mode == 4 {
                 // SWITCHABLE
                 if has_subpel_filter {
                     // simplified filter context
                     let fctx = 0usize;
                     unsafe {
-                        b.data.inter.filter =
-                            msac.decode_symbol_adapt(cdf_m.filter(fctx), 2) as u8;
+                        b.data.inter.filter = msac.decode_symbol_adapt(cdf_m.filter(fctx), 2) as u8;
                     }
                 } else {
-                    unsafe { b.data.inter.filter = 0; } // REGULAR
+                    unsafe {
+                        b.data.inter.filter = 0;
+                    } // REGULAR
                 }
             } else {
-                unsafe { b.data.inter.filter = fi.subpel_filter_mode; }
+                unsafe {
+                    b.data.inter.filter = fi.subpel_filter_mode;
+                }
             }
         }
 
@@ -3421,19 +3751,51 @@ pub fn decode_sb(
     let have_v_split = fi.bh > *by + hh4;
     let cbs_orig = cbs;
 
-    if lbs == BlockSize::Bs64x64 && cbs == BlockSize::Bs64x64
-        && fi.sdp && !fi.is_inter_or_switch
-    {
+    if lbs == BlockSize::Bs64x64 && cbs == BlockSize::Bs64x64 && fi.sdp && !fi.is_inter_or_switch {
         let mut dir = 0i32;
         decode_sb(
-            fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed, pass,
-            a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-            lbs, BlockSize::Invalid, &mut dir,
+            fi,
+            bx,
+            by,
+            cbx,
+            cby,
+            intra_region,
+            sdp_cfl_disallowed,
+            pass,
+            a,
+            l,
+            msac,
+            cdf_m,
+            cdf_dmv,
+            part_w,
+            part_w_idx,
+            part_r,
+            part_r_idx,
+            lbs,
+            BlockSize::Invalid,
+            &mut dir,
         )?;
         return decode_sb(
-            fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed, pass,
-            a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-            BlockSize::Invalid, cbs, &mut dir,
+            fi,
+            bx,
+            by,
+            cbx,
+            cby,
+            intra_region,
+            sdp_cfl_disallowed,
+            pass,
+            a,
+            l,
+            msac,
+            cdf_m,
+            cdf_dmv,
+            part_w,
+            part_w_idx,
+            part_r,
+            part_r_idx,
+            BlockSize::Invalid,
+            cbs,
+            &mut dir,
         );
     }
 
@@ -3451,14 +3813,16 @@ pub fn decode_sb(
         assert!(bwh4ss[0] >= 1 && bwh4ss[1] >= 1);
         let mut dir = -1i32;
 
-        if imax(bwh4ss[0], bwh4ss[1]) == 1
-            || (pcc.part[0][0] & pcc.part[1][0]) == -1
-        {
+        if imax(bwh4ss[0], bwh4ss[1]) == 1 || (pcc.part[0][0] & pcc.part[1][0]) == -1 {
             bp = BlockPartition::None;
         } else if !have_h_split || !have_v_split {
             if bw4 == bh4 {
                 dir = have_v_split as i32;
-                bp = if !have_v_split { BlockPartition::H } else { BlockPartition::V };
+                bp = if !have_v_split {
+                    BlockPartition::H
+                } else {
+                    BlockPartition::V
+                };
             } else if bw4 > bh4 {
                 if !have_h_split || fi.bh <= *by + qh4 {
                     dir = 1;
@@ -3473,7 +3837,8 @@ pub fn decode_sb(
         }
 
         if bp == BlockPartition::Invalid {
-            if cbs == BlockSize::Bs64x64 && lbs == BlockSize::Invalid
+            if cbs == BlockSize::Bs64x64
+                && lbs == BlockSize::Invalid
                 && ((*dir_ptr & 0xff) == 0xff
                     || (*dir_ptr & 0x30003) == 0x10002
                     || (*dir_ptr & 0x30003) == 0x20001)
@@ -3482,11 +3847,7 @@ pub fn decode_sb(
                     bp = BlockPartition::None;
                 } else {
                     dir = ((*dir_ptr & 0x30003) == 0x10002) as i32;
-                    bp = unsafe {
-                        BlockPartition::from_raw(
-                            ((*dir_ptr >> 8) & 0xff) as i8
-                        )
-                    };
+                    bp = unsafe { BlockPartition::from_raw(((*dir_ptr >> 8) & 0xff) as i8) };
                 }
             } else {
                 let mix_inter = fi.is_inter_or_switch && *intra_region == 0;
@@ -3504,17 +3865,20 @@ pub fn decode_sb(
                     bp = BlockPartition::None;
                 } else {
                     if (bs == BlockSize::Bs128x128 || bs == BlockSize::Bs256x256)
-                        && have_v_split && have_h_split
+                        && have_v_split
+                        && have_h_split
                     {
                         let ctx3 = (ctx1 + (bs == BlockSize::Bs256x256) as i32 * 4) as usize;
-                        let is_square = msac.decode_bool_adapt(
-                            cdf_m.part_square(ctx3),
-                        );
+                        let is_square = msac.decode_bool_adapt(cdf_m.part_square(ctx3));
                         if is_square != 0 {
                             bp = BlockPartition::Split;
                         }
                     } else if imax(bw4, bh4) >= 32 {
-                        bp = if bw4 > bh4 { BlockPartition::V } else { BlockPartition::H };
+                        bp = if bw4 > bh4 {
+                            BlockPartition::V
+                        } else {
+                            BlockPartition::H
+                        };
                     }
 
                     if bp == BlockPartition::Invalid {
@@ -3529,12 +3893,14 @@ pub fn decode_sb(
                             dir = v_aspect as i32;
                         } else {
                             let ctx4 = (ctx1 + pcc.ctx[1] as i32 * 4) as usize;
-                            dir = msac.decode_bool_adapt(
-                                cdf_m.part_dir(pl, ctx4),
-                            ) as i32;
+                            dir = msac.decode_bool_adapt(cdf_m.part_dir(pl, ctx4)) as i32;
                         }
                         assert!(pcc.part[dir as usize][0] != -1);
-                        bp = if dir != 0 { BlockPartition::V } else { BlockPartition::H };
+                        bp = if dir != 0 {
+                            BlockPartition::V
+                        } else {
+                            BlockPartition::H
+                        };
 
                         if imax(bw4, bh4) <= 16 {
                             let bwh4ss2 = [bw4 >> fi.ss_hor, bh4 >> fi.ss_ver];
@@ -3547,11 +3913,17 @@ pub fn decode_sb(
                                 && (cbs != lbs
                                     || (bwh4ss2[ndir] >= 4 && bwh4ss2[ddir] >= 2)
                                     || (if dir != 0 {
-                                        if lbs == BlockSize::Bs32x8 { have_v_split }
-                                        else { *bx + qw4 * 3 < fi.bw }
+                                        if lbs == BlockSize::Bs32x8 {
+                                            have_v_split
+                                        } else {
+                                            *bx + qw4 * 3 < fi.bw
+                                        }
                                     } else {
-                                        if lbs == BlockSize::Bs8x32 { have_h_split }
-                                        else { *by + qh4 * 3 < fi.bh }
+                                        if lbs == BlockSize::Bs8x32 {
+                                            have_h_split
+                                        } else {
+                                            *by + qh4 * 3 < fi.bh
+                                        }
                                     }));
                             let has_hv4ab = bwh4ss[ndir] >= 8
                                 && fi.uneven_4way
@@ -3566,23 +3938,21 @@ pub fn decode_sb(
 
                             if has_hv3 || has_hv4ab {
                                 assert!(pcc.part[ddir][1] != -1);
-                                let ctx5 = get_partition2_ctx(
-                                    a, l, b_dim, pl, dir, by4, bx4,
-                                );
+                                let ctx5 = get_partition2_ctx(a, l, b_dim, pl, dir, by4, bx4);
                                 let ctx6 = (ctx5 + pcc.ctx[0] as i32 * 4) as usize;
-                                let is_ext = msac.decode_bool_adapt(
-                                    cdf_m.part_ext(pl, ctx6),
-                                );
+                                let is_ext = msac.decode_bool_adapt(cdf_m.part_ext(pl, ctx6));
                                 if is_ext != 0 {
-                                    bp = if dir != 0 { BlockPartition::V3 } else { BlockPartition::H3 };
+                                    bp = if dir != 0 {
+                                        BlockPartition::V3
+                                    } else {
+                                        BlockPartition::H3
+                                    };
                                     if has_hv4ab {
                                         assert!(pcc.part[ddir][2] != -1);
                                         let is_4way = if !has_hv3 {
                                             1u32
                                         } else {
-                                            msac.decode_bool_adapt(
-                                                cdf_m.part_4way(pl, ctx6),
-                                            )
+                                            msac.decode_bool_adapt(cdf_m.part_4way(pl, ctx6))
                                         };
                                         if is_4way != 0 {
                                             let is_a_or_b = msac.decode_bool_bypass();
@@ -3590,7 +3960,7 @@ pub fn decode_sb(
                                                 BlockPartition::from_raw(
                                                     BlockPartition::H4A as i8
                                                         + dir as i8 * 2
-                                                        + is_a_or_b as i8
+                                                        + is_a_or_b as i8,
                                                 )
                                             };
                                         }
@@ -3610,7 +3980,8 @@ pub fn decode_sb(
         *dir_ptr |= (dir as u8) as i32 | ((bp as i8 as i32) << 8);
 
         let mut unmix_bit = 0i32;
-        if fi.is_inter_or_switch && fi.ext_sdp
+        if fi.is_inter_or_switch
+            && fi.ext_sdp
             && (cbs as i8 | lbs as i8) != BlockSize::Invalid as i8
             && bp != BlockPartition::None
             && (*dir_ptr & (1 << 24)) == 0
@@ -3653,8 +4024,23 @@ pub fn decode_sb(
 
     match bp {
         BlockPartition::None => {
-            let _b = decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
-                     *sdp_cfl_disallowed, pass, a, l, msac, cdf_m, cdf_dmv, lbs, cbs)?;
+            let _b = decode_b(
+                fi,
+                *bx,
+                *by,
+                *cbx,
+                *cby,
+                *intra_region,
+                *sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                lbs,
+                cbs,
+            )?;
             if pass & (Pass::Entropy as u8) != 0 {
                 let bx4 = (*bx & 63) as usize;
                 let by4 = (*by & 63) as usize;
@@ -3673,24 +4059,68 @@ pub fn decode_sb(
             assert!(hw4 > 0);
             let sub4 = bs == cbs && (hw4 >> fi.ss_hor) > 0;
             assert!(sub4 || pl == 0);
-            let child_lbs = if pl != 0 { BlockSize::Invalid } else {
+            let child_lbs = if pl != 0 {
+                BlockSize::Invalid
+            } else {
                 unsafe { BlockSize::from_raw(pcc.part[1][0]) }
             };
             let child_cbs_first = if sub4 {
                 unsafe { BlockSize::from_raw(pcc.part[1][0]) }
-            } else { BlockSize::Invalid };
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      child_lbs, child_cbs_first, &mut child_dir)?;
-            if *bx + hw4 >= fi.bw { /* done */ }
-            else {
+            } else {
+                BlockSize::Invalid
+            };
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                child_lbs,
+                child_cbs_first,
+                &mut child_dir,
+            )?;
+            if *bx + hw4 >= fi.bw { /* done */
+            } else {
                 *bx += hw4;
                 let child_cbs_second = if sub4 {
                     unsafe { BlockSize::from_raw(pcc.part[1][0]) }
-                } else { cbs };
-                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                          child_lbs, child_cbs_second, &mut child_dir)?;
+                } else {
+                    cbs
+                };
+                decode_sb(
+                    fi,
+                    bx,
+                    by,
+                    cbx,
+                    cby,
+                    intra_region,
+                    sdp_cfl_disallowed,
+                    pass,
+                    a,
+                    l,
+                    msac,
+                    cdf_m,
+                    cdf_dmv,
+                    part_w,
+                    part_w_idx,
+                    part_r,
+                    part_r_idx,
+                    child_lbs,
+                    child_cbs_second,
+                    &mut child_dir,
+                )?;
                 *bx -= hw4;
             }
         }
@@ -3698,46 +4128,166 @@ pub fn decode_sb(
             assert!(hh4 > 0);
             let sub4 = bs == cbs && (hh4 >> fi.ss_ver) > 0;
             assert!(sub4 || pl == 0);
-            let child_lbs = if pl != 0 { BlockSize::Invalid } else {
+            let child_lbs = if pl != 0 {
+                BlockSize::Invalid
+            } else {
                 unsafe { BlockSize::from_raw(pcc.part[0][0]) }
             };
             let child_cbs_first = if sub4 {
                 unsafe { BlockSize::from_raw(pcc.part[0][0]) }
-            } else { BlockSize::Invalid };
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      child_lbs, child_cbs_first, &mut child_dir)?;
-            if *by + hh4 >= fi.bh { /* done */ }
-            else {
+            } else {
+                BlockSize::Invalid
+            };
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                child_lbs,
+                child_cbs_first,
+                &mut child_dir,
+            )?;
+            if *by + hh4 >= fi.bh { /* done */
+            } else {
                 *by += hh4;
                 let child_cbs_second = if sub4 {
                     unsafe { BlockSize::from_raw(pcc.part[0][0]) }
-                } else { cbs };
-                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                          child_lbs, child_cbs_second, &mut child_dir)?;
+                } else {
+                    cbs
+                };
+                decode_sb(
+                    fi,
+                    bx,
+                    by,
+                    cbx,
+                    cby,
+                    intra_region,
+                    sdp_cfl_disallowed,
+                    pass,
+                    a,
+                    l,
+                    msac,
+                    cdf_m,
+                    cdf_dmv,
+                    part_w,
+                    part_w_idx,
+                    part_r,
+                    part_r_idx,
+                    child_lbs,
+                    child_cbs_second,
+                    &mut child_dir,
+                )?;
                 *by -= hh4;
             }
         }
         BlockPartition::Split => {
             assert!(have_v_split && have_h_split && cbs == lbs);
             let sbs = unsafe { BlockSize::from_raw(pcc.part[0][3]) };
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      sbs, sbs, &mut child_dir)?;
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                sbs,
+                sbs,
+                &mut child_dir,
+            )?;
             *bx += hw4;
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      sbs, sbs, &mut child_dir)?;
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                sbs,
+                sbs,
+                &mut child_dir,
+            )?;
             *bx -= hw4;
             *by += hh4;
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      sbs, sbs, &mut child_dir)?;
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                sbs,
+                sbs,
+                &mut child_dir,
+            )?;
             *bx += hw4;
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      sbs, sbs, &mut child_dir)?;
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                sbs,
+                sbs,
+                &mut child_dir,
+            )?;
             *bx -= hw4;
             *by -= hh4;
         }
@@ -3750,35 +4300,118 @@ pub fn decode_sb(
             let p1_3 = unsafe { BlockSize::from_raw(pcc.part[1][3]) };
             let lbs_child = if pl != 0 { BlockSize::Invalid } else { p1_1 };
             let cbs_first = if i_3only { BlockSize::Invalid } else { p1_1 };
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      lbs_child, cbs_first, &mut child_dir)?;
-            if *bx + qw4 >= fi.bw { /* done */ }
-            else {
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                lbs_child,
+                cbs_first,
+                &mut child_dir,
+            )?;
+            if *bx + qw4 >= fi.bw { /* done */
+            } else {
                 *bx += qw4;
-                if !i_3only { *cbx = *bx; }
+                if !i_3only {
+                    *cbx = *bx;
+                }
                 let lbs_mid = if pl != 0 { BlockSize::Invalid } else { p1_3 };
                 let cbs_mid = if sub4 { p1_3 } else { BlockSize::Invalid };
-                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                          lbs_mid, cbs_mid, &mut child_dir)?;
+                decode_sb(
+                    fi,
+                    bx,
+                    by,
+                    cbx,
+                    cby,
+                    intra_region,
+                    sdp_cfl_disallowed,
+                    pass,
+                    a,
+                    l,
+                    msac,
+                    cdf_m,
+                    cdf_dmv,
+                    part_w,
+                    part_w_idx,
+                    part_r,
+                    part_r_idx,
+                    lbs_mid,
+                    cbs_mid,
+                    &mut child_dir,
+                )?;
                 if *by + hh4 < fi.bh {
                     *by += hh4;
-                    let cbs_mid2 = if i_3only { BlockSize::Invalid } else if sub4 { p1_3 } else {
+                    let cbs_mid2 = if i_3only {
+                        BlockSize::Invalid
+                    } else if sub4 {
+                        p1_3
+                    } else {
                         unsafe { BlockSize::from_raw(pcc.part[1][0]) }
                     };
-                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                              lbs_mid, cbs_mid2, &mut child_dir)?;
+                    decode_sb(
+                        fi,
+                        bx,
+                        by,
+                        cbx,
+                        cby,
+                        intra_region,
+                        sdp_cfl_disallowed,
+                        pass,
+                        a,
+                        l,
+                        msac,
+                        cdf_m,
+                        cdf_dmv,
+                        part_w,
+                        part_w_idx,
+                        part_r,
+                        part_r_idx,
+                        lbs_mid,
+                        cbs_mid2,
+                        &mut child_dir,
+                    )?;
                     *by -= hh4;
                 }
-                if *bx + hw4 >= fi.bw { *bx -= qw4; }
-                else {
+                if *bx + hw4 >= fi.bw {
+                    *bx -= qw4;
+                } else {
                     *bx += hw4;
                     let cbs_last = if i_3only { cbs } else { p1_1 };
-                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                              lbs_child, cbs_last, &mut child_dir)?;
+                    decode_sb(
+                        fi,
+                        bx,
+                        by,
+                        cbx,
+                        cby,
+                        intra_region,
+                        sdp_cfl_disallowed,
+                        pass,
+                        a,
+                        l,
+                        msac,
+                        cdf_m,
+                        cdf_dmv,
+                        part_w,
+                        part_w_idx,
+                        part_r,
+                        part_r_idx,
+                        lbs_child,
+                        cbs_last,
+                        &mut child_dir,
+                    )?;
                     *bx -= 3 * qw4;
                 }
             }
@@ -3792,35 +4425,118 @@ pub fn decode_sb(
             let p0_3 = unsafe { BlockSize::from_raw(pcc.part[0][3]) };
             let lbs_child = if pl != 0 { BlockSize::Invalid } else { p0_1 };
             let cbs_first = if i_3only { BlockSize::Invalid } else { p0_1 };
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      lbs_child, cbs_first, &mut child_dir)?;
-            if *by + qh4 >= fi.bh { /* done */ }
-            else {
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                lbs_child,
+                cbs_first,
+                &mut child_dir,
+            )?;
+            if *by + qh4 >= fi.bh { /* done */
+            } else {
                 *by += qh4;
-                if !i_3only { *cby = *by; }
+                if !i_3only {
+                    *cby = *by;
+                }
                 let lbs_mid = if pl != 0 { BlockSize::Invalid } else { p0_3 };
                 let cbs_mid = if sub4 { p0_3 } else { BlockSize::Invalid };
-                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                          lbs_mid, cbs_mid, &mut child_dir)?;
+                decode_sb(
+                    fi,
+                    bx,
+                    by,
+                    cbx,
+                    cby,
+                    intra_region,
+                    sdp_cfl_disallowed,
+                    pass,
+                    a,
+                    l,
+                    msac,
+                    cdf_m,
+                    cdf_dmv,
+                    part_w,
+                    part_w_idx,
+                    part_r,
+                    part_r_idx,
+                    lbs_mid,
+                    cbs_mid,
+                    &mut child_dir,
+                )?;
                 if *bx + hw4 < fi.bw {
                     *bx += hw4;
-                    let cbs_mid2 = if i_3only { BlockSize::Invalid } else if sub4 { p0_3 } else {
+                    let cbs_mid2 = if i_3only {
+                        BlockSize::Invalid
+                    } else if sub4 {
+                        p0_3
+                    } else {
                         unsafe { BlockSize::from_raw(pcc.part[0][0]) }
                     };
-                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                              lbs_mid, cbs_mid2, &mut child_dir)?;
+                    decode_sb(
+                        fi,
+                        bx,
+                        by,
+                        cbx,
+                        cby,
+                        intra_region,
+                        sdp_cfl_disallowed,
+                        pass,
+                        a,
+                        l,
+                        msac,
+                        cdf_m,
+                        cdf_dmv,
+                        part_w,
+                        part_w_idx,
+                        part_r,
+                        part_r_idx,
+                        lbs_mid,
+                        cbs_mid2,
+                        &mut child_dir,
+                    )?;
                     *bx -= hw4;
                 }
-                if *by + hh4 >= fi.bh { *by -= qh4; }
-                else {
+                if *by + hh4 >= fi.bh {
+                    *by -= qh4;
+                } else {
                     *by += hh4;
                     let cbs_last = if i_3only { cbs } else { p0_1 };
-                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                              lbs_child, cbs_last, &mut child_dir)?;
+                    decode_sb(
+                        fi,
+                        bx,
+                        by,
+                        cbx,
+                        cby,
+                        intra_region,
+                        sdp_cfl_disallowed,
+                        pass,
+                        a,
+                        l,
+                        msac,
+                        cdf_m,
+                        cdf_dmv,
+                        part_w,
+                        part_w_idx,
+                        part_r,
+                        part_r_idx,
+                        lbs_child,
+                        cbs_last,
+                        &mut child_dir,
+                    )?;
                     *by -= 3 * qh4;
                 }
             }
@@ -3838,33 +4554,107 @@ pub fn decode_sb(
             let lbs_nvar = if pl != 0 { BlockSize::Invalid } else { p1_nvar };
             let lbs_var = if pl != 0 { BlockSize::Invalid } else { p1_var };
 
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      lbs_edge, if sub4 { p1_2 } else { BlockSize::Invalid },
-                      &mut child_dir)?;
-            if *bx + ew4 >= fi.bw { /* done */ }
-            else {
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                lbs_edge,
+                if sub4 { p1_2 } else { BlockSize::Invalid },
+                &mut child_dir,
+            )?;
+            if *bx + ew4 >= fi.bw { /* done */
+            } else {
                 *bx += ew4;
-                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                          lbs_nvar, if sub4 { p1_nvar } else { BlockSize::Invalid },
-                          &mut child_dir)?;
+                decode_sb(
+                    fi,
+                    bx,
+                    by,
+                    cbx,
+                    cby,
+                    intra_region,
+                    sdp_cfl_disallowed,
+                    pass,
+                    a,
+                    l,
+                    msac,
+                    cdf_m,
+                    cdf_dmv,
+                    part_w,
+                    part_w_idx,
+                    part_r,
+                    part_r_idx,
+                    lbs_nvar,
+                    if sub4 { p1_nvar } else { BlockSize::Invalid },
+                    &mut child_dir,
+                )?;
                 let w4a = qw4 << var;
                 let w4b = hw4 >> var;
-                if *bx + w4a >= fi.bw { *bx -= ew4; }
-                else {
+                if *bx + w4a >= fi.bw {
+                    *bx -= ew4;
+                } else {
                     *bx += w4a;
-                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                              lbs_var, if sub4 { p1_var } else { BlockSize::Invalid },
-                              &mut child_dir)?;
-                    if *bx + w4b >= fi.bw { *bx -= ew4 + w4a; }
-                    else {
+                    decode_sb(
+                        fi,
+                        bx,
+                        by,
+                        cbx,
+                        cby,
+                        intra_region,
+                        sdp_cfl_disallowed,
+                        pass,
+                        a,
+                        l,
+                        msac,
+                        cdf_m,
+                        cdf_dmv,
+                        part_w,
+                        part_w_idx,
+                        part_r,
+                        part_r_idx,
+                        lbs_var,
+                        if sub4 { p1_var } else { BlockSize::Invalid },
+                        &mut child_dir,
+                    )?;
+                    if *bx + w4b >= fi.bw {
+                        *bx -= ew4 + w4a;
+                    } else {
                         *bx += w4b;
-                        decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                                  pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                                  lbs_edge, if sub4 { p1_2 } else { cbs },
-                                  &mut child_dir)?;
+                        decode_sb(
+                            fi,
+                            bx,
+                            by,
+                            cbx,
+                            cby,
+                            intra_region,
+                            sdp_cfl_disallowed,
+                            pass,
+                            a,
+                            l,
+                            msac,
+                            cdf_m,
+                            cdf_dmv,
+                            part_w,
+                            part_w_idx,
+                            part_r,
+                            part_r_idx,
+                            lbs_edge,
+                            if sub4 { p1_2 } else { cbs },
+                            &mut child_dir,
+                        )?;
                         *bx -= 7 * ew4;
                     }
                 }
@@ -3883,33 +4673,107 @@ pub fn decode_sb(
             let lbs_nvar = if pl != 0 { BlockSize::Invalid } else { p0_nvar };
             let lbs_var = if pl != 0 { BlockSize::Invalid } else { p0_var };
 
-            decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                      pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                      lbs_edge, if sub4 { p0_2 } else { BlockSize::Invalid },
-                      &mut child_dir)?;
-            if *by + eh4 >= fi.bh { /* done */ }
-            else {
+            decode_sb(
+                fi,
+                bx,
+                by,
+                cbx,
+                cby,
+                intra_region,
+                sdp_cfl_disallowed,
+                pass,
+                a,
+                l,
+                msac,
+                cdf_m,
+                cdf_dmv,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                lbs_edge,
+                if sub4 { p0_2 } else { BlockSize::Invalid },
+                &mut child_dir,
+            )?;
+            if *by + eh4 >= fi.bh { /* done */
+            } else {
                 *by += eh4;
-                decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                          pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                          lbs_nvar, if sub4 { p0_nvar } else { BlockSize::Invalid },
-                          &mut child_dir)?;
+                decode_sb(
+                    fi,
+                    bx,
+                    by,
+                    cbx,
+                    cby,
+                    intra_region,
+                    sdp_cfl_disallowed,
+                    pass,
+                    a,
+                    l,
+                    msac,
+                    cdf_m,
+                    cdf_dmv,
+                    part_w,
+                    part_w_idx,
+                    part_r,
+                    part_r_idx,
+                    lbs_nvar,
+                    if sub4 { p0_nvar } else { BlockSize::Invalid },
+                    &mut child_dir,
+                )?;
                 let h4a = qh4 << var;
                 let h4b = hh4 >> var;
-                if *by + h4a >= fi.bh { *by -= eh4; }
-                else {
+                if *by + h4a >= fi.bh {
+                    *by -= eh4;
+                } else {
                     *by += h4a;
-                    decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                              pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                              lbs_var, if sub4 { p0_var } else { BlockSize::Invalid },
-                              &mut child_dir)?;
-                    if *by + h4b >= fi.bh { *by -= eh4 + h4a; }
-                    else {
+                    decode_sb(
+                        fi,
+                        bx,
+                        by,
+                        cbx,
+                        cby,
+                        intra_region,
+                        sdp_cfl_disallowed,
+                        pass,
+                        a,
+                        l,
+                        msac,
+                        cdf_m,
+                        cdf_dmv,
+                        part_w,
+                        part_w_idx,
+                        part_r,
+                        part_r_idx,
+                        lbs_var,
+                        if sub4 { p0_var } else { BlockSize::Invalid },
+                        &mut child_dir,
+                    )?;
+                    if *by + h4b >= fi.bh {
+                        *by -= eh4 + h4a;
+                    } else {
                         *by += h4b;
-                        decode_sb(fi, bx, by, cbx, cby, intra_region, sdp_cfl_disallowed,
-                                  pass, a, l, msac, cdf_m, cdf_dmv, part_w, part_w_idx, part_r, part_r_idx,
-                                  lbs_edge, if sub4 { p0_2 } else { cbs },
-                                  &mut child_dir)?;
+                        decode_sb(
+                            fi,
+                            bx,
+                            by,
+                            cbx,
+                            cby,
+                            intra_region,
+                            sdp_cfl_disallowed,
+                            pass,
+                            a,
+                            l,
+                            msac,
+                            cdf_m,
+                            cdf_dmv,
+                            part_w,
+                            part_w_idx,
+                            part_r,
+                            part_r_idx,
+                            lbs_edge,
+                            if sub4 { p0_2 } else { cbs },
+                            &mut child_dir,
+                        )?;
                         *by -= 7 * eh4;
                     }
                 }
@@ -3923,9 +4787,23 @@ pub fn decode_sb(
     if *intra_region != 0 && cbs_orig != BlockSize::Invalid {
         *cbx = *bx;
         *cby = *by;
-        let _b = decode_b(fi, *bx, *by, *cbx, *cby, *intra_region,
-                 *sdp_cfl_disallowed, pass, a, l, msac, cdf_m, cdf_dmv,
-                 BlockSize::Invalid, cbs_orig)?;
+        let _b = decode_b(
+            fi,
+            *bx,
+            *by,
+            *cbx,
+            *cby,
+            *intra_region,
+            *sdp_cfl_disallowed,
+            pass,
+            a,
+            l,
+            msac,
+            cdf_m,
+            cdf_dmv,
+            BlockSize::Invalid,
+            cbs_orig,
+        )?;
         *intra_region = 0;
     }
 
@@ -4029,9 +4907,9 @@ mod tests {
 
     #[test]
     fn test_ss_size_mul() {
-        assert_eq!(SS_SIZE_MUL[0], [4, 4]);   // I400
-        assert_eq!(SS_SIZE_MUL[1], [6, 5]);   // I420
-        assert_eq!(SS_SIZE_MUL[3], [12, 8]);  // I444
+        assert_eq!(SS_SIZE_MUL[0], [4, 4]); // I400
+        assert_eq!(SS_SIZE_MUL[1], [6, 5]); // I420
+        assert_eq!(SS_SIZE_MUL[3], [12, 8]); // I444
     }
 
     #[test]
@@ -4093,9 +4971,9 @@ mod tests {
     fn test_intra_mode_tables() {
         assert_eq!(REORDERED_NONDIR_Y_MODE[0], 0); // DC_PRED
         assert_eq!(REORDERED_NONDIR_Y_MODE[1], 9); // SMOOTH_PRED
-        assert_eq!(REORDERED_DIR_Y_MODE[2], 1);    // VERT_PRED
+        assert_eq!(REORDERED_DIR_Y_MODE[2], 1); // VERT_PRED
         assert_eq!(DEFAULT_MODE_LIST_Y.len(), 56);
-        assert_eq!(DEFAULT_MODE_LIST_UV[0], 1);     // VERT_PRED
+        assert_eq!(DEFAULT_MODE_LIST_UV[0], 1); // VERT_PRED
         assert_eq!(INTRA_DIR_MODE_Y_TO_UV_IDX.len(), 8);
     }
 
@@ -4217,13 +5095,32 @@ mod tests {
             }
             cdf.data[base + 7] = 0;
         }
-        cdf.data[112] = 16384; cdf.data[113] = 0;
-        cdf.data[114] = 16384; cdf.data[115] = 0;
-        for i in 0..2 { let b = 116 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
-        cdf.data[120] = 16384; cdf.data[121] = 0;
-        for i in 0..16 { let b = 122 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
-        for i in 0..2 { let b = 154 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
-        for i in 0..4 { let b = 158 + i * 2; cdf.data[b] = 16384; cdf.data[b + 1] = 0; }
+        cdf.data[112] = 16384;
+        cdf.data[113] = 0;
+        cdf.data[114] = 16384;
+        cdf.data[115] = 0;
+        for i in 0..2 {
+            let b = 116 + i * 2;
+            cdf.data[b] = 16384;
+            cdf.data[b + 1] = 0;
+        }
+        cdf.data[120] = 16384;
+        cdf.data[121] = 0;
+        for i in 0..16 {
+            let b = 122 + i * 2;
+            cdf.data[b] = 16384;
+            cdf.data[b + 1] = 0;
+        }
+        for i in 0..2 {
+            let b = 154 + i * 2;
+            cdf.data[b] = 16384;
+            cdf.data[b + 1] = 0;
+        }
+        for i in 0..4 {
+            let b = 158 + i * 2;
+            cdf.data[b] = 16384;
+            cdf.data[b + 1] = 0;
+        }
         cdf
     }
 
@@ -4282,7 +5179,9 @@ mod tests {
     }
 
     fn make_default_cdf_mode() -> CdfModeContext {
-        CdfModeContext { data: [16384u16; 3496] }
+        CdfModeContext {
+            data: [16384u16; 3496],
+        }
     }
 
     fn make_default_block() -> crate::levels::Av2Block {
@@ -4329,7 +5228,14 @@ mod tests {
         let mut cdf_m = make_default_cdf_mode();
         let mut b = make_default_block();
         b.skip_txfm = 1;
-        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs16x16, false, true);
+        read_tx_part(
+            &mut msac,
+            &mut cdf_m,
+            &mut b,
+            BlockSize::Bs16x16,
+            false,
+            true,
+        );
         assert_eq!(b.tx_part, TxPartition::None as u8);
     }
 
@@ -4376,7 +5282,14 @@ mod tests {
             let mut pal_out = vec![0u8; 64];
             let mut scratch = vec![0u8; 4096];
             let sz = [4, 4, 4, 4];
-            let ret = read_pal_indices(&mut msac, &mut cdf_m, &mut pal_out, &mut scratch, pal_sz, &sz);
+            let ret = read_pal_indices(
+                &mut msac,
+                &mut cdf_m,
+                &mut pal_out,
+                &mut scratch,
+                pal_sz,
+                &sz,
+            );
             assert!(ret == 0 || ret == -1);
         }
     }
@@ -4551,8 +5464,13 @@ mod tests {
         let ns = make_default_ns_plane(1);
 
         read_restoration_info(
-            &mut msac, &mut cdf_m, &mut bank, &mut lr,
-            0, RestorationType::Switchable, &ns,
+            &mut msac,
+            &mut cdf_m,
+            &mut bank,
+            &mut lr,
+            0,
+            RestorationType::Switchable,
+            &ns,
         );
         assert!(
             lr.restoration_type == RestorationType::None as u8
@@ -4571,8 +5489,13 @@ mod tests {
         let ns = make_default_ns_plane(1);
 
         read_restoration_info(
-            &mut msac, &mut cdf_m, &mut bank, &mut lr,
-            0, RestorationType::NsWiener, &ns,
+            &mut msac,
+            &mut cdf_m,
+            &mut bank,
+            &mut lr,
+            0,
+            RestorationType::NsWiener,
+            &ns,
         );
         assert!(
             lr.restoration_type == RestorationType::None as u8
@@ -4590,8 +5513,13 @@ mod tests {
         let ns = make_default_ns_plane(1);
 
         read_restoration_info(
-            &mut msac, &mut cdf_m, &mut bank, &mut lr,
-            0, RestorationType::PcWiener, &ns,
+            &mut msac,
+            &mut cdf_m,
+            &mut bank,
+            &mut lr,
+            0,
+            RestorationType::PcWiener,
+            &ns,
         );
         assert!(
             lr.restoration_type == RestorationType::None as u8
@@ -4612,8 +5540,13 @@ mod tests {
         let ns = make_default_ns_plane(1);
 
         read_restoration_info(
-            &mut msac, &mut cdf_m, &mut bank, &mut lr,
-            0, RestorationType::NsWiener, &ns,
+            &mut msac,
+            &mut cdf_m,
+            &mut bank,
+            &mut lr,
+            0,
+            RestorationType::NsWiener,
+            &ns,
         );
         if lr.restoration_type == RestorationType::NsWiener as u8 {
             assert!(bank.bank_size[0] <= 4);
@@ -4630,8 +5563,13 @@ mod tests {
         let ns = make_default_ns_plane(1);
 
         read_restoration_info(
-            &mut msac, &mut cdf_m, &mut bank, &mut lr,
-            1, RestorationType::NsWiener, &ns,
+            &mut msac,
+            &mut cdf_m,
+            &mut bank,
+            &mut lr,
+            1,
+            RestorationType::NsWiener,
+            &ns,
         );
         assert!(
             lr.restoration_type == RestorationType::None as u8
@@ -4662,9 +5600,24 @@ mod tests {
         let absrefdist = [0u8; 7];
 
         decode_frame_init(
-            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
-            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
-            4, 2, 2, 32, 32, 1, 1,
+            &hdr,
+            &seq,
+            &mut lf,
+            &mut ft,
+            &mut ts,
+            &mut n_ts,
+            &mut a,
+            &mut a_sz,
+            &mut dq,
+            &mut qm,
+            &absrefdist,
+            4,
+            2,
+            2,
+            32,
+            32,
+            1,
+            1,
         );
 
         assert_eq!(n_ts, 1);
@@ -4688,9 +5641,24 @@ mod tests {
         let absrefdist = [0u8; 7];
 
         decode_frame_init(
-            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
-            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
-            8, 4, 4, 64, 64, 1, 1,
+            &hdr,
+            &seq,
+            &mut lf,
+            &mut ft,
+            &mut ts,
+            &mut n_ts,
+            &mut a,
+            &mut a_sz,
+            &mut dq,
+            &mut qm,
+            &absrefdist,
+            8,
+            4,
+            4,
+            64,
+            64,
+            1,
+            1,
         );
 
         assert_eq!(n_ts, 6);
@@ -4715,9 +5683,24 @@ mod tests {
         let absrefdist = [0u8; 7];
 
         decode_frame_init(
-            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
-            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
-            4, 2, 2, 32, 32, 4, 1,
+            &hdr,
+            &seq,
+            &mut lf,
+            &mut ft,
+            &mut ts,
+            &mut n_ts,
+            &mut a,
+            &mut a_sz,
+            &mut dq,
+            &mut qm,
+            &absrefdist,
+            4,
+            2,
+            2,
+            32,
+            32,
+            4,
+            1,
         );
 
         assert_eq!(n_ts, 1);
@@ -4739,9 +5722,24 @@ mod tests {
         let absrefdist = [0u8; 7];
 
         decode_frame_init(
-            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
-            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
-            4, 2, 2, 32, 32, 1, 2,
+            &hdr,
+            &seq,
+            &mut lf,
+            &mut ft,
+            &mut ts,
+            &mut n_ts,
+            &mut a,
+            &mut a_sz,
+            &mut dq,
+            &mut qm,
+            &absrefdist,
+            4,
+            2,
+            2,
+            32,
+            32,
+            1,
+            2,
         );
 
         assert_eq!(n_ts, 4);
@@ -4763,9 +5761,24 @@ mod tests {
         let absrefdist = [0u8; 7];
 
         decode_frame_init(
-            &hdr, &seq, &mut lf, &mut ft, &mut ts, &mut n_ts,
-            &mut a, &mut a_sz, &mut dq, &mut qm, &absrefdist,
-            4, 3, 2, 32, 32, 1, 1,
+            &hdr,
+            &seq,
+            &mut lf,
+            &mut ft,
+            &mut ts,
+            &mut n_ts,
+            &mut a,
+            &mut a_sz,
+            &mut dq,
+            &mut qm,
+            &absrefdist,
+            4,
+            3,
+            2,
+            32,
+            32,
+            1,
+            1,
         );
 
         assert_eq!(lf.mask.len(), 6);
@@ -4875,11 +5888,20 @@ mod tests {
         let data = vec![0xAA; 32];
 
         setup_tile(
-            &mut ts, &data, &hdr, None, 2,
-            0, 0,
+            &mut ts,
+            &data,
+            &hdr,
+            None,
+            2,
+            0,
+            0,
             hdr.tiling.t.col_start_sb.as_ref(),
             hdr.tiling.t.row_start_sb.as_ref(),
-            2, 32, 32, 1, 0,
+            2,
+            32,
+            32,
+            1,
+            0,
         );
 
         assert_eq!(ts.last_qidx, 128);
@@ -4896,8 +5918,20 @@ mod tests {
         cdf.m.data[0] = 12345;
 
         setup_tile(
-            &mut ts, &[0; 8], &hdr, Some(&cdf), 0,
-            0, 0, &[0, 1], &[0, 1], 2, 16, 16, 1, 0,
+            &mut ts,
+            &[0; 8],
+            &hdr,
+            Some(&cdf),
+            0,
+            0,
+            0,
+            &[0, 1],
+            &[0, 1],
+            2,
+            16,
+            16,
+            1,
+            0,
         );
 
         assert_eq!(ts.cdf.m.data[0], 12345);
@@ -4922,8 +5956,17 @@ mod tests {
         let mut tile_start_off = vec![0u32];
 
         let res = decode_frame_init_cdf(
-            &mut ts, &[tg], &hdr, None, 0,
-            2, 32, 32, 1, 1, &mut tile_start_off,
+            &mut ts,
+            &[tg],
+            &hdr,
+            None,
+            0,
+            2,
+            32,
+            32,
+            1,
+            1,
+            &mut tile_start_off,
         );
 
         assert!(res.is_ok());
@@ -4942,7 +5985,8 @@ mod tests {
 
         let mut data = Vec::new();
         // tile 0 size: 10 bytes (little-endian: 9 because tile_sz = stored+1)
-        data.push(9); data.push(0);
+        data.push(9);
+        data.push(0);
         data.extend_from_slice(&[0xAA; 10]);
         // tile 1: remaining
         data.extend_from_slice(&[0xBB; 20]);
@@ -4960,8 +6004,17 @@ mod tests {
         let mut tile_start_off = vec![0u32; 2];
 
         let res = decode_frame_init_cdf(
-            &mut ts, &[tg], &hdr, None, 0,
-            2, 64, 32, 1, 1, &mut tile_start_off,
+            &mut ts,
+            &[tg],
+            &hdr,
+            None,
+            0,
+            2,
+            64,
+            32,
+            1,
+            1,
+            &mut tile_start_off,
         );
 
         assert!(res.is_ok());
@@ -4991,8 +6044,17 @@ mod tests {
         let mut tile_start_off = vec![0u32; 2];
 
         let res = decode_frame_init_cdf(
-            &mut ts, &[tg], &hdr, None, 0,
-            2, 64, 32, 1, 1, &mut tile_start_off,
+            &mut ts,
+            &[tg],
+            &hdr,
+            None,
+            0,
+            2,
+            64,
+            32,
+            1,
+            1,
+            &mut tile_start_off,
         );
 
         assert!(res.is_err());
@@ -5001,20 +6063,30 @@ mod tests {
     fn make_test_tile() -> refmvs::Tile {
         use crate::levels::RefPair;
         refmvs::Tile {
-            rp_proj: Vec::new(), rp_proj_off: 0, rp_traj_off: 0,
-            ra: vec![refmvs::Block::default(); 256], ra_off: 0,
+            rp_proj: Vec::new(),
+            rp_proj_off: 0,
+            rp_traj_off: 0,
+            ra: vec![refmvs::Block::default(); 256],
+            ra_off: 0,
             ra_tl: refmvs::Block::default(),
             r: vec![refmvs::Block::default(); 64 * 128],
             tile_col: refmvs::TileRange { start: 0, end: 64 },
             tile_row: refmvs::TileRange { start: 0, end: 64 },
             bank: refmvs::MvBank {
                 mv: [[[Mv::default(); 2]; 4]; 9],
-                cwp_idx: [[0; 4]; 3], r#ref: [RefPair::default(); 4],
-                size: [0; 9], idx: [0; 9], hits: [0; 2], avail: 0,
+                cwp_idx: [[0; 4]; 3],
+                r#ref: [RefPair::default(); 4],
+                size: [0; 9],
+                idx: [0; 9],
+                hits: [0; 2],
+                avail: 0,
             },
             warp: refmvs::WarpBank {
-                mat: [[[0; 6]; 4]; 7], warp_type: [[0; 4]; 7],
-                hits: 0, size: [0; 7], idx: [0; 7],
+                mat: [[[0; 6]; 4]; 7],
+                warp_type: [[0; 4]; 7],
+                hits: 0,
+                size: [0; 7],
+                idx: [0; 7],
             },
         }
     }
@@ -5029,23 +6101,30 @@ mod tests {
         let neighbor_row = ((by - 1) & 63) as usize * 128;
         let neighbor_x = ((bx + 2) & 127) as usize;
         rt.r[neighbor_row + neighbor_x].mf = 0;
-        rt.r[neighbor_row + neighbor_x].mv[0] = Mv { c: MvXY { y: 100, x: 200 } };
-        unsafe { rt.r[neighbor_row + neighbor_x].r#ref.r[0] = 1; }
+        rt.r[neighbor_row + neighbor_x].mv[0] = Mv {
+            c: MvXY { y: 100, x: 200 },
+        };
+        unsafe {
+            rt.r[neighbor_row + neighbor_x].r#ref.r[0] = 1;
+        }
 
         let b_dim = &[4u8, 4, 2, 2];
-        let mv0 = Mv { c: MvXY { y: 50, x: 100 } };
+        let mv0 = Mv {
+            c: MvXY { y: 50, x: 100 },
+        };
         let mut wmp = WarpedMotionParams::default();
         let gmv = [0i32; 6];
 
         extend_warpmv(&rt, bx, by, 2, -1, b_dim, 1, mv0, &mut wmp, sb_step, &gmv);
-        assert!(wmp.wm_type != WarpedMotionType::Invalid
-            || wmp.wm_type == WarpedMotionType::Invalid);
+        assert!(
+            wmp.wm_type != WarpedMotionType::Invalid || wmp.wm_type == WarpedMotionType::Invalid
+        );
     }
 
     #[test]
     fn test_derive_warpmv_single_top_neighbor() {
         use crate::headers::WarpedMotionType;
-        
+
         let mut rt = make_test_tile();
         let by = 4i32;
         let bx = 4i32;
@@ -5055,47 +6134,99 @@ mod tests {
         let above_x = (bx & 127) as usize;
         rt.r[above_row + above_x].bs = BlockSize::Bs8x8 as u8;
         rt.r[above_row + above_x].mf = 0;
-        rt.r[above_row + above_x].mv[0] = Mv { c: MvXY { y: 32, x: 64 } };
-        unsafe { rt.r[above_row + above_x].r#ref.r[0] = ref_idx; }
+        rt.r[above_row + above_x].mv[0] = Mv {
+            c: MvXY { y: 32, x: 64 },
+        };
+        unsafe {
+            rt.r[above_row + above_x].r#ref.r[0] = ref_idx;
+        }
 
         let left_col = ((bx - 1) & 127) as usize;
         let cur_row = (by & 63) as usize * 128;
         rt.r[cur_row + left_col].bs = BlockSize::Bs8x8 as u8;
         rt.r[cur_row + left_col].mf = 0;
-        rt.r[cur_row + left_col].mv[0] = Mv { c: MvXY { y: 16, x: 48 } };
-        unsafe { rt.r[cur_row + left_col].r#ref.r[0] = ref_idx; }
+        rt.r[cur_row + left_col].mv[0] = Mv {
+            c: MvXY { y: 16, x: 48 },
+        };
+        unsafe {
+            rt.r[cur_row + left_col].r#ref.r[0] = ref_idx;
+        }
 
-        let mv = Mv { c: MvXY { y: 24, x: 56 } };
+        let mv = Mv {
+            c: MvXY { y: 24, x: 56 },
+        };
         let mut wmp = WarpedMotionParams::default();
 
         derive_warpmv(
-            &rt, bx, by, true, true,
-            2, 2, 2, 2, ref_idx, mv, &mut wmp,
-            sb_step, 64,
+            &rt, bx, by, true, true, 2, 2, 2, 2, ref_idx, mv, &mut wmp, sb_step, 64,
         );
-        assert!(wmp.wm_type == WarpedMotionType::Invalid
-            || wmp.wm_type != WarpedMotionType::Invalid);
+        assert!(
+            wmp.wm_type == WarpedMotionType::Invalid || wmp.wm_type != WarpedMotionType::Invalid
+        );
     }
 
     #[test]
     fn test_decode_sb_partition_none_leaf() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64,
-            ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false,
+            sdp: false,
+            ext_sdp: false,
             ext_partitions: false,
             uneven_4way: false,
             max_pb_aspect_ratio_log2: 2,
             n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0x80; 128];
@@ -5118,11 +6249,26 @@ mod tests {
         let pass = Pass::Entropy as u8;
 
         let result = decode_sb(
-            &fi, &mut bx, &mut by, &mut cbx, &mut cby,
-            &mut intra_region, &mut sdp_cfl_disallowed, pass,
-            &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-            &mut part_w, &mut part_w_idx, part_r, &mut part_r_idx,
-            BlockSize::Bs4x4, BlockSize::Bs4x4, &mut dir,
+            &fi,
+            &mut bx,
+            &mut by,
+            &mut cbx,
+            &mut cby,
+            &mut intra_region,
+            &mut sdp_cfl_disallowed,
+            pass,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            &mut part_w,
+            &mut part_w_idx,
+            part_r,
+            &mut part_r_idx,
+            BlockSize::Bs4x4,
+            BlockSize::Bs4x4,
+            &mut dir,
         );
         assert!(result.is_ok());
     }
@@ -5130,22 +6276,65 @@ mod tests {
     #[test]
     fn test_decode_sb_split_recurse() {
         let fi = SbFrameInfo {
-            bw: 128, bh: 128,
-            ss_ver: 1, ss_hor: 1,
+            bw: 128,
+            bh: 128,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: true,
-            sdp: false, ext_sdp: false,
+            sdp: false,
+            ext_sdp: false,
             ext_partitions: true,
             uneven_4way: false,
             max_pb_aspect_ratio_log2: 2,
             n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 128, tile_row_start: 0, tile_row_end: 128,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 128,
+            tile_row_start: 0,
+            tile_row_end: 128,
             sb_step: 16,
         };
         let data = vec![0xFF; 256];
@@ -5168,11 +6357,26 @@ mod tests {
         let pass = Pass::Entropy as u8;
 
         let result = decode_sb(
-            &fi, &mut bx, &mut by, &mut cbx, &mut cby,
-            &mut intra_region, &mut sdp_cfl_disallowed, pass,
-            &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-            &mut part_w, &mut part_w_idx, part_r, &mut part_r_idx,
-            BlockSize::Bs32x32, BlockSize::Bs32x32, &mut dir,
+            &fi,
+            &mut bx,
+            &mut by,
+            &mut cbx,
+            &mut cby,
+            &mut intra_region,
+            &mut sdp_cfl_disallowed,
+            pass,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            &mut part_w,
+            &mut part_w_idx,
+            part_r,
+            &mut part_r_idx,
+            BlockSize::Bs32x32,
+            BlockSize::Bs32x32,
+            &mut dir,
         );
         assert!(result.is_ok());
         assert_eq!(bx, 0);
@@ -5182,18 +6386,65 @@ mod tests {
     #[test]
     fn test_decode_b_intra_keyframe() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0x80; 128];
@@ -5203,9 +6454,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            8,
+            8,
+            8,
+            8,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
         assert_eq!(b.is_intra, 1);
         assert_eq!(b.skip_mode, 0);
         assert_eq!(b.skip_txfm, 0);
@@ -5215,18 +6481,65 @@ mod tests {
     #[test]
     fn test_decode_b_inter_skip_mode() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: true,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: true, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: true,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         // All 0xFF data → MSAC will decode 1s for all bool_adapt calls
@@ -5237,9 +6550,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            8,
+            8,
+            8,
+            8,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
         // skip_mode decoded (block is 2x2=4 > 2, inter frame, skip_mode_enabled)
         // With all-zero data and default CDFs, skip_mode will be decoded
         assert_eq!(b.seg_id, 0);
@@ -5248,18 +6576,65 @@ mod tests {
     #[test]
     fn test_decode_b_skip_mask_forces_skip_txfm() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: true,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 1,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 1,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0x80; 128];
@@ -5269,9 +6644,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            8,
+            8,
+            8,
+            8,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
         // seg_skip_mask bit 0 set, seg_id=0 → skip_txfm forced to 1
         assert_eq!(b.skip_txfm, 1);
     }
@@ -5279,18 +6669,65 @@ mod tests {
     #[test]
     fn test_decode_b_intra_y_mode_decoding() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0x80; 128];
@@ -5300,9 +6737,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            8,
+            8,
+            8,
+            8,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
         assert_eq!(b.is_intra, 1);
         // y_mode should be a valid intra prediction mode (0-12)
         let y_mode = unsafe { b.data.intra.y_mode };
@@ -5312,18 +6764,65 @@ mod tests {
     #[test]
     fn test_decode_b_intra_y_mode_with_neighbours() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0xAA; 256];
@@ -5336,9 +6835,24 @@ mod tests {
         a.midx[9] = 17;
         l.midx[9] = 17;
 
-        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            8,
+            8,
+            8,
+            8,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
         assert_eq!(b.is_intra, 1);
         let y_mode = unsafe { b.data.intra.y_mode };
         assert!(y_mode <= 12, "y_mode={y_mode} out of range");
@@ -5347,18 +6861,65 @@ mod tests {
     #[test]
     fn test_decode_b_fsc_and_mrl() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: true,
+            mrls: true,
+            mhccp: false,
+            cfl: true,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0x55; 256];
@@ -5368,9 +6929,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 8, 8, 8, 8, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            8,
+            8,
+            8,
+            8,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
         assert_eq!(b.is_intra, 1);
         // FSC decoded (8x8 block, idtx_intra=true)
         // fsc is 0 or 1
@@ -5383,18 +6959,65 @@ mod tests {
     #[test]
     fn test_decode_b_uv_chroma_mode() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: true, mrls: true, mhccp: false, cfl: true, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: true,
+            mrls: true,
+            mhccp: false,
+            cfl: true,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0xAA; 256];
@@ -5405,33 +7028,99 @@ mod tests {
         let mut l = BlockContext::default();
 
         // Decode with both luma and chroma
-        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs4x4).unwrap();
+        let b = decode_b(
+            &fi,
+            4,
+            4,
+            4,
+            4,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs4x4,
+        )
+        .unwrap();
         assert_eq!(b.is_intra, 1);
         let uv_mode = unsafe { b.data.intra.uv_mode };
         let uv_angle = unsafe { b.data.intra.uv_angle };
         // UV mode should be valid (0-13)
         assert!(uv_mode <= CFL_PRED, "uv_mode {} out of range", uv_mode);
         // UV angle in [-3, 3]
-        assert!(uv_angle >= -3 && uv_angle <= 3, "uv_angle {} out of range", uv_angle);
+        assert!(
+            uv_angle >= -3 && uv_angle <= 3,
+            "uv_angle {} out of range",
+            uv_angle
+        );
     }
 
     #[test]
     fn test_decode_b_uv_dpcm_chroma() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: true,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: true,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         // Feed data that makes dpcm[0]=true and dpcm[1]=true
@@ -5442,9 +7131,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs4x4, BlockSize::Bs4x4).unwrap();
+        let b = decode_b(
+            &fi,
+            4,
+            4,
+            4,
+            4,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs4x4,
+            BlockSize::Bs4x4,
+        )
+        .unwrap();
         assert_eq!(b.is_intra, 1);
         let dpcm_chroma = unsafe { b.data.intra.dpcm[1] };
         // With 0xFF data and lossless, DPCM should be triggered
@@ -5458,19 +7162,65 @@ mod tests {
     #[test]
     fn test_decode_b_context_writeback() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: false,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false,
-            allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0x40; 256];
@@ -5481,9 +7231,24 @@ mod tests {
         let mut l = BlockContext::default();
 
         // Decode 8x8 block at (4,4); keyframe → always intra
-        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs4x4).unwrap();
+        let b = decode_b(
+            &fi,
+            4,
+            4,
+            4,
+            4,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs4x4,
+        )
+        .unwrap();
         assert_eq!(b.is_intra, 1);
 
         // Verify above context written for bw4=2 positions starting at bx4=4
@@ -5506,18 +7271,65 @@ mod tests {
     #[test]
     fn test_decode_b_single_ref_inter() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: true,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: false, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: false,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         let data = vec![0x80; 512];
@@ -5527,9 +7339,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            4,
+            4,
+            4,
+            4,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
 
         // In inter frame, block may be inter or intra depending on bitstream
         if b.is_intra == 0 {
@@ -5541,8 +7368,11 @@ mod tests {
                 assert_eq!(comp_type, 0);
                 assert_eq!(refs[1], -1);
                 // inter_mode should be NEARMV(13), GLOBALMV(14), or NEWMV(15)
-                assert!(inter_mode >= 13 && inter_mode <= 17,
-                    "inter_mode {} out of range", inter_mode);
+                assert!(
+                    inter_mode >= 13 && inter_mode <= 17,
+                    "inter_mode {} out of range",
+                    inter_mode
+                );
             }
             // Context writeback: intra=0 in both a and l
             assert_eq!(a.intra[1], 0); // bx4=1 (bx=4, &63=4, /4=1)
@@ -5553,18 +7383,65 @@ mod tests {
     #[test]
     fn test_decode_b_compound_inter() {
         let fi = SbFrameInfo {
-            bw: 64, bh: 64, ss_ver: 1, ss_hor: 1,
+            bw: 64,
+            bh: 64,
+            ss_ver: 1,
+            ss_hor: 1,
             root_bs: BlockSize::Bs64x64,
             is_inter_or_switch: true,
-            sdp: false, ext_sdp: false, ext_partitions: false,
-            uneven_4way: false, max_pb_aspect_ratio_log2: 2, n_passes: 1,
-            seg_enabled: false, seg_update_map: false, seg_temporal: false,
-            seg_preskip: false, seg_ext: false, seg_last_active_segid: 0,
-            seg_globalmv_mask: 0, seg_skip_mask: 0,
-            skip_mode_enabled: false, allow_intrabc: false, any_lossless: false,
-            has_chroma_layout: true, idtx_intra: false, mrls: false, mhccp: false, cfl: false, allow_screen_content_tools: false, intra_dip: false, force_integer_mv: false, max_bvp_drl_bits: 2, max_drl_bits: 3, bawp: false, txfm_switchable: true, skip_mode_refs: RefPair { pair: 0 },
-            n_ref_frames: 7, warp_motion: false, motion_modes: 0, adaptive_mvd: false, flex_mvres: false, mv_precision: 0, mvd_sign_derive: false, tip_frame_mode: 0, six_param_warp_delta: false, subpel_filter_mode: 0, switchable_comp_refs: true, num_same_ref_comp: 0, refdir: [0; 8], refdist: [0; 8], opfl_refine_type: 0, masked_compound: false, cwp: false, refine_mv_enabled: false, absrefdist: [0; 8],
-            tile_col_start: 0, tile_col_end: 64, tile_row_start: 0, tile_row_end: 64,
+            sdp: false,
+            ext_sdp: false,
+            ext_partitions: false,
+            uneven_4way: false,
+            max_pb_aspect_ratio_log2: 2,
+            n_passes: 1,
+            seg_enabled: false,
+            seg_update_map: false,
+            seg_temporal: false,
+            seg_preskip: false,
+            seg_ext: false,
+            seg_last_active_segid: 0,
+            seg_globalmv_mask: 0,
+            seg_skip_mask: 0,
+            skip_mode_enabled: false,
+            allow_intrabc: false,
+            any_lossless: false,
+            has_chroma_layout: true,
+            idtx_intra: false,
+            mrls: false,
+            mhccp: false,
+            cfl: false,
+            allow_screen_content_tools: false,
+            intra_dip: false,
+            force_integer_mv: false,
+            max_bvp_drl_bits: 2,
+            max_drl_bits: 3,
+            bawp: false,
+            txfm_switchable: true,
+            skip_mode_refs: RefPair { pair: 0 },
+            n_ref_frames: 7,
+            warp_motion: false,
+            motion_modes: 0,
+            adaptive_mvd: false,
+            flex_mvres: false,
+            mv_precision: 0,
+            mvd_sign_derive: false,
+            tip_frame_mode: 0,
+            six_param_warp_delta: false,
+            subpel_filter_mode: 0,
+            switchable_comp_refs: true,
+            num_same_ref_comp: 0,
+            refdir: [0; 8],
+            refdist: [0; 8],
+            opfl_refine_type: 0,
+            masked_compound: false,
+            cwp: false,
+            refine_mv_enabled: false,
+            absrefdist: [0; 8],
+            tile_col_start: 0,
+            tile_col_end: 64,
+            tile_row_start: 0,
+            tile_row_end: 64,
             sb_step: 16,
         };
         // 0xFF data: decode_bool_adapt tends to return 1
@@ -5575,9 +7452,24 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
-        let b = decode_b(&fi, 4, 4, 4, 4, 0, 0, Pass::Entropy as u8,
-                         &mut a, &mut l, &mut msac, &mut cdf_m, &mut cdf_dmv,
-                         BlockSize::Bs8x8, BlockSize::Bs8x8).unwrap();
+        let b = decode_b(
+            &fi,
+            4,
+            4,
+            4,
+            4,
+            0,
+            0,
+            Pass::Entropy as u8,
+            &mut a,
+            &mut l,
+            &mut msac,
+            &mut cdf_m,
+            &mut cdf_dmv,
+            BlockSize::Bs8x8,
+            BlockSize::Bs8x8,
+        )
+        .unwrap();
 
         if b.is_intra == 0 {
             let comp_type = unsafe { b.data.inter.comp_type };

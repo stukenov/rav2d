@@ -136,7 +136,11 @@ impl<'a> GetBits<'a> {
         debug_assert!(l > 1);
         let m = (1u32 << l) - max;
         let v = self.get_bits(l - 1);
-        if v < m { v } else { (v << 1) - m + self.get_bit() }
+        if v < m {
+            v
+        } else {
+            (v << 1) - m + self.get_bit()
+        }
     }
 
     pub fn get_vlc(&mut self) -> u32 {

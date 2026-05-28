@@ -46,12 +46,10 @@ pub fn init_deblock_thr_lut_uv(
         } else {
             qidx
         };
-        let uac = yac + frame_hdr.quant.uac_delta as i32
-            + 8 * frame_hdr.deblock.delta_q_u as i32;
+        let uac = yac + frame_hdr.quant.uac_delta as i32 + 8 * frame_hdr.deblock.delta_q_u as i32;
         lut[0][0][i] = deblock_quant_thr(hbd, uac);
         lut[0][1][i] = deblock_side_thr(hbd, uac);
-        let vac = yac + frame_hdr.quant.vac_delta as i32
-            + 8 * frame_hdr.deblock.delta_q_v as i32;
+        let vac = yac + frame_hdr.quant.vac_delta as i32 + 8 * frame_hdr.deblock.delta_q_v as i32;
         lut[1][0][i] = deblock_quant_thr(hbd, vac);
         lut[1][1][i] = deblock_side_thr(hbd, vac);
     }
@@ -72,46 +70,70 @@ fn filter_choice_8bpc(
         let d = dist as isize;
         let ds = (buf[(s + (d - 1) * stride) as usize] as i32
             - (buf[(s + d * stride) as usize] as i32) * 2
-            + buf[(s + (d + 1) * stride) as usize] as i32).unsigned_abs();
+            + buf[(s + (d + 1) * stride) as usize] as i32)
+            .unsigned_abs();
         let dt = (buf[(t + (d - 1) * stride) as usize] as i32
             - (buf[(t + d * stride) as usize] as i32) * 2
-            + buf[(t + (d + 1) * stride) as usize] as i32).unsigned_abs();
+            + buf[(t + (d + 1) * stride) as usize] as i32)
+            .unsigned_abs();
         sd[(dist + 2) as usize] = (ds + dt + 1) >> 1;
     }
 
     let high_deriv = sd[0].max(sd[3]);
-    if high_deriv > side_thr { return 0; }
-    if max_width_pos == 1 { return 1; }
+    if high_deriv > side_thr {
+        return 0;
+    }
+    if max_width_pos == 1 {
+        return 1;
+    }
 
     let side_thr2 = side_thr >> 2;
     let mut transition = sd[1] + sd[2];
-    if high_deriv > side_thr2 { return 1; }
-    if transition > q_thr * 4 { return 1; }
+    if high_deriv > side_thr2 {
+        return 1;
+    }
+    if transition > q_thr * 4 {
+        return 1;
+    }
 
     let side_thr3 = side_thr >> 3;
-    if high_deriv > side_thr3 { return 2; }
-    if transition > q_thr * 3 { return 2; }
+    if high_deriv > side_thr3 {
+        return 2;
+    }
+    if transition > q_thr * 3 {
+        return 2;
+    }
 
     let end_thr = (side_thr * 3) >> 4;
 
     if max_width_neg >= 3 {
         let ds = (buf[(s - stride) as usize] as i32
             - buf[(s - 4 * stride) as usize] as i32
-            - 3 * (buf[(s - stride) as usize] as i32
-                - buf[(s - 2 * stride) as usize] as i32)).unsigned_abs();
+            - 3 * (buf[(s - stride) as usize] as i32 - buf[(s - 2 * stride) as usize] as i32))
+            .unsigned_abs();
         let dt = (buf[(t - stride) as usize] as i32
             - buf[(t - 4 * stride) as usize] as i32
-            - 3 * (buf[(t - stride) as usize] as i32
-                - buf[(t - 2 * stride) as usize] as i32)).unsigned_abs();
-        if ((ds + dt + 1) >> 1) > end_thr { return 2; }
+            - 3 * (buf[(t - stride) as usize] as i32 - buf[(t - 2 * stride) as usize] as i32))
+            .unsigned_abs();
+        if ((ds + dt + 1) >> 1) > end_thr {
+            return 2;
+        }
     }
 
-    let ds = (buf[s as usize] as i32 - buf[(s + 3 * stride) as usize] as i32
-        - 3 * (buf[s as usize] as i32 - buf[(s + stride) as usize] as i32)).unsigned_abs();
-    let dt = (buf[t as usize] as i32 - buf[(t + 3 * stride) as usize] as i32
-        - 3 * (buf[t as usize] as i32 - buf[(t + stride) as usize] as i32)).unsigned_abs();
-    if ((ds + dt + 1) >> 1) > end_thr { return 2; }
-    if max_width_pos == 3 { return 3; }
+    let ds = (buf[s as usize] as i32
+        - buf[(s + 3 * stride) as usize] as i32
+        - 3 * (buf[s as usize] as i32 - buf[(s + stride) as usize] as i32))
+        .unsigned_abs();
+    let dt = (buf[t as usize] as i32
+        - buf[(t + 3 * stride) as usize] as i32
+        - 3 * (buf[t as usize] as i32 - buf[(t + stride) as usize] as i32))
+        .unsigned_abs();
+    if ((ds + dt + 1) >> 1) > end_thr {
+        return 2;
+    }
+    if max_width_pos == 3 {
+        return 3;
+    }
 
     transition <<= 4;
     let mut prev_dist = 3i32;
@@ -119,30 +141,38 @@ fn filter_choice_8bpc(
     while dist <= max_width_pos {
         let q_thr4 = q_thr * Q_FIRST[((dist - 4) >> 1) as usize] as u32;
         let end_thr4 = (side_thr * dist as u32) >> 4;
-        if transition > q_thr4 { return prev_dist; }
+        if transition > q_thr4 {
+            return prev_dist;
+        }
         let dist2 = imin(7, dist);
 
         if max_width_neg >= dist2 {
             let ds = (buf[(s - stride) as usize] as i32
                 - buf[(s + (-dist2 as isize - 1) * stride) as usize] as i32
-                - dist2 * (buf[(s - stride) as usize] as i32
-                    - buf[(s - 2 * stride) as usize] as i32)).unsigned_abs();
+                - dist2
+                    * (buf[(s - stride) as usize] as i32 - buf[(s - 2 * stride) as usize] as i32))
+                .unsigned_abs();
             let dt = (buf[(t - stride) as usize] as i32
                 - buf[(t + (-dist2 as isize - 1) * stride) as usize] as i32
-                - dist2 * (buf[(t - stride) as usize] as i32
-                    - buf[(t - 2 * stride) as usize] as i32)).unsigned_abs();
-            if ((ds + dt + 1) >> 1) > end_thr4 { return prev_dist; }
+                - dist2
+                    * (buf[(t - stride) as usize] as i32 - buf[(t - 2 * stride) as usize] as i32))
+                .unsigned_abs();
+            if ((ds + dt + 1) >> 1) > end_thr4 {
+                return prev_dist;
+            }
         }
 
         let ds = (buf[s as usize] as i32
             - buf[(s + dist2 as isize * stride) as usize] as i32
-            - dist2 * (buf[s as usize] as i32
-                - buf[(s + stride) as usize] as i32)).unsigned_abs();
+            - dist2 * (buf[s as usize] as i32 - buf[(s + stride) as usize] as i32))
+            .unsigned_abs();
         let dt = (buf[t as usize] as i32
             - buf[(t + dist2 as isize * stride) as usize] as i32
-            - dist2 * (buf[t as usize] as i32
-                - buf[(t + stride) as usize] as i32)).unsigned_abs();
-        if ((ds + dt + 1) >> 1) > end_thr4 { return prev_dist; }
+            - dist2 * (buf[t as usize] as i32 - buf[(t + stride) as usize] as i32))
+            .unsigned_abs();
+        if ((ds + dt + 1) >> 1) > end_thr4 {
+            return prev_dist;
+        }
 
         prev_dist = dist;
         dist += 2;
@@ -164,13 +194,21 @@ fn deblock_8bpc(
     neg_lossless: bool,
 ) {
     let width = filter_choice_8bpc(
-        dst, off, off + 3 * stridea, strideb,
-        max_width_neg, max_width_pos, q_thr, side_thr,
+        dst,
+        off,
+        off + 3 * stridea,
+        strideb,
+        max_width_neg,
+        max_width_pos,
+        q_thr,
+        side_thr,
     );
     let width_neg = imin(width, max_width_neg);
     let width_pos = width;
 
-    if width_pos < 1 { return; }
+    if width_pos < 1 {
+        return;
+    }
 
     let q_thr_clamp = q_thr as i32 * Q_THRESH_MULTS[(width - 1) as usize] as i32;
     let mut dp = off;
@@ -181,7 +219,8 @@ fn deblock_8bpc(
         let dm2 = dst[(dp - 2 * strideb) as usize] as i32;
         let delta_m2 = iclip(
             4 * (3 * (d0 - dm1) - (dp1 - dm2)),
-            -q_thr_clamp, q_thr_clamp,
+            -q_thr_clamp,
+            q_thr_clamp,
         );
 
         if !neg_lossless {
@@ -222,16 +261,28 @@ pub fn deblock_h_sb64y_8bpc(
     let mut qi: usize = 0;
     while (vm & !(y - 1)) != 0 {
         if (vm & y) != 0 {
-            let idx = if (vmask[3] as u32 & y) != 0 { 3usize }
-                else if (vmask[2] as u32 & y) != 0 { 2 }
-                else { ((vmask[1] as u32 & y) != 0) as usize };
+            let idx = if (vmask[3] as u32 & y) != 0 {
+                3usize
+            } else if (vmask[2] as u32 & y) != 0 {
+                2
+            } else {
+                ((vmask[1] as u32 & y) != 0) as usize
+            };
             let max_width_pos = MAX_WIDTH_Y[idx] as i32;
-            let max_width_neg = if edge { imin(6, max_width_pos) } else { max_width_pos };
+            let max_width_neg = if edge {
+                imin(6, max_width_pos)
+            } else {
+                max_width_pos
+            };
             deblock_8bpc(
-                dst, dp as isize,
-                q_thr[qi] as u32, side_thr[qi] as u32,
-                stride as isize, 1,
-                max_width_pos, max_width_neg,
+                dst,
+                dp as isize,
+                q_thr[qi] as u32,
+                side_thr[qi] as u32,
+                stride as isize,
+                1,
+                max_width_pos,
+                max_width_neg,
                 (ll_mask[1] as u32 & y) != 0,
                 (ll_mask[0] as u32 & y) != 0,
             );
@@ -258,16 +309,28 @@ pub fn deblock_v_sb64y_8bpc(
     let mut qi: usize = 0;
     while (vm & !(x - 1)) != 0 {
         if (vm & x) != 0 {
-            let idx = if (vmask[3] as u32 & x) != 0 { 3usize }
-                else if (vmask[2] as u32 & x) != 0 { 2 }
-                else { ((vmask[1] as u32 & x) != 0) as usize };
+            let idx = if (vmask[3] as u32 & x) != 0 {
+                3usize
+            } else if (vmask[2] as u32 & x) != 0 {
+                2
+            } else {
+                ((vmask[1] as u32 & x) != 0) as usize
+            };
             let max_width_pos = MAX_WIDTH_Y[idx] as i32;
-            let max_width_neg = if edge { imin(6, max_width_pos) } else { max_width_pos };
+            let max_width_neg = if edge {
+                imin(6, max_width_pos)
+            } else {
+                max_width_pos
+            };
             deblock_8bpc(
-                dst, dp as isize,
-                q_thr[qi] as u32, side_thr[qi] as u32,
-                1, stride as isize,
-                max_width_pos, max_width_neg,
+                dst,
+                dp as isize,
+                q_thr[qi] as u32,
+                side_thr[qi] as u32,
+                1,
+                stride as isize,
+                max_width_pos,
+                max_width_neg,
                 (ll_mask[1] as u32 & x) != 0,
                 (ll_mask[0] as u32 & x) != 0,
             );
@@ -294,15 +357,26 @@ pub fn deblock_h_sb64uv_8bpc(
     let mut qi: usize = 0;
     while (vm & !(y - 1)) != 0 {
         if (vm & y) != 0 {
-            let idx = if (vmask[2] as u32 & y) != 0 { 2usize }
-                else { ((vmask[1] as u32 & y) != 0) as usize };
+            let idx = if (vmask[2] as u32 & y) != 0 {
+                2usize
+            } else {
+                ((vmask[1] as u32 & y) != 0) as usize
+            };
             let max_width_pos = MAX_WIDTH_UV[idx] as i32;
-            let max_width_neg = if edge { imin(2, max_width_pos) } else { max_width_pos };
+            let max_width_neg = if edge {
+                imin(2, max_width_pos)
+            } else {
+                max_width_pos
+            };
             deblock_8bpc(
-                dst, dp as isize,
-                q_thr[qi] as u32, side_thr[qi] as u32,
-                stride as isize, 1,
-                max_width_pos, max_width_neg,
+                dst,
+                dp as isize,
+                q_thr[qi] as u32,
+                side_thr[qi] as u32,
+                stride as isize,
+                1,
+                max_width_pos,
+                max_width_neg,
                 (ll_mask[1] as u32 & y) != 0,
                 (ll_mask[0] as u32 & y) != 0,
             );
@@ -329,15 +403,26 @@ pub fn deblock_v_sb64uv_8bpc(
     let mut qi: usize = 0;
     while (vm & !(x - 1)) != 0 {
         if (vm & x) != 0 {
-            let idx = if (vmask[2] as u32 & x) != 0 { 2usize }
-                else { ((vmask[1] as u32 & x) != 0) as usize };
+            let idx = if (vmask[2] as u32 & x) != 0 {
+                2usize
+            } else {
+                ((vmask[1] as u32 & x) != 0) as usize
+            };
             let max_width_pos = MAX_WIDTH_UV[idx] as i32;
-            let max_width_neg = if edge { imin(2, max_width_pos) } else { max_width_pos };
+            let max_width_neg = if edge {
+                imin(2, max_width_pos)
+            } else {
+                max_width_pos
+            };
             deblock_8bpc(
-                dst, dp as isize,
-                q_thr[qi] as u32, side_thr[qi] as u32,
-                1, stride as isize,
-                max_width_pos, max_width_neg,
+                dst,
+                dp as isize,
+                q_thr[qi] as u32,
+                side_thr[qi] as u32,
+                1,
+                stride as isize,
+                max_width_pos,
+                max_width_neg,
                 (ll_mask[1] as u32 & x) != 0,
                 (ll_mask[0] as u32 & x) != 0,
             );
@@ -392,12 +477,12 @@ pub fn setup_thr_cols_sb64(
         let mut prev_side_thr = left_side_thr[y4] as i32;
 
         for x4 in 0..w4 as usize {
-            let seg_id = segmap[(seg_off as isize + x4 as isize +
-                y4 as isize * seg_stride) as usize] as usize;
+            let seg_id = segmap
+                [(seg_off as isize + x4 as isize + y4 as isize * seg_stride) as usize]
+                as usize;
             let cur_q_thr = thr_lut[0][seg_id] as i32;
             let cur_side_thr = thr_lut[1][seg_id] as i32;
-            let subpu = 3 * (((mask[x4][4][mask_idx] >>
-                (mask_shift + y4 as u32)) & 1) as i32);
+            let subpu = 3 * (((mask[x4][4][mask_idx] >> (mask_shift + y4 as u32)) & 1) as i32);
 
             let edge_q_thr = if cur_q_thr != 0 && prev_q_thr != 0 {
                 (cur_q_thr + prev_q_thr + 1) >> 1
@@ -445,8 +530,7 @@ pub fn setup_thr_rows_sb64(
     let mut above_side_thr = [0u8; 16];
     if let Some(above_lut) = above_thr_lut {
         for x4 in 0..w4 as usize {
-            let seg_id = segmap[(seg_off as isize + x4 as isize -
-                seg_stride) as usize] as usize;
+            let seg_id = segmap[(seg_off as isize + x4 as isize - seg_stride) as usize] as usize;
             above_q_thr[x4] = above_lut[0][seg_id];
             above_side_thr[x4] = above_lut[1][seg_id];
         }
@@ -457,12 +541,12 @@ pub fn setup_thr_rows_sb64(
         let mut prev_side_thr = above_side_thr[x4] as i32;
 
         for y4 in 0..h4 as usize {
-            let seg_id = segmap[(seg_off as isize + x4 as isize +
-                y4 as isize * seg_stride) as usize] as usize;
+            let seg_id = segmap
+                [(seg_off as isize + x4 as isize + y4 as isize * seg_stride) as usize]
+                as usize;
             let cur_q_thr = thr_lut[0][seg_id] as i32;
             let cur_side_thr = thr_lut[1][seg_id] as i32;
-            let subpu = 3 * (((mask[y4][4][mask_idx] >>
-                (mask_shift + x4 as u32)) & 1) as i32);
+            let subpu = 3 * (((mask[y4][4][mask_idx] >> (mask_shift + x4 as u32)) & 1) as i32);
 
             let edge_q_thr = if cur_q_thr != 0 && prev_q_thr != 0 {
                 (cur_q_thr + prev_q_thr + 1) >> 1
@@ -600,16 +684,7 @@ fn deblock_sbrow64_cols_8bpc(
         let w4 = imin(16, params.bw as i32 - sbx as i32 * 16);
 
         if params.level_y[0] > 0 && have_left {
-            filter_plane_cols_y_8bpc(
-                y,
-                params.y_stride,
-                masks,
-                thr_lut_y,
-                sbx,
-                y64,
-                w4,
-                h4,
-            );
+            filter_plane_cols_y_8bpc(y, params.y_stride, masks, thr_lut_y, sbx, y64, w4, h4);
         }
 
         if params.have_chroma && have_left {
@@ -630,16 +705,19 @@ fn deblock_sbrow64_cols_8bpc(
 }
 
 fn filter_choice(
-    s: &[u8], s_off: usize,
-    t: &[u8], t_off: usize,
+    s: &[u8],
+    s_off: usize,
+    t: &[u8],
+    t_off: usize,
     stride: isize,
-    _max_width_neg: i32, max_width_pos: i32,
-    q_thr: u32, side_thr: u32,
+    _max_width_neg: i32,
+    max_width_pos: i32,
+    q_thr: u32,
+    side_thr: u32,
 ) -> i32 {
     let st = stride;
-    let at = |buf: &[u8], off: usize, i: isize| -> i32 {
-        buf[(off as isize + i * st) as usize] as i32
-    };
+    let at =
+        |buf: &[u8], off: usize, i: isize| -> i32 { buf[(off as isize + i * st) as usize] as i32 };
 
     let mut second_derivs = [0u32; 4];
     let mut deriv_s = (at(s, s_off, 0) - at(s, s_off, -1)).unsigned_abs()
@@ -684,15 +762,27 @@ fn filter_choice(
         let end_thr4 = q_thr * Q_THRESH_MULTS[idx] as u32;
         let dist2 = dist - 1;
 
-        let ds = (at(s, s_off, 0) - at(s, s_off, dist2 as isize) - dist2 * (at(s, s_off, 0) - at(s, s_off, 1))).unsigned_abs();
-        let dt = (at(t, t_off, 0) - at(t, t_off, dist2 as isize) - dist2 * (at(t, t_off, 0) - at(t, t_off, 1))).unsigned_abs();
+        let ds = (at(s, s_off, 0)
+            - at(s, s_off, dist2 as isize)
+            - dist2 * (at(s, s_off, 0) - at(s, s_off, 1)))
+        .unsigned_abs();
+        let dt = (at(t, t_off, 0)
+            - at(t, t_off, dist2 as isize)
+            - dist2 * (at(t, t_off, 0) - at(t, t_off, 1)))
+        .unsigned_abs();
         if ((ds + dt + 1) >> 1) > end_thr4 {
             return prev_dist;
         }
 
         let side_end_thr4 = side_thr * Q_THRESH_MULTS[idx] as u32;
-        let ds = (at(s, s_off, 0) - at(s, s_off, -(dist2 as isize)) - dist2 * (at(s, s_off, 0) - at(s, s_off, -1))).unsigned_abs();
-        let dt = (at(t, t_off, 0) - at(t, t_off, -(dist2 as isize)) - dist2 * (at(t, t_off, 0) - at(t, t_off, -1))).unsigned_abs();
+        let ds = (at(s, s_off, 0)
+            - at(s, s_off, -(dist2 as isize))
+            - dist2 * (at(s, s_off, 0) - at(s, s_off, -1)))
+        .unsigned_abs();
+        let dt = (at(t, t_off, 0)
+            - at(t, t_off, -(dist2 as isize))
+            - dist2 * (at(t, t_off, 0) - at(t, t_off, -1)))
+        .unsigned_abs();
         if ((ds + dt + 1) >> 1) > side_end_thr4 {
             return prev_dist;
         }
@@ -703,16 +793,30 @@ fn filter_choice(
 }
 
 fn deblock_pixel(
-    dst: &mut [u8], off: usize,
-    q_thr: u32, side_thr: u32,
-    stridea: isize, strideb: isize,
-    max_width_pos: i32, max_width_neg: i32,
-    pos_lossless: bool, neg_lossless: bool,
+    dst: &mut [u8],
+    off: usize,
+    q_thr: u32,
+    side_thr: u32,
+    stridea: isize,
+    strideb: isize,
+    max_width_pos: i32,
+    max_width_neg: i32,
+    pos_lossless: bool,
+    neg_lossless: bool,
 ) {
     let s_off = off;
     let t_off = (off as isize + 3 * stridea) as usize;
-    let width = filter_choice(dst, s_off, dst, t_off, strideb,
-                              max_width_neg, max_width_pos, q_thr, side_thr);
+    let width = filter_choice(
+        dst,
+        s_off,
+        dst,
+        t_off,
+        strideb,
+        max_width_neg,
+        max_width_pos,
+        q_thr,
+        side_thr,
+    );
     let width_neg = imin(width, max_width_neg);
     let width_pos = width;
 
@@ -752,10 +856,15 @@ fn deblock_pixel(
 }
 
 fn deblock_h_sb64y(
-    dst: &mut [u8], dst_off: usize, stride: isize,
-    vmask: &[u16], ll_mask: &[u16],
-    q_thr: &[u32], side_thr: &[u32],
-    tile_edge: bool, h4: i32,
+    dst: &mut [u8],
+    dst_off: usize,
+    stride: isize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u32],
+    side_thr: &[u32],
+    tile_edge: bool,
+    h4: i32,
 ) {
     let ls = stride.unsigned_abs();
     for y in 0..h4 as u16 {
@@ -763,26 +872,49 @@ fn deblock_h_sb64y(
         if mask & (1 << y) == 0 {
             continue;
         }
-        let level = if vmask[3] & (1 << y) != 0 { 3 }
-            else if vmask[2] & (1 << y) != 0 { 2 }
-            else if vmask[1] & (1 << y) != 0 { 1 }
-            else { 0 };
+        let level = if vmask[3] & (1 << y) != 0 {
+            3
+        } else if vmask[2] & (1 << y) != 0 {
+            2
+        } else if vmask[1] & (1 << y) != 0 {
+            1
+        } else {
+            0
+        };
         let max_width_pos = MAX_WIDTH_Y[level] as i32;
-        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_Y[level] as i32 };
+        let max_width_neg = if tile_edge {
+            max_width_pos
+        } else {
+            MAX_WIDTH_Y[level] as i32
+        };
         let pos_lossless = ll_mask[1] & (1 << y) != 0;
         let neg_lossless = ll_mask[0] & (1 << y) != 0;
         let off = dst_off + y as usize * ls;
-        deblock_pixel(dst, off, q_thr[y as usize], side_thr[y as usize],
-                      1, stride, max_width_pos, max_width_neg,
-                      pos_lossless, neg_lossless);
+        deblock_pixel(
+            dst,
+            off,
+            q_thr[y as usize],
+            side_thr[y as usize],
+            1,
+            stride,
+            max_width_pos,
+            max_width_neg,
+            pos_lossless,
+            neg_lossless,
+        );
     }
 }
 
 fn deblock_v_sb64y(
-    dst: &mut [u8], dst_off: usize, stride: isize,
-    vmask: &[u16], ll_mask: &[u16],
-    q_thr: &[u32], side_thr: &[u32],
-    tile_edge: bool, w4: i32,
+    dst: &mut [u8],
+    dst_off: usize,
+    stride: isize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u32],
+    side_thr: &[u32],
+    tile_edge: bool,
+    w4: i32,
 ) {
     let _ls = stride.unsigned_abs();
     for x in 0..w4 as u16 {
@@ -790,26 +922,49 @@ fn deblock_v_sb64y(
         if mask & (1 << x) == 0 {
             continue;
         }
-        let level = if vmask[3] & (1 << x) != 0 { 3 }
-            else if vmask[2] & (1 << x) != 0 { 2 }
-            else if vmask[1] & (1 << x) != 0 { 1 }
-            else { 0 };
+        let level = if vmask[3] & (1 << x) != 0 {
+            3
+        } else if vmask[2] & (1 << x) != 0 {
+            2
+        } else if vmask[1] & (1 << x) != 0 {
+            1
+        } else {
+            0
+        };
         let max_width_pos = MAX_WIDTH_Y[level] as i32;
-        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_Y[level] as i32 };
+        let max_width_neg = if tile_edge {
+            max_width_pos
+        } else {
+            MAX_WIDTH_Y[level] as i32
+        };
         let pos_lossless = ll_mask[1] & (1 << x) != 0;
         let neg_lossless = ll_mask[0] & (1 << x) != 0;
         let off = dst_off + x as usize;
-        deblock_pixel(dst, off, q_thr[x as usize], side_thr[x as usize],
-                      stride, 1, max_width_pos, max_width_neg,
-                      pos_lossless, neg_lossless);
+        deblock_pixel(
+            dst,
+            off,
+            q_thr[x as usize],
+            side_thr[x as usize],
+            stride,
+            1,
+            max_width_pos,
+            max_width_neg,
+            pos_lossless,
+            neg_lossless,
+        );
     }
 }
 
 fn deblock_h_sb64uv(
-    dst: &mut [u8], dst_off: usize, stride: isize,
-    vmask: &[u16], ll_mask: &[u16],
-    q_thr: &[u32], side_thr: &[u32],
-    tile_edge: bool, h4: i32,
+    dst: &mut [u8],
+    dst_off: usize,
+    stride: isize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u32],
+    side_thr: &[u32],
+    tile_edge: bool,
+    h4: i32,
 ) {
     let ls = stride.unsigned_abs();
     for y in 0..h4 as u16 {
@@ -817,25 +972,47 @@ fn deblock_h_sb64uv(
         if mask & (1 << y) == 0 {
             continue;
         }
-        let level = if vmask[2] & (1 << y) != 0 { 2 }
-            else if vmask[1] & (1 << y) != 0 { 1 }
-            else { 0 };
+        let level = if vmask[2] & (1 << y) != 0 {
+            2
+        } else if vmask[1] & (1 << y) != 0 {
+            1
+        } else {
+            0
+        };
         let max_width_pos = MAX_WIDTH_UV[level] as i32;
-        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_UV[level] as i32 };
+        let max_width_neg = if tile_edge {
+            max_width_pos
+        } else {
+            MAX_WIDTH_UV[level] as i32
+        };
         let pos_lossless = ll_mask[1] & (1 << y) != 0;
         let neg_lossless = ll_mask[0] & (1 << y) != 0;
         let off = dst_off + y as usize * ls;
-        deblock_pixel(dst, off, q_thr[y as usize], side_thr[y as usize],
-                      1, stride, max_width_pos, max_width_neg,
-                      pos_lossless, neg_lossless);
+        deblock_pixel(
+            dst,
+            off,
+            q_thr[y as usize],
+            side_thr[y as usize],
+            1,
+            stride,
+            max_width_pos,
+            max_width_neg,
+            pos_lossless,
+            neg_lossless,
+        );
     }
 }
 
 fn deblock_v_sb64uv(
-    dst: &mut [u8], dst_off: usize, stride: isize,
-    vmask: &[u16], ll_mask: &[u16],
-    q_thr: &[u32], side_thr: &[u32],
-    tile_edge: bool, w4: i32,
+    dst: &mut [u8],
+    dst_off: usize,
+    stride: isize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u32],
+    side_thr: &[u32],
+    tile_edge: bool,
+    w4: i32,
 ) {
     let _ls = stride.unsigned_abs();
     for x in 0..w4 as u16 {
@@ -843,17 +1020,34 @@ fn deblock_v_sb64uv(
         if mask & (1 << x) == 0 {
             continue;
         }
-        let level = if vmask[2] & (1 << x) != 0 { 2 }
-            else if vmask[1] & (1 << x) != 0 { 1 }
-            else { 0 };
+        let level = if vmask[2] & (1 << x) != 0 {
+            2
+        } else if vmask[1] & (1 << x) != 0 {
+            1
+        } else {
+            0
+        };
         let max_width_pos = MAX_WIDTH_UV[level] as i32;
-        let max_width_neg = if tile_edge { max_width_pos } else { MAX_WIDTH_UV[level] as i32 };
+        let max_width_neg = if tile_edge {
+            max_width_pos
+        } else {
+            MAX_WIDTH_UV[level] as i32
+        };
         let pos_lossless = ll_mask[1] & (1 << x) != 0;
         let neg_lossless = ll_mask[0] & (1 << x) != 0;
         let off = dst_off + x as usize;
-        deblock_pixel(dst, off, q_thr[x as usize], side_thr[x as usize],
-                      stride, 1, max_width_pos, max_width_neg,
-                      pos_lossless, neg_lossless);
+        deblock_pixel(
+            dst,
+            off,
+            q_thr[x as usize],
+            side_thr[x as usize],
+            stride,
+            1,
+            max_width_pos,
+            max_width_neg,
+            pos_lossless,
+            neg_lossless,
+        );
     }
 }
 
@@ -885,8 +1079,17 @@ fn filter_plane_cols_y_8bpc(
             side_thr_arr[y] = thr_lut[1][0] as u32;
         }
         let off = x as usize * 4;
-        deblock_h_sb64y(dst, off, stride, &vmask[..4], &ll_slice,
-                        &q_thr_arr, &side_thr_arr, tile_edge, h4);
+        deblock_h_sb64y(
+            dst,
+            off,
+            stride,
+            &vmask[..4],
+            &ll_slice,
+            &q_thr_arr,
+            &side_thr_arr,
+            tile_edge,
+            h4,
+        );
         tile_edge = false;
     }
 }
@@ -923,10 +1126,28 @@ fn filter_plane_cols_uv_8bpc(
             side_thr_arr[y] = 1;
         }
         let off = x as usize * 4;
-        deblock_h_sb64uv(u, off, stride, &vmask[..3], &ll_slice,
-                         &q_thr_arr, &side_thr_arr, tile_edge, ch4);
-        deblock_h_sb64uv(v, off, stride, &vmask[..3], &ll_slice,
-                         &q_thr_arr, &side_thr_arr, tile_edge, ch4);
+        deblock_h_sb64uv(
+            u,
+            off,
+            stride,
+            &vmask[..3],
+            &ll_slice,
+            &q_thr_arr,
+            &side_thr_arr,
+            tile_edge,
+            ch4,
+        );
+        deblock_h_sb64uv(
+            v,
+            off,
+            stride,
+            &vmask[..3],
+            &ll_slice,
+            &q_thr_arr,
+            &side_thr_arr,
+            tile_edge,
+            ch4,
+        );
         tile_edge = false;
     }
 }
@@ -951,17 +1172,7 @@ pub fn deblock_sbrow_rows_8bpc(
     let y64_end = ((sby as usize + 1) * sb_size).min(params.bh * 4) / 64;
 
     for _y64 in y64_start..y64_end {
-        deblock_sbrow64_rows_8bpc(
-            y,
-            u,
-            v,
-            params,
-            masks,
-            segmap,
-            thr_lut_y,
-            thr_lut_uv,
-            _y64,
-        );
+        deblock_sbrow64_rows_8bpc(y, u, v, params, masks, segmap, thr_lut_y, thr_lut_uv, _y64);
     }
 }
 
@@ -987,15 +1198,7 @@ fn deblock_sbrow64_rows_8bpc(
         let w4 = imin(16, params.bw as i32 - sbx as i32 * 16);
 
         if params.level_y[1] > 0 && have_top {
-            filter_plane_rows_y_8bpc(
-                y,
-                params.y_stride,
-                masks,
-                sbx,
-                y64,
-                w4,
-                h4,
-            );
+            filter_plane_rows_y_8bpc(y, params.y_stride, masks, sbx, y64, w4, h4);
         }
 
         if params.have_chroma && have_top {
@@ -1041,8 +1244,17 @@ fn filter_plane_rows_y_8bpc(
             side_thr_arr[x] = 1;
         }
         let off = y as usize * ls;
-        deblock_v_sb64y(dst, off, stride, &vmask[..4], &ll_slice,
-                        &q_thr_arr, &side_thr_arr, y == 0, w4);
+        deblock_v_sb64y(
+            dst,
+            off,
+            stride,
+            &vmask[..4],
+            &ll_slice,
+            &q_thr_arr,
+            &side_thr_arr,
+            y == 0,
+            w4,
+        );
     }
 }
 
@@ -1077,10 +1289,28 @@ fn filter_plane_rows_uv_8bpc(
             side_thr_arr[x] = 1;
         }
         let off = y as usize * ls;
-        deblock_v_sb64uv(u, off, stride, &vmask[..3], &ll_slice,
-                         &q_thr_arr, &side_thr_arr, y == 0, cw4);
-        deblock_v_sb64uv(v, off, stride, &vmask[..3], &ll_slice,
-                         &q_thr_arr, &side_thr_arr, y == 0, cw4);
+        deblock_v_sb64uv(
+            u,
+            off,
+            stride,
+            &vmask[..3],
+            &ll_slice,
+            &q_thr_arr,
+            &side_thr_arr,
+            y == 0,
+            cw4,
+        );
+        deblock_v_sb64uv(
+            v,
+            off,
+            stride,
+            &vmask[..3],
+            &ll_slice,
+            &q_thr_arr,
+            &side_thr_arr,
+            y == 0,
+            cw4,
+        );
     }
 }
 
@@ -1283,8 +1513,12 @@ mod tests {
     #[test]
     fn test_filter_choice_sharp_edge() {
         let mut buf = vec![0u8; 64];
-        for i in 0..32 { buf[i] = 50; }
-        for i in 32..64 { buf[i] = 200; }
+        for i in 0..32 {
+            buf[i] = 50;
+        }
+        for i in 32..64 {
+            buf[i] = 200;
+        }
         let s = 32isize;
         let t = 35;
         let w = filter_choice_8bpc(&buf, s, t, 1, 3, 3, 10, 20);
@@ -1298,8 +1532,16 @@ mod tests {
         let off = (stride * 2 + 8) as isize;
         let orig = dst.clone();
         deblock_8bpc(
-            &mut dst, off, 10, 20,
-            stride as isize, 1, 3, 3, false, false,
+            &mut dst,
+            off,
+            10,
+            20,
+            stride as isize,
+            1,
+            3,
+            3,
+            false,
+            false,
         );
         assert_eq!(dst, orig, "uniform buffer should be unchanged");
     }
@@ -1310,17 +1552,31 @@ mod tests {
         let mut dst = vec![0u8; stride * 8];
         let edge_col = 10;
         for y in 0..8 {
-            for x in 0..edge_col { dst[y * stride + x] = 50; }
-            for x in edge_col..32 { dst[y * stride + x] = 200; }
+            for x in 0..edge_col {
+                dst[y * stride + x] = 50;
+            }
+            for x in edge_col..32 {
+                dst[y * stride + x] = 200;
+            }
         }
         let off = (stride * 2 + edge_col) as isize;
         let orig_at_edge = dst[off as usize];
         deblock_8bpc(
-            &mut dst, off, 200, 200,
-            stride as isize, 1, 1, 1, false, false,
+            &mut dst,
+            off,
+            200,
+            200,
+            stride as isize,
+            1,
+            1,
+            1,
+            false,
+            false,
         );
-        assert_ne!(dst[off as usize], orig_at_edge,
-            "deblock should modify sharp edge pixel");
+        assert_ne!(
+            dst[off as usize], orig_at_edge,
+            "deblock should modify sharp edge pixel"
+        );
     }
 
     #[test]
@@ -1329,14 +1585,26 @@ mod tests {
         let mut dst = vec![0u8; stride * 8];
         let edge_col = 10;
         for y in 0..8 {
-            for x in 0..edge_col { dst[y * stride + x] = 50; }
-            for x in edge_col..32 { dst[y * stride + x] = 200; }
+            for x in 0..edge_col {
+                dst[y * stride + x] = 50;
+            }
+            for x in edge_col..32 {
+                dst[y * stride + x] = 200;
+            }
         }
         let off = (stride * 2 + edge_col) as isize;
         let orig = dst.clone();
         deblock_8bpc(
-            &mut dst, off, 200, 200,
-            stride as isize, 1, 1, 1, true, true,
+            &mut dst,
+            off,
+            200,
+            200,
+            stride as isize,
+            1,
+            1,
+            1,
+            true,
+            true,
         );
         assert_eq!(dst, orig, "both-lossless should not modify pixels");
     }
@@ -1351,8 +1619,7 @@ mod tests {
         let side_thr = [20u8; 16];
         let orig = dst.clone();
         deblock_h_sb64y_8bpc(
-            &mut dst, 8, stride, &vmask, &ll_mask,
-            &q_thr, &side_thr, false,
+            &mut dst, 8, stride, &vmask, &ll_mask, &q_thr, &side_thr, false,
         );
         assert_eq!(dst, orig);
     }
@@ -1367,8 +1634,7 @@ mod tests {
         let side_thr = [20u8; 16];
         let orig = dst.clone();
         deblock_h_sb64y_8bpc(
-            &mut dst, 8, stride, &vmask, &ll_mask,
-            &q_thr, &side_thr, false,
+            &mut dst, 8, stride, &vmask, &ll_mask, &q_thr, &side_thr, false,
         );
         assert_eq!(dst, orig, "uniform input should not change");
     }
@@ -1383,8 +1649,14 @@ mod tests {
         let side_thr = [20u8; 16];
         let orig = dst.clone();
         deblock_v_sb64y_8bpc(
-            &mut dst, stride * 4, stride, &vmask, &ll_mask,
-            &q_thr, &side_thr, false,
+            &mut dst,
+            stride * 4,
+            stride,
+            &vmask,
+            &ll_mask,
+            &q_thr,
+            &side_thr,
+            false,
         );
         assert_eq!(dst, orig, "uniform input should not change");
     }
@@ -1399,8 +1671,7 @@ mod tests {
         let side_thr = [20u8; 16];
         let orig = dst.clone();
         deblock_h_sb64uv_8bpc(
-            &mut dst, 8, stride, &vmask, &ll_mask,
-            &q_thr, &side_thr, false,
+            &mut dst, 8, stride, &vmask, &ll_mask, &q_thr, &side_thr, false,
         );
         assert_eq!(dst, orig);
     }
@@ -1415,8 +1686,14 @@ mod tests {
         let side_thr = [20u8; 16];
         let orig = dst.clone();
         deblock_v_sb64uv_8bpc(
-            &mut dst, stride * 4, stride, &vmask, &ll_mask,
-            &q_thr, &side_thr, false,
+            &mut dst,
+            stride * 4,
+            stride,
+            &vmask,
+            &ll_mask,
+            &q_thr,
+            &side_thr,
+            false,
         );
         assert_eq!(dst, orig);
     }
@@ -1463,9 +1740,21 @@ mod tests {
         let mut left_q = [0u8; 16];
         let mut left_side = [0u8; 16];
         setup_thr_cols_sb64(
-            &mut q_thr, &mut side_thr, dst_stride,
-            &segmap, 0, 4, &mask, &thr_lut,
-            &mut left_q, &mut left_side, 0, 0, 0, 4, 4,
+            &mut q_thr,
+            &mut side_thr,
+            dst_stride,
+            &segmap,
+            0,
+            4,
+            &mask,
+            &thr_lut,
+            &mut left_q,
+            &mut left_side,
+            0,
+            0,
+            0,
+            4,
+            4,
         );
         // x4=0: prev=0, cur=20 → edge=0|20=20
         assert_eq!(q_thr[0 * dst_stride + 0], 20);
@@ -1482,14 +1771,28 @@ mod tests {
         let mut side_thr = vec![0u8; dst_stride * 4];
         let segmap = vec![2u8; 4 * 4];
         let mask = vec![[[0u16; 4]; 5]; 4];
-        let thr_lut = [[0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                        [0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let thr_lut = [
+            [0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
         let mut left_q = [0u8; 16];
         let mut left_side = [0u8; 16];
         setup_thr_cols_sb64(
-            &mut q_thr, &mut side_thr, dst_stride,
-            &segmap, 0, 4, &mask, &thr_lut,
-            &mut left_q, &mut left_side, 0, 0, 0, 4, 4,
+            &mut q_thr,
+            &mut side_thr,
+            dst_stride,
+            &segmap,
+            0,
+            4,
+            &mask,
+            &thr_lut,
+            &mut left_q,
+            &mut left_side,
+            0,
+            0,
+            0,
+            4,
+            4,
         );
         // left should be updated to last column's threshold
         assert_eq!(left_q[0], 30);
@@ -1509,9 +1812,21 @@ mod tests {
         let mut left_q = [40u8; 16];
         let mut left_side = [20u8; 16];
         setup_thr_cols_sb64(
-            &mut q_thr, &mut side_thr, dst_stride,
-            &segmap, 0, 2, &mask, &thr_lut,
-            &mut left_q, &mut left_side, 0, 0, 0, 2, 2,
+            &mut q_thr,
+            &mut side_thr,
+            dst_stride,
+            &segmap,
+            0,
+            2,
+            &mask,
+            &thr_lut,
+            &mut left_q,
+            &mut left_side,
+            0,
+            0,
+            0,
+            2,
+            2,
         );
         // x4=1, y4=0: subpu=3, edge_q=40, result=40>>3=5
         assert_eq!(q_thr[1 * dst_stride + 0], 5);
@@ -1526,14 +1841,28 @@ mod tests {
         // seg_id 0 maps to thr 0, seg_id 1 maps to thr 30
         let segmap = vec![0, 1, 0, 1];
         let mask = vec![[[0u16; 4]; 5]; 2];
-        let thr_lut = [[0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                        [0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let thr_lut = [
+            [0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
         let mut left_q = [0u8; 16];
         let mut left_side = [0u8; 16];
         setup_thr_cols_sb64(
-            &mut q_thr, &mut side_thr, dst_stride,
-            &segmap, 0, 2, &mask, &thr_lut,
-            &mut left_q, &mut left_side, 0, 0, 0, 2, 2,
+            &mut q_thr,
+            &mut side_thr,
+            dst_stride,
+            &segmap,
+            0,
+            2,
+            &mask,
+            &thr_lut,
+            &mut left_q,
+            &mut left_side,
+            0,
+            0,
+            0,
+            2,
+            2,
         );
         // y4=0: x4=0 seg=0 cur=0 prev=0 → edge=0; x4=1 seg=1 cur=30 prev=0 → edge=0|30=30
         assert_eq!(q_thr[0 * dst_stride + 0], 0);
@@ -1549,9 +1878,20 @@ mod tests {
         let mask = vec![[[0u16; 4]; 5]; 4];
         let thr_lut = [[20u8; 16], [10u8; 16]];
         setup_thr_rows_sb64(
-            &mut q_thr, &mut side_thr, dst_stride,
-            &segmap, 0, 4, &mask, &thr_lut, None,
-            0, 0, 0, 4, 4,
+            &mut q_thr,
+            &mut side_thr,
+            dst_stride,
+            &segmap,
+            0,
+            4,
+            &mask,
+            &thr_lut,
+            None,
+            0,
+            0,
+            0,
+            4,
+            4,
         );
         // y4=0: prev=0(no above), cur=20 → edge=0|20=20
         assert_eq!(q_thr[0 + 0 * dst_stride], 20);
@@ -1569,16 +1909,31 @@ mod tests {
         let seg_stride: isize = 4;
         let mut segmap = vec![0u8; 5 * 4];
         // above row (offset 0)
-        for i in 0..4 { segmap[i] = 1; }
+        for i in 0..4 {
+            segmap[i] = 1;
+        }
         // current rows start at offset 4 (seg_off=4)
         let mask = vec![[[0u16; 4]; 5]; 4];
         let thr_lut = [[10u8; 16], [5u8; 16]];
-        let above_lut = [[0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                         [0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let above_lut = [
+            [0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
         setup_thr_rows_sb64(
-            &mut q_thr, &mut side_thr, dst_stride,
-            &segmap, 4, seg_stride, &mask, &thr_lut, Some(&above_lut),
-            0, 0, 0, 4, 4,
+            &mut q_thr,
+            &mut side_thr,
+            dst_stride,
+            &segmap,
+            4,
+            seg_stride,
+            &mask,
+            &thr_lut,
+            Some(&above_lut),
+            0,
+            0,
+            0,
+            4,
+            4,
         );
         // y4=0, x4=0: above seg_id=1→above_q=30, cur=10 → (30+10+1)>>1=20
         assert_eq!(q_thr[0 + 0 * dst_stride], 20);
@@ -1597,9 +1952,20 @@ mod tests {
         mask[1][4][0] = 1;
         let thr_lut = [[40u8; 16], [20u8; 16]];
         setup_thr_rows_sb64(
-            &mut q_thr, &mut side_thr, dst_stride,
-            &segmap, 0, 2, &mask, &thr_lut, None,
-            0, 0, 0, 2, 2,
+            &mut q_thr,
+            &mut side_thr,
+            dst_stride,
+            &segmap,
+            0,
+            2,
+            &mask,
+            &thr_lut,
+            None,
+            0,
+            0,
+            0,
+            2,
+            2,
         );
         // y4=1, x4=0: subpu=3, edge_q=40, result=40>>3=5
         assert_eq!(q_thr[0 + 1 * dst_stride], 5);

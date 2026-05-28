@@ -88,7 +88,9 @@ mod log;
 mod picture;
 
 pub use data::Data;
-pub use decoder::{Decoder, DecodeFrameType, InloopFilterType, Settings, MAX_FRAME_DELAY, MAX_THREADS};
+pub use decoder::{
+    DecodeFrameType, Decoder, InloopFilterType, MAX_FRAME_DELAY, MAX_THREADS, Settings,
+};
 pub use decoder::{get_frame_delay, version, version_api};
 pub use error::Rav2dError;
 pub use headers::{FrameHeader, PixelLayout, SequenceHeader};

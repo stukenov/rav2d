@@ -9,9 +9,7 @@ use crate::internal::DecoderContext;
 use crate::log::Logger;
 use crate::mem::MemPool;
 use crate::obu;
-use crate::picture::{
-    DefaultPicAllocator, PicAllocator, Picture, ThreadPicture,
-};
+use crate::picture::{DefaultPicAllocator, PicAllocator, Picture, ThreadPicture};
 
 pub const MAX_THREADS: u32 = 256;
 pub const MAX_FRAME_DELAY: u32 = 256;
@@ -32,7 +30,6 @@ pub enum InloopFilterType {
     All = 31,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 /// Which frame types to decode.
@@ -45,7 +42,6 @@ pub enum DecodeFrameType {
     Intra = 2,
     Key = 3,
 }
-
 
 /// Decoder configuration. Use `Settings::default()` for sensible defaults.
 #[derive(Debug, Clone)]
@@ -445,7 +441,7 @@ pub fn version() -> &'static str {
 }
 
 pub fn version_api() -> u32 {
-    1 << 8 
+    1 << 8
 }
 
 #[cfg(test)]

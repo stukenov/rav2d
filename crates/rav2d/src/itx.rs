@@ -1,7 +1,7 @@
 use crate::intops::{iclip, imin};
-use crate::itx_1d::{inv_wht_wht_4x4, residual_add_8bpc, TX1D_FNS};
+use crate::itx_1d::{TX1D_FNS, inv_wht_wht_4x4, residual_add_8bpc};
 use crate::scan::LAST_EOB_PER_COL;
-use crate::tables::{TXFM_DIMENSIONS, TX_SHIFT};
+use crate::tables::{TX_SHIFT, TXFM_DIMENSIONS};
 
 const WHT_WHT: u32 = 6 | (6 << 5);
 
@@ -94,7 +94,9 @@ pub fn inv_txfm_add_8bpc(
             }
             first_1d_fn(&mut tmp[col * sw..], 1);
             col += 1;
-            if col > last_nz_col { break; }
+            if col > last_nz_col {
+                break;
+            }
         }
     }
 
@@ -157,7 +159,16 @@ pub fn inv_txfm_add_8bpc(
         }
     } else {
         let dpcm_flag = (txtp >> 8) as u8;
-        residual_add_8bpc(&mut dst[dst_off..], stride, &tmp, w, h, rnd1, shift1, dpcm_flag);
+        residual_add_8bpc(
+            &mut dst[dst_off..],
+            stride,
+            &tmp,
+            w,
+            h,
+            rnd1,
+            shift1,
+            dpcm_flag,
+        );
     }
 }
 

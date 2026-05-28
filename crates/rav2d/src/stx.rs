@@ -1,6 +1,13 @@
 use crate::intops::{apply_sign, iclip};
 
-pub fn stxfm(cf_out: &mut [i32], cf: &[i32], kernel: &[i8], sz: usize, eob: usize, bitdepth_max: i32) {
+pub fn stxfm(
+    cf_out: &mut [i32],
+    cf: &[i32],
+    kernel: &[i8],
+    sz: usize,
+    eob: usize,
+    bitdepth_max: i32,
+) {
     debug_assert!(sz == 16 || sz == 48);
     debug_assert!(eob < if sz == 16 { 8 } else { 32 });
     let min = -128 * (1 + bitdepth_max);

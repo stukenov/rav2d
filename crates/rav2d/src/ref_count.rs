@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::mem::MemPool;
 
@@ -24,7 +24,9 @@ impl Ref {
             data: Some(ptr),
             ref_cnt: AtomicUsize::new(1),
             free_callback: Box::new(move || {
-                unsafe { crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), size, 64) };
+                unsafe {
+                    crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), size, 64)
+                };
             }),
         }))
     }
@@ -168,8 +170,8 @@ mod tests {
 
     #[test]
     fn test_ref_wrap() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let freed = Arc::new(AtomicBool::new(false));
         let freed_clone = freed.clone();
@@ -179,7 +181,9 @@ mod tests {
             ptr,
             Box::new(move || {
                 freed_clone.store(true, Ordering::Relaxed);
-                unsafe { crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), 64, 64) };
+                unsafe {
+                    crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), 64, 64)
+                };
             }),
         );
         assert!(!freed.load(Ordering::Relaxed));

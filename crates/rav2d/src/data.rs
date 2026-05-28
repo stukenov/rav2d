@@ -120,9 +120,9 @@ impl Data {
     pub fn data_mut(&mut self) -> Option<&mut [u8]> {
         let offset = self.offset;
         let len = self.len;
-        self.buf.as_mut().and_then(|b| {
-            Arc::get_mut(b).map(|v| &mut v[offset..offset + len])
-        })
+        self.buf
+            .as_mut()
+            .and_then(|b| Arc::get_mut(b).map(|v| &mut v[offset..offset + len]))
     }
 
     pub fn len(&self) -> usize {

@@ -32,14 +32,23 @@ pub fn get_shear_params(wm: &mut WarpedMotionParams) -> i32 {
     wm.abcd[1] = iclip_wmp(mat[3]);
 
     let mut shift = 0i32;
-    let y = apply_sign(resolve_divisor_32(mat[2].unsigned_abs(), &mut shift), mat[2]);
+    let y = apply_sign(
+        resolve_divisor_32(mat[2].unsigned_abs(), &mut shift),
+        mat[2],
+    );
     let v1 = (mat[4] as i64 * 0x10000) * y as i64;
     let rnd = (1i64 << shift) >> 1;
-    wm.abcd[2] = iclip_wmp(apply_sign64((v1.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift, v1));
+    wm.abcd[2] = iclip_wmp(apply_sign64(
+        (v1.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift,
+        v1,
+    ));
     let v2 = (mat[3] as i64 * mat[4] as i64) * y as i64;
     wm.abcd[3] = iclip_wmp(
         mat[5]
-            - apply_sign64((v2.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift, v2)
+            - apply_sign64(
+                (v2.unsigned_abs().wrapping_add(rnd as u64)) as i64 >> shift,
+                v2,
+            )
             - 0x10000,
     );
 
@@ -90,12 +99,16 @@ pub fn set_affine_mv2d(
     let isux = bx4 * 4 + rsux;
 
     wm.matrix[0] = iclip64to32(
-        mv.x as i64 * 0x2000 - isux as i64 * (wm.matrix[2] as i64 - 0x10000) - isuy as i64 * wm.matrix[3] as i64,
+        mv.x as i64 * 0x2000
+            - isux as i64 * (wm.matrix[2] as i64 - 0x10000)
+            - isuy as i64 * wm.matrix[3] as i64,
         -0x8000000,
         0x7ffffc0,
     );
     wm.matrix[1] = iclip64to32(
-        mv.y as i64 * 0x2000 - isux as i64 * wm.matrix[4] as i64 - isuy as i64 * (wm.matrix[5] as i64 - 0x10000),
+        mv.y as i64 * 0x2000
+            - isux as i64 * wm.matrix[4] as i64
+            - isuy as i64 * (wm.matrix[5] as i64 - 0x10000),
         -0x8000000,
         0x7ffffc0,
     );
@@ -148,7 +161,10 @@ pub fn find_affine_int(
     }
 
     let mut shift = 0i32;
-    let mut idet = apply_sign64(resolve_divisor_64(det.unsigned_abs(), &mut shift) as i64, det);
+    let mut idet = apply_sign64(
+        resolve_divisor_64(det.unsigned_abs(), &mut shift) as i64,
+        det,
+    );
     shift -= 16;
     if shift < 0 {
         idet <<= -shift;
@@ -158,19 +174,27 @@ pub fn find_affine_int(
     let r = (1i64 << shift) >> 1;
     wm.matrix[2] = get_mult_shift_diag(
         a[1][1] as i64 * bx[0] as i64 - a[0][1] as i64 * bx[1] as i64,
-        idet, r, shift,
+        idet,
+        r,
+        shift,
     );
     wm.matrix[3] = get_mult_shift_ndiag(
         a[0][0] as i64 * bx[1] as i64 - a[0][1] as i64 * bx[0] as i64,
-        idet, r, shift,
+        idet,
+        r,
+        shift,
     );
     wm.matrix[4] = get_mult_shift_ndiag(
         a[1][1] as i64 * by[0] as i64 - a[0][1] as i64 * by[1] as i64,
-        idet, r, shift,
+        idet,
+        r,
+        shift,
     );
     wm.matrix[5] = get_mult_shift_diag(
         a[0][0] as i64 * by[1] as i64 - a[0][1] as i64 * by[0] as i64,
-        idet, r, shift,
+        idet,
+        r,
+        shift,
     );
 
     set_affine_mv2d(bw4, bh4, mv, wm, bx4, by4);

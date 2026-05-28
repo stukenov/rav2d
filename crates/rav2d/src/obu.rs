@@ -76,8 +76,7 @@ fn parse_tile_info(
     let sbh = (h + sbsz_min1) >> sbsz_log2;
     let w_adj = (level >= 18) as i32 + ((level >= 14 && tier != 0) as i32);
     let max_tile_width_sb = 4096 >> (sbsz_log2 - w_adj);
-    let sz_adj = (level >= 14) as i32 + (level >= 18) as i32
-        + ((level >= 14 && tier != 0) as i32);
+    let sz_adj = (level >= 14) as i32 + (level >= 18) as i32 + ((level >= 14 && tier != 0) as i32);
     let max_tile_area_sb = (4096 * 2304) >> (2 * sbsz_log2 - sz_adj);
     thdr.min_log2_cols = tile_log2(max_tile_width_sb, sbw) as u8;
     thdr.max_log2_cols = tile_log2(1, imin(sbw, MAX_TILE_COLS as i32)) as u8;
@@ -108,10 +107,7 @@ fn parse_tile_info(
             extra -= 1;
         }
 
-        thdr.min_log2_rows = imax(
-            min_log2_tiles - thdr.log2_cols as i32,
-            0,
-        ) as u8;
+        thdr.min_log2_rows = imax(min_log2_tiles - thdr.log2_cols as i32, 0) as u8;
         thdr.log2_rows = thdr.min_log2_rows;
         while thdr.log2_rows < thdr.max_log2_rows && gb.get_bit() != 0 {
             thdr.log2_rows += 1;
@@ -134,7 +130,11 @@ fn parse_tile_info(
         while sbx < sbw {
             thdr.col_start_sb[thdr.cols as usize] = sbx as u16;
             let max_width = imin(sbw - sbx, max_tile_width_sb);
-            let w_tile = if max_width > 1 { gb.get_uniform(max_width as u32) as i32 + 1 } else { 1 };
+            let w_tile = if max_width > 1 {
+                gb.get_uniform(max_width as u32) as i32 + 1
+            } else {
+                1
+            };
             widest_tile = imax(widest_tile, w_tile);
             sbx += w_tile;
             thdr.cols += 1;
@@ -153,7 +153,11 @@ fn parse_tile_info(
         while sby < sbh {
             thdr.row_start_sb[thdr.rows as usize] = sby as u16;
             let max_height = imin(sbh - sby, max_tile_height_sb);
-            let h_tile = if max_height > 1 { gb.get_uniform(max_height as u32) as i32 + 1 } else { 1 };
+            let h_tile = if max_height > 1 {
+                gb.get_uniform(max_height as u32) as i32 + 1
+            } else {
+                1
+            };
             sby += h_tile;
             thdr.rows += 1;
         }
@@ -163,11 +167,7 @@ fn parse_tile_info(
     thdr.row_start_sb[thdr.rows as usize] = sbh as u16;
 }
 
-pub fn parse_tile_info_frmhdr(
-    hdr: &mut FrameHeader,
-    seqhdr: &SequenceHeader,
-    gb: &mut GetBits,
-) {
+pub fn parse_tile_info_frmhdr(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, gb: &mut GetBits) {
     hdr.sb128 = if hdr.is_inter_or_switch() {
         seqhdr.sb128
     } else {
@@ -187,10 +187,8 @@ pub fn parse_tile_info_frmhdr(
             let seq_sbh = (seqhdr.max_height + seq_sbsz_min1) >> seq_sbsz_log2;
             reuse_allowed = seq_sbw == sbw && seq_sbh == sbh;
         } else {
-            let tile_w =
-                (sbw + seqhdr.tiling.t.cols as i32 - 1) >> seqhdr.tiling.t.log2_cols;
-            let tile_h =
-                (sbh + seqhdr.tiling.t.rows as i32 - 1) >> seqhdr.tiling.t.log2_rows;
+            let tile_w = (sbw + seqhdr.tiling.t.cols as i32 - 1) >> seqhdr.tiling.t.log2_cols;
+            let tile_h = (sbh + seqhdr.tiling.t.rows as i32 - 1) >> seqhdr.tiling.t.log2_rows;
             reuse_allowed = tile_w * (seqhdr.tiling.t.cols as i32 - 1) < sbw
                 && tile_h * (seqhdr.tiling.t.rows as i32 - 1) < sbh;
         }
@@ -199,8 +197,7 @@ pub fn parse_tile_info_frmhdr(
     let sbmul;
     if reuse_allowed
         && (seqhdr.tiling.present == AdaptiveBoolean::On
-            || (seqhdr.tiling.present == AdaptiveBoolean::Adaptive
-                && gb.get_bit() != 0))
+            || (seqhdr.tiling.present == AdaptiveBoolean::Adaptive && gb.get_bit() != 0))
     {
         hdr.tiling.t = seqhdr.tiling.t.clone();
         if hdr.sb128 != seqhdr.sb128 {
@@ -216,7 +213,11 @@ pub fn parse_tile_info_frmhdr(
             sbmul = 1;
         }
     } else {
-        sbmul = if seqhdr.sb128 == 2 && hdr.is_key_or_intra() { 2 } else { 1 };
+        sbmul = if seqhdr.sb128 == 2 && hdr.is_key_or_intra() {
+            2
+        } else {
+            1
+        };
         parse_tile_info(
             &mut hdr.tiling.t,
             gb,
@@ -231,17 +232,12 @@ pub fn parse_tile_info_frmhdr(
     }
 
     if sbmul == 2 {
-        hdr.tiling.t.row_start_sb[hdr.tiling.t.rows as usize] =
-            ((hdr.height + 127) >> 7) as u16;
-        hdr.tiling.t.col_start_sb[hdr.tiling.t.cols as usize] =
-            ((hdr.width + 127) >> 7) as u16;
+        hdr.tiling.t.row_start_sb[hdr.tiling.t.rows as usize] = ((hdr.height + 127) >> 7) as u16;
+        hdr.tiling.t.col_start_sb[hdr.tiling.t.cols as usize] = ((hdr.width + 127) >> 7) as u16;
     }
 }
 
-pub fn parse_film_grain_data(
-    gb: &mut GetBits,
-    layout: PixelLayout,
-) -> Result<FilmGrainData> {
+pub fn parse_film_grain_data(gb: &mut GetBits, layout: PixelLayout) -> Result<FilmGrainData> {
     let mut fgd = FilmGrainData::default();
 
     let mut num_pl = 1;
@@ -273,9 +269,7 @@ pub fn parse_film_grain_data(
         }
     }
 
-    if layout == PixelLayout::I420
-        && (fgd.num_points[1] != 0) != (fgd.num_points[2] != 0)
-    {
+    if layout == PixelLayout::I420 && (fgd.num_points[1] != 0) != (fgd.num_points[2] != 0) {
         return Err(Rav2dError::InvalidData);
     }
 
@@ -283,13 +277,10 @@ pub fn parse_film_grain_data(
     fgd.ar_coeff_lag = gb.get_bits(2) as i32;
     let num_pos = 2 * fgd.ar_coeff_lag * (fgd.ar_coeff_lag + 1);
     for pl in 0..3 {
-        if fgd.num_points[pl] == 0
-            && (pl == 0 || !fgd.chroma_scaling_from_luma)
-        {
+        if fgd.num_points[pl] == 0 && (pl == 0 || !fgd.chroma_scaling_from_luma) {
             continue;
         }
-        let num_pl_pos =
-            num_pos + (pl != 0 && fgd.num_points[0] != 0) as i32;
+        let num_pl_pos = num_pos + (pl != 0 && fgd.num_points[0] != 0) as i32;
         let coef_bits = 5 + gb.get_bits(2) as i32;
         for i in 0..num_pl_pos as usize {
             fgd.ar_coeffs[pl][i] = (gb.get_bits(coef_bits) as i32 - 128) as i8;
@@ -447,7 +438,11 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
         }
     }
 
-    hdr.sb128 = if gb.get_bit() != 0 { 2 } else { gb.get_bit() as u8 };
+    hdr.sb128 = if gb.get_bit() != 0 {
+        2
+    } else {
+        gb.get_bit() as u8
+    };
 
     if hdr.layout != PixelLayout::I400 {
         hdr.sdp = gb.get_bit() != 0;
@@ -802,17 +797,16 @@ pub fn parse_frame_hdr(
         hdr.ltr_id = -1;
         if hdr.frame_type == FrameType::Key {
             if seqhdr.number_of_bits_for_lt_frame_id > 0 {
-                hdr.ltr_id =
-                    gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8 - 1;
+                hdr.ltr_id = gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8 - 1;
             }
         } else if (obu_type == ObuType::Ras || obu_type == ObuType::OpenLoopKf)
-            && seqhdr.number_of_bits_for_lt_frame_id > 0 {
-                hdr.n_ref_frames = gb.get_bits(3) as u8;
-                for n in 0..hdr.n_ref_frames as usize {
-                    hdr.refidx[n] =
-                        gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8;
-                }
+            && seqhdr.number_of_bits_for_lt_frame_id > 0
+        {
+            hdr.n_ref_frames = gb.get_bits(3) as u8;
+            for n in 0..hdr.n_ref_frames as usize {
+                hdr.refidx[n] = gb.get_bits(seqhdr.number_of_bits_for_lt_frame_id as i32) as i8;
             }
+        }
         if obu_type != ObuType::Bridge {
             if obu_type != ObuType::OpenLoopKf {
                 hdr.show_immediate = gb.get_bit() as u8;
@@ -888,8 +882,11 @@ pub fn parse_frame_hdr(
                 .frame_hdr
                 .as_ref()
                 .ok_or(Rav2dError::InvalidData)?;
-            let pocdiff =
-                get_poc_diff(seqhdr.order_hint_n_bits as i32, poc, refhdr.frame_offset as i32);
+            let pocdiff = get_poc_diff(
+                seqhdr.order_hint_n_bits as i32,
+                poc,
+                refhdr.frame_offset as i32,
+            );
             hdr.has_future_refs |= (pocdiff < 0) as u8;
             hdr.has_past_refs |= (pocdiff > 0) as u8;
         }
@@ -918,8 +915,7 @@ pub fn parse_frame_hdr(
         if seqhdr.tip && hdr.n_ref_frames > 1 && hdr.use_ref_frame_mvs != 0 {
             if obu_type == ObuType::Tip || obu_type == ObuType::LeadingTip {
                 hdr.tip.frame_mode = 2; // output
-                hdr.opfl_refine_type =
-                    2 * (seqhdr.opfl_refine && seqhdr.tip_refine_mv) as u8;
+                hdr.opfl_refine_type = 2 * (seqhdr.opfl_refine && seqhdr.tip_refine_mv) as u8;
             } else {
                 hdr.tip.frame_mode = gb.get_bit() as u8;
                 hdr.opfl_refine_type = if (seqhdr.opfl_refine as u8) < 3 {
@@ -1012,11 +1008,9 @@ pub fn parse_frame_hdr(
                 hdr.tiling.t.cols = 1;
                 let shift = 6 + hdr.sb128 as i32;
                 hdr.tiling.t.col_start_sb[0] = 0;
-                hdr.tiling.t.col_start_sb[1] =
-                    ((hdr.width + ((1 << shift) - 1)) >> shift) as u16;
+                hdr.tiling.t.col_start_sb[1] = ((hdr.width + ((1 << shift) - 1)) >> shift) as u16;
                 hdr.tiling.t.row_start_sb[0] = 0;
-                hdr.tiling.t.row_start_sb[1] =
-                    ((hdr.height + ((1 << shift) - 1)) >> shift) as u16;
+                hdr.tiling.t.row_start_sb[1] = ((hdr.height + ((1 << shift) - 1)) >> shift) as u16;
             }
 
             hdr.disable_cdf_update = 1;
@@ -1048,8 +1042,7 @@ pub fn parse_frame_hdr(
             if hdr.is_key_or_intra() {
                 hdr.allow_global_intrabc = gb.get_bit() as u8;
             }
-            hdr.allow_local_intrabc =
-                (hdr.allow_global_intrabc == 0 || gb.get_bit() != 0) as u8;
+            hdr.allow_local_intrabc = (hdr.allow_global_intrabc == 0 || gb.get_bit() != 0) as u8;
         }
         if hdr.allow_intrabc != 0 {
             hdr.max_bvp_drl_bits = if seqhdr.allow_max_bvp_drl_bits {
@@ -1089,7 +1082,9 @@ pub fn parse_frame_hdr(
                     if (seqhdr.motion_modes & n) != 0 && gb.get_bit() != 0 {
                         hdr.motion_modes |= n;
                     }
-                    if n == 16 { break; }
+                    if n == 16 {
+                        break;
+                    }
                     n <<= 1;
                 }
             } else {
@@ -1102,9 +1097,9 @@ pub fn parse_frame_hdr(
         parse_tile_info_frmhdr(&mut hdr, seqhdr, gb);
         if hdr.tiling.t.log2_cols != 0 || hdr.tiling.t.log2_rows != 0 {
             if seqhdr.avg_cdf_type == 0 {
-                hdr.tiling.update =
-                    gb.get_bits(hdr.tiling.t.log2_cols as i32 + hdr.tiling.t.log2_rows as i32)
-                        as u16;
+                hdr.tiling.update = gb
+                    .get_bits(hdr.tiling.t.log2_cols as i32 + hdr.tiling.t.log2_rows as i32)
+                    as u16;
             }
             if hdr.tiling.update >= hdr.tiling.t.cols as u16 * hdr.tiling.t.rows as u16 {
                 return Err(Rav2dError::InvalidData);
@@ -1117,8 +1112,7 @@ pub fn parse_frame_hdr(
         if seqhdr.ydc_dq_enabled && gb.get_bit() != 0 {
             hdr.quant.ydc_delta = gb.get_sbits(7) as i8;
         }
-        if seqhdr.layout != PixelLayout::I400
-            && (seqhdr.uvdc_dq_enabled || seqhdr.uvac_dq_enabled)
+        if seqhdr.layout != PixelLayout::I400 && (seqhdr.uvdc_dq_enabled || seqhdr.uvac_dq_enabled)
         {
             let diff_uv_delta = if seqhdr.separate_uv_delta_q {
                 gb.get_bit() != 0
@@ -1164,7 +1158,11 @@ pub fn parse_frame_hdr(
             {
                 hdr.segmentation.d = seqhdr.segmentation.d;
             } else {
-                parse_seg_info(&mut hdr.segmentation.d, gb, 8 << seqhdr.segmentation.ext as u32);
+                parse_seg_info(
+                    &mut hdr.segmentation.d,
+                    gb,
+                    8 << seqhdr.segmentation.ext as u32,
+                );
             }
             if hdr.primary_ref_frame == PRIMARY_REF_NONE {
                 hdr.segmentation.update_map = 1;
@@ -1228,8 +1226,7 @@ pub fn parse_frame_hdr(
             } else {
                 hdr.quant.yac as u8
             };
-            hdr.segmentation.lossless[i] =
-                (hdr.segmentation.qidx[i] == 0 && delta_lossless) as u8;
+            hdr.segmentation.lossless[i] = (hdr.segmentation.qidx[i] == 0 && delta_lossless) as u8;
             hdr.all_lossless &= hdr.segmentation.lossless[i];
             hdr.any_lossless |= hdr.segmentation.lossless[i];
         }
@@ -1281,8 +1278,7 @@ pub fn parse_frame_hdr(
         // gdf
         if hdr.all_lossless == 0 && seqhdr.gdf {
             let gdf_bs = 128 << (hdr.sb128 == 2) as i32;
-            let mut gdf_val: u8 =
-                (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+            let mut gdf_val: u8 = (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
             if gdf_val != 0 {
                 if imax(hdr.width, hdr.height) > gdf_bs {
                     gdf_val += gb.get_bit() as u8;
@@ -1302,8 +1298,7 @@ pub fn parse_frame_hdr(
 
         // cdef
         if hdr.all_lossless == 0 && seqhdr.cdef {
-            hdr.cdef.enabled =
-                (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+            hdr.cdef.enabled = (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
             if hdr.cdef.enabled != 0 {
                 hdr.cdef.damping = gb.get_bits(2) as u8 + 3;
                 hdr.cdef.n_strengths = gb.get_bits(3) as u8 + 1;
@@ -1375,7 +1370,8 @@ pub fn parse_frame_hdr(
                         } else {
                             let val = gb.get_bits(3) as u8;
                             pd.num_classes_idx = val;
-                            pd.num_classes = 1 + val
+                            pd.num_classes = 1
+                                + val
                                 + imax(val as i32 - 3, 0) as u8
                                 + imax(val as i32 - 5, 0) as u8 * 2;
                         }
@@ -1391,8 +1387,7 @@ pub fn parse_frame_hdr(
                 if gb.get_bit() != 0 {
                     hdr.restoration.unit_size[0] -= 1;
                 } else if hdr.sb128 < 2 && gb.get_bit() == 0 {
-                    hdr.restoration.unit_size[0] -=
-                        2 + (hdr.sb128 == 0 && gb.get_bit() == 0) as u8;
+                    hdr.restoration.unit_size[0] -= 2 + (hdr.sb128 == 0 && gb.get_bit() == 0) as u8;
                 }
             }
 
@@ -1404,8 +1399,7 @@ pub fn parse_frame_hdr(
                 if gb.get_bit() != 0 {
                     hdr.restoration.unit_size[1] -= 1;
                 } else if hdr.sb128 < 2 && gb.get_bit() == 0 {
-                    hdr.restoration.unit_size[1] -=
-                        2 + (hdr.sb128 == 0 && gb.get_bit() == 0) as u8;
+                    hdr.restoration.unit_size[1] -= 2 + (hdr.sb128 == 0 && gb.get_bit() == 0) as u8;
                 }
                 if hdr.restoration.unit_size[1] < 6 - seqhdr.ss_ver {
                     return Err(Rav2dError::InvalidData);
@@ -1427,7 +1421,8 @@ pub fn parse_frame_hdr(
                 };
 
                 if hdr.restoration.p[p].ns.temporal != 0 {
-                    let ref_hdr = refs[hdr.refidx[hdr.restoration.p[p].ns.refidx as usize] as usize]
+                    let ref_hdr = refs
+                        [hdr.refidx[hdr.restoration.p[p].ns.refidx as usize] as usize]
                         .p
                         .frame_hdr
                         .as_ref()
@@ -1452,7 +1447,13 @@ pub fn parse_frame_hdr(
                         .as_ref()
                         .ok_or(Rav2dError::InvalidData)?;
                     let dirs: &[i8] = &[0, 1, -1];
-                    let mut dir = dirs[if p == 0 { 0 } else if p == 1 { 1 } else { 2 }];
+                    let mut dir = dirs[if p == 0 {
+                        0
+                    } else if p == 1 {
+                        1
+                    } else {
+                        2
+                    }];
                     let mut p2 = p as i32;
                     loop {
                         let rpd = &ref_hdr.restoration.p[p2 as usize].ns;
@@ -1461,12 +1462,13 @@ pub fn parse_frame_hdr(
                                 imin(n_ref_filters as i32 - i as i32, rpd.num_classes as i32)
                                     as usize;
                             for n in 0..n_classes {
-                                ref_filters[i][..n_feat]
-                                    .copy_from_slice(&rpd.filter[n][..n_feat]);
+                                ref_filters[i][..n_feat].copy_from_slice(&rpd.filter[n][..n_feat]);
                                 i += 1;
                             }
                         }
-                        if dir == 0 { break; }
+                        if dir == 0 {
+                            break;
+                        }
                         p2 += dir as i32;
                         dir = 0;
                     }
@@ -1485,8 +1487,7 @@ pub fn parse_frame_hdr(
                 grp_cnt[2] = (n_filters - n_classes - i) as u8;
                 let mut filter_refs = [0u8; 64];
                 let mut pred_grp: usize = 2 - (grp_cnt[1] > 2) as usize;
-                let nnz_grps =
-                    1 + (grp_cnt[1] != 0) as i32 + (grp_cnt[2] != 0) as i32;
+                let nnz_grps = 1 + (grp_cnt[1] != 0) as i32 + (grp_cnt[2] != 0) as i32;
                 for n in 0..n_classes {
                     let group = if nnz_grps == 1 || gb.get_bit() == 0 {
                         pred_grp
@@ -1521,17 +1522,21 @@ pub fn parse_frame_hdr(
                 for n in 0..n_classes {
                     exact_match_mask |= gb.get_bit() << n;
                 }
-                let masks: &[u32] = if p != 0 { &SUBSET_MASKS_UV } else { &SUBSET_MASKS_Y };
+                let masks: &[u32] = if p != 0 {
+                    &SUBSET_MASKS_UV
+                } else {
+                    &SUBSET_MASKS_Y
+                };
                 let cf_range: &[[i8; 2]] = if p != 0 {
                     &NS_WIENER_COEF_RANGE_UV
                 } else {
                     &NS_WIENER_COEF_RANGE_Y
                 };
                 static SHUFFLED_INDEX: [u8; 64] = [
-                    16, 7, 58, 21, 12, 61, 26, 38, 18, 30, 50, 45, 23, 49, 43, 62, 42, 54, 27,
-                    36, 17, 44, 32, 34, 4, 24, 52, 31, 37, 11, 33, 19, 35, 6, 22, 53, 63, 25,
-                    41, 47, 1, 59, 0, 28, 40, 55, 48, 8, 5, 51, 9, 46, 56, 60, 15, 2, 13, 14,
-                    57, 29, 3, 20, 39, 10,
+                    16, 7, 58, 21, 12, 61, 26, 38, 18, 30, 50, 45, 23, 49, 43, 62, 42, 54, 27, 36,
+                    17, 44, 32, 34, 4, 24, 52, 31, 37, 11, 33, 19, 35, 6, 22, 53, 63, 25, 41, 47,
+                    1, 59, 0, 28, 40, 55, 48, 8, 5, 51, 9, 46, 56, 60, 15, 2, 13, 14, 57, 29, 3,
+                    20, 39, 10,
                 ];
                 static ZERO: [i8; 18] = [0; 18];
                 for n in 0..n_classes {
@@ -1543,8 +1548,7 @@ pub fn parse_frame_hdr(
                     } else if r < n_classes + grp_cnt[1] as usize {
                         ref_filters[r - n_classes]
                     } else {
-                        let idx =
-                            SHUFFLED_INDEX[r - n_classes - grp_cnt[1] as usize] as usize;
+                        let idx = SHUFFLED_INDEX[r - n_classes - grp_cnt[1] as usize] as usize;
                         let mut tmp = [0i8; 18];
                         tmp[..16].copy_from_slice(&WIENER_NS_FILTERS[idx]);
                         tmp
@@ -1571,7 +1575,8 @@ pub fn parse_frame_hdr(
                                 (ref_filter[ii] - cf_range[ii][1]) as u32,
                                 1 << nbits,
                                 nbits - 3,
-                            ) as i8
+                            )
+                                as i8
                                 + cf_range[ii][1];
                         }
                         m >>= 1;
@@ -1582,10 +1587,13 @@ pub fn parse_frame_hdr(
 
         // ccso
         if hdr.all_lossless == 0 && seqhdr.ccso {
-            hdr.ccso.enabled =
-                (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+            hdr.ccso.enabled = (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
             if hdr.ccso.enabled != 0 {
-                let n_planes = if seqhdr.layout == PixelLayout::I400 { 1 } else { 3 };
+                let n_planes = if seqhdr.layout == PixelLayout::I400 {
+                    1
+                } else {
+                    3
+                };
                 for p in 0..n_planes {
                     hdr.ccso.p[p].enabled = gb.get_bit() as u8;
                     if hdr.ccso.p[p].enabled == 0 {
@@ -1613,10 +1621,7 @@ pub fn parse_frame_hdr(
                                 let h4 = (hdr.height + 3) >> 2;
                                 let rw4 = (refhdr.width + 3) >> 2;
                                 let rh4 = (refhdr.height + 3) >> 2;
-                                if w4 != rw4
-                                    || h4 != rh4
-                                    || refhdr.ccso.p[p].enabled == 0
-                                {
+                                if w4 != rw4 || h4 != rh4 || refhdr.ccso.p[p].enabled == 0 {
                                     return Err(Rav2dError::InvalidData);
                                 }
                             }
@@ -1664,12 +1669,11 @@ pub fn parse_frame_hdr(
                             }
                         }
                     } else {
-                        let refhdr =
-                            refs[hdr.refidx[hdr.ccso.p[p].refidx as usize] as usize]
-                                .p
-                                .frame_hdr
-                                .as_ref()
-                                .ok_or(Rav2dError::InvalidData)?;
+                        let refhdr = refs[hdr.refidx[hdr.ccso.p[p].refidx as usize] as usize]
+                            .p
+                            .frame_hdr
+                            .as_ref()
+                            .ok_or(Rav2dError::InvalidData)?;
                         let rp = &refhdr.ccso.p[p];
                         hdr.ccso.p[p].bo_only = rp.bo_only;
                         hdr.ccso.p[p].scale_idx = rp.scale_idx;
@@ -1707,88 +1711,86 @@ pub fn parse_frame_hdr(
         for i in 0..7 {
             hdr.gmv.m[i] = DEFAULT_WM_PARAMS;
         }
-        if hdr.is_inter_or_switch()
-            && seqhdr.global_motion && gb.get_bit() != 0 {
-                if hdr.n_ref_frames == 0 {
-                    return Err(Rav2dError::InvalidData);
-                }
-                hdr.gmv.r#ref = gb.get_uniform(hdr.n_ref_frames as u32 + 1) as u8;
-                let (ref_base_mat, in_dist);
-                if hdr.gmv.r#ref == hdr.n_ref_frames {
+        if hdr.is_inter_or_switch() && seqhdr.global_motion && gb.get_bit() != 0 {
+            if hdr.n_ref_frames == 0 {
+                return Err(Rav2dError::InvalidData);
+            }
+            hdr.gmv.r#ref = gb.get_uniform(hdr.n_ref_frames as u32 + 1) as u8;
+            let (ref_base_mat, in_dist);
+            if hdr.gmv.r#ref == hdr.n_ref_frames {
+                ref_base_mat = DEFAULT_WM_PARAMS.matrix;
+                in_dist = 1;
+            } else {
+                let refidx = hdr.refidx[hdr.gmv.r#ref as usize] as usize;
+                let refhdr = refs[refidx]
+                    .p
+                    .frame_hdr
+                    .as_ref()
+                    .ok_or(Rav2dError::InvalidData)?;
+                if refhdr.n_ref_frames == 0 {
                     ref_base_mat = DEFAULT_WM_PARAMS.matrix;
                     in_dist = 1;
                 } else {
-                    let refidx = hdr.refidx[hdr.gmv.r#ref as usize] as usize;
-                    let refhdr = refs[refidx]
+                    hdr.gmv.refref = if refhdr.n_ref_frames == 1 {
+                        0
+                    } else {
+                        gb.get_uniform(refhdr.n_ref_frames as u32) as u8
+                    };
+                    ref_base_mat = refhdr.gmv.m[hdr.gmv.refref as usize].matrix;
+                    in_dist = get_poc_diff(
+                        seqhdr.order_hint_n_bits as i32,
+                        refhdr.frame_offset as i32,
+                        refs[refidx].refpoc[hdr.gmv.refref as usize] as i32,
+                    );
+                }
+            }
+            for i in 0..hdr.n_ref_frames as usize {
+                hdr.gmv.m[i].wm_type = if gb.get_bit() == 0 {
+                    WarpedMotionType::Identity
+                } else if gb.get_bit() != 0 {
+                    WarpedMotionType::RotZoom
+                } else {
+                    WarpedMotionType::Affine
+                };
+                if hdr.gmv.m[i].wm_type == WarpedMotionType::Identity {
+                    continue;
+                }
+                let mat = &mut hdr.gmv.m[i].matrix;
+                let mut ref_mat = [0i32; 6];
+                let out_dist = get_poc_diff(
+                    seqhdr.order_hint_n_bits as i32,
+                    hdr.frame_offset as i32,
+                    refs[hdr.refidx[i] as usize]
                         .p
                         .frame_hdr
                         .as_ref()
-                        .ok_or(Rav2dError::InvalidData)?;
-                    if refhdr.n_ref_frames == 0 {
-                        ref_base_mat = DEFAULT_WM_PARAMS.matrix;
-                        in_dist = 1;
-                    } else {
-                        hdr.gmv.refref = if refhdr.n_ref_frames == 1 {
-                            0
-                        } else {
-                            gb.get_uniform(refhdr.n_ref_frames as u32) as u8
-                        };
-                        ref_base_mat = refhdr.gmv.m[hdr.gmv.refref as usize].matrix;
-                        in_dist = get_poc_diff(
-                            seqhdr.order_hint_n_bits as i32,
-                            refhdr.frame_offset as i32,
-                            refs[refidx].refpoc[hdr.gmv.refref as usize] as i32,
-                        );
-                    }
-                }
-                for i in 0..hdr.n_ref_frames as usize {
-                    hdr.gmv.m[i].wm_type = if gb.get_bit() == 0 {
-                        WarpedMotionType::Identity
-                    } else if gb.get_bit() != 0 {
-                        WarpedMotionType::RotZoom
-                    } else {
-                        WarpedMotionType::Affine
-                    };
-                    if hdr.gmv.m[i].wm_type == WarpedMotionType::Identity {
-                        continue;
-                    }
-                    let mat = &mut hdr.gmv.m[i].matrix;
-                    let mut ref_mat = [0i32; 6];
-                    let out_dist = get_poc_diff(
-                        seqhdr.order_hint_n_bits as i32,
-                        hdr.frame_offset as i32,
-                        refs[hdr.refidx[i] as usize]
-                            .p
-                            .frame_hdr
-                            .as_ref()
-                            .ok_or(Rav2dError::InvalidData)?
-                            .frame_offset as i32,
-                    );
-                    rescale_matrix(&mut ref_mat, &ref_base_mat, in_dist, out_dist);
+                        .ok_or(Rav2dError::InvalidData)?
+                        .frame_offset as i32,
+                );
+                rescale_matrix(&mut ref_mat, &ref_base_mat, in_dist, out_dist);
 
-                    if hdr.gmv.m[i].wm_type >= WarpedMotionType::RotZoom {
-                        mat[2] = (1 << 16)
-                            + 64 * gb.get_bits_subexp((ref_mat[2] - (1 << 16)) >> 6, 512);
-                        mat[3] = 64 * gb.get_bits_subexp(ref_mat[3] >> 6, 512);
-                    }
-                    if hdr.gmv.m[i].wm_type == WarpedMotionType::Affine {
-                        mat[4] = 64 * gb.get_bits_subexp(ref_mat[4] >> 6, 512);
-                        mat[5] = (1 << 16)
-                            + 64 * gb.get_bits_subexp((ref_mat[5] - (1 << 16)) >> 6, 512);
-                    } else {
-                        mat[4] = -mat[3];
-                        mat[5] = mat[2];
-                    }
-                    mat[0] = gb.get_bits_subexp(ref_mat[0] >> 13, 0x4000) * 8192;
-                    mat[1] = gb.get_bits_subexp(ref_mat[1] >> 13, 0x4000) * 8192;
+                if hdr.gmv.m[i].wm_type >= WarpedMotionType::RotZoom {
+                    mat[2] =
+                        (1 << 16) + 64 * gb.get_bits_subexp((ref_mat[2] - (1 << 16)) >> 6, 512);
+                    mat[3] = 64 * gb.get_bits_subexp(ref_mat[3] >> 6, 512);
                 }
+                if hdr.gmv.m[i].wm_type == WarpedMotionType::Affine {
+                    mat[4] = 64 * gb.get_bits_subexp(ref_mat[4] >> 6, 512);
+                    mat[5] =
+                        (1 << 16) + 64 * gb.get_bits_subexp((ref_mat[5] - (1 << 16)) >> 6, 512);
+                } else {
+                    mat[4] = -mat[3];
+                    mat[5] = mat[2];
+                }
+                mat[0] = gb.get_bits_subexp(ref_mat[0] >> 13, 0x4000) * 8192;
+                mat[1] = gb.get_bits_subexp(ref_mat[1] >> 13, 0x4000) * 8192;
             }
+        }
     } // end !tip_output_frame
 
     // grain
     if seqhdr.film_grain_present && (hdr.show_immediate != 0 || hdr.show_implicit != 0) {
-        hdr.film_grain.present =
-            (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+        hdr.film_grain.present = (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
         if hdr.film_grain.present != 0 {
             hdr.film_grain.id = gb.get_bits(3) as u8;
             hdr.film_grain.seed = gb.get_bits(16);
@@ -1800,7 +1802,11 @@ pub fn parse_frame_hdr(
 
 pub fn parse_tile_hdr(hdr: &FrameHeader, tile: &mut crate::internal::TileGroup, gb: &mut GetBits) {
     let n_tiles = hdr.tiling.t.cols as i32 * hdr.tiling.t.rows as i32;
-    let have_tile_pos = if n_tiles > 1 { gb.get_bit() != 0 } else { false };
+    let have_tile_pos = if n_tiles > 1 {
+        gb.get_bit() != 0
+    } else {
+        false
+    };
     if have_tile_pos {
         let n_bits = hdr.tiling.t.log2_cols as i32 + hdr.tiling.t.log2_rows as i32;
         tile.start = gb.get_bits(n_bits) as i32;
@@ -1943,22 +1949,86 @@ pub fn parse_ci_hdr(ci: &mut ContentInterpretation, gb: &mut GetBits) -> Result<
         let sar_type = gb.get_bits(8) as u8;
         match sar_type {
             0 => ci.sar.sar_type = AspectRatio::Unknown,
-            1 => { ci.sar.sar_type = AspectRatio::Sar1_1; ci.sar.w = 1; ci.sar.h = 1; }
-            2 => { ci.sar.sar_type = AspectRatio::Sar12_11; ci.sar.w = 12; ci.sar.h = 11; }
-            3 => { ci.sar.sar_type = AspectRatio::Sar10_11; ci.sar.w = 10; ci.sar.h = 11; }
-            4 => { ci.sar.sar_type = AspectRatio::Sar16_11; ci.sar.w = 16; ci.sar.h = 11; }
-            5 => { ci.sar.sar_type = AspectRatio::Sar40_33; ci.sar.w = 40; ci.sar.h = 33; }
-            6 => { ci.sar.sar_type = AspectRatio::Sar24_11; ci.sar.w = 24; ci.sar.h = 11; }
-            7 => { ci.sar.sar_type = AspectRatio::Sar20_11; ci.sar.w = 20; ci.sar.h = 11; }
-            8 => { ci.sar.sar_type = AspectRatio::Sar32_11; ci.sar.w = 32; ci.sar.h = 11; }
-            9 => { ci.sar.sar_type = AspectRatio::Sar80_33; ci.sar.w = 80; ci.sar.h = 33; }
-            10 => { ci.sar.sar_type = AspectRatio::Sar18_11; ci.sar.w = 18; ci.sar.h = 11; }
-            11 => { ci.sar.sar_type = AspectRatio::Sar15_11; ci.sar.w = 15; ci.sar.h = 11; }
-            12 => { ci.sar.sar_type = AspectRatio::Sar64_33; ci.sar.w = 64; ci.sar.h = 33; }
-            13 => { ci.sar.sar_type = AspectRatio::Sar160_99; ci.sar.w = 160; ci.sar.h = 99; }
-            14 => { ci.sar.sar_type = AspectRatio::Sar4_3; ci.sar.w = 4; ci.sar.h = 3; }
-            15 => { ci.sar.sar_type = AspectRatio::Sar3_2; ci.sar.w = 3; ci.sar.h = 2; }
-            16 => { ci.sar.sar_type = AspectRatio::Sar2_1; ci.sar.w = 2; ci.sar.h = 1; }
+            1 => {
+                ci.sar.sar_type = AspectRatio::Sar1_1;
+                ci.sar.w = 1;
+                ci.sar.h = 1;
+            }
+            2 => {
+                ci.sar.sar_type = AspectRatio::Sar12_11;
+                ci.sar.w = 12;
+                ci.sar.h = 11;
+            }
+            3 => {
+                ci.sar.sar_type = AspectRatio::Sar10_11;
+                ci.sar.w = 10;
+                ci.sar.h = 11;
+            }
+            4 => {
+                ci.sar.sar_type = AspectRatio::Sar16_11;
+                ci.sar.w = 16;
+                ci.sar.h = 11;
+            }
+            5 => {
+                ci.sar.sar_type = AspectRatio::Sar40_33;
+                ci.sar.w = 40;
+                ci.sar.h = 33;
+            }
+            6 => {
+                ci.sar.sar_type = AspectRatio::Sar24_11;
+                ci.sar.w = 24;
+                ci.sar.h = 11;
+            }
+            7 => {
+                ci.sar.sar_type = AspectRatio::Sar20_11;
+                ci.sar.w = 20;
+                ci.sar.h = 11;
+            }
+            8 => {
+                ci.sar.sar_type = AspectRatio::Sar32_11;
+                ci.sar.w = 32;
+                ci.sar.h = 11;
+            }
+            9 => {
+                ci.sar.sar_type = AspectRatio::Sar80_33;
+                ci.sar.w = 80;
+                ci.sar.h = 33;
+            }
+            10 => {
+                ci.sar.sar_type = AspectRatio::Sar18_11;
+                ci.sar.w = 18;
+                ci.sar.h = 11;
+            }
+            11 => {
+                ci.sar.sar_type = AspectRatio::Sar15_11;
+                ci.sar.w = 15;
+                ci.sar.h = 11;
+            }
+            12 => {
+                ci.sar.sar_type = AspectRatio::Sar64_33;
+                ci.sar.w = 64;
+                ci.sar.h = 33;
+            }
+            13 => {
+                ci.sar.sar_type = AspectRatio::Sar160_99;
+                ci.sar.w = 160;
+                ci.sar.h = 99;
+            }
+            14 => {
+                ci.sar.sar_type = AspectRatio::Sar4_3;
+                ci.sar.w = 4;
+                ci.sar.h = 3;
+            }
+            15 => {
+                ci.sar.sar_type = AspectRatio::Sar3_2;
+                ci.sar.w = 3;
+                ci.sar.h = 2;
+            }
+            16 => {
+                ci.sar.sar_type = AspectRatio::Sar2_1;
+                ci.sar.w = 2;
+                ci.sar.h = 1;
+            }
             255 => {
                 ci.sar.sar_type = AspectRatio::Explicit;
                 ci.sar.w = gb.get_vlc();
@@ -2268,11 +2338,7 @@ pub fn get_ref_frames(
     imin(7, n_refs)
 }
 
-pub fn find_tip_ref_frames(
-    hdr: &mut FrameHeader,
-    seqhdr: &SequenceHeader,
-    refs: &[RefState; 8],
-) {
+pub fn find_tip_ref_frames(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, refs: &[RefState; 8]) {
     let n_refs = hdr.n_ref_frames as usize;
     if n_refs == 1 {
         hdr.tip.r#ref[0] = 0;
@@ -2486,16 +2552,10 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             | ObuType::Ras,
         ) => {
             let obu_type = obu_type.unwrap();
-            let seqhdr = c
-                .seq_hdr
-                .as_ref()
-                .ok_or(Rav2dError::InvalidData)?
-                .clone();
+            let seqhdr = c.seq_hdr.as_ref().ok_or(Rav2dError::InvalidData)?.clone();
 
-            let first_tile = matches!(
-                obu_type,
-                ObuType::Sef | ObuType::Tip | ObuType::Bridge
-            ) || gb.get_bit() != 0;
+            let first_tile = matches!(obu_type, ObuType::Sef | ObuType::Tip | ObuType::Bridge)
+                || gb.get_bit() != 0;
             let has_hdr = first_tile || gb.get_bit() != 0;
 
             if has_hdr {
@@ -2516,20 +2576,16 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
 
             if let Some(ref fh) = c.frame_hdr
                 && c.frame_size_limit > 0
-                    && (fh.width as u64) * (fh.height as u64) > c.frame_size_limit as u64
-                {
-                    c.frame_hdr = None;
-                    return Err(Rav2dError::FrameTooLarge);
-                }
+                && (fh.width as u64) * (fh.height as u64) > c.frame_size_limit as u64
+            {
+                c.frame_hdr = None;
+                return Err(Rav2dError::FrameTooLarge);
+            }
 
             if matches!(obu_type, ObuType::Sef | ObuType::Tip | ObuType::Bridge) {
                 // frame header only OBU, no tile data
             } else {
-                let fh = c
-                    .frame_hdr
-                    .as_ref()
-                    .ok_or(Rav2dError::InvalidData)?
-                    .clone();
+                let fh = c.frame_hdr.as_ref().ok_or(Rav2dError::InvalidData)?.clone();
                 let mut tg = TileGroup {
                     data: Vec::new(),
                     start: 0,
@@ -2555,11 +2611,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
         }
 
         Some(ObuType::Fgm) => {
-            let seqhdr = c
-                .seq_hdr
-                .as_ref()
-                .ok_or(Rav2dError::InvalidData)?
-                .clone();
+            let seqhdr = c.seq_hdr.as_ref().ok_or(Rav2dError::InvalidData)?.clone();
             let fgm = parse_fgm_hdr(&mut gb, seqhdr.layout)?;
             for (i, entry) in fgm.into_iter().enumerate() {
                 if entry.is_some() {
@@ -2763,8 +2815,10 @@ mod tests {
         seqhdr.sb128 = 0;
         seqhdr.level = 4;
         // uniform=1 bit, then all zeros for log2_cols/rows
-        let data = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let data = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
         let mut gb = GetBits::new(&data);
         parse_tile_info_frmhdr(&mut hdr, &seqhdr, &mut gb);
         assert_eq!(hdr.sb128, 0);
@@ -2780,8 +2834,10 @@ mod tests {
         seqhdr.sb128 = 0;
         seqhdr.level = 4;
         // uniform=1 bit, then zeros
-        let data = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let data = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
         let mut gb = GetBits::new(&data);
         parse_tile_info_frmhdr(&mut hdr, &seqhdr, &mut gb);
         assert_eq!(hdr.sb128, 0); // !!0 = 0
@@ -2865,8 +2921,10 @@ mod tests {
         // Bit layout: 0 | 0001 | 000 | 00 | 0 | 00000 | 0000 | 0000 | ...
         //           = 0_0001_000_00_0_00000_0000_0000...
         //           = 0000 1000 0000 0000 0000 0000...
-        let data = [0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let data = [
+            0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
         let mut gb = GetBits::new(&data);
         let fgd = parse_film_grain_data(&mut gb, PixelLayout::I420).unwrap();
         assert!(!fgd.chroma_scaling_from_luma);
@@ -2897,7 +2955,13 @@ mod tests {
         assert_eq!(fgd.num_points[0], 0);
     }
 
-    fn make_ref_hdr(frame_offset: u8, frame_type: FrameType, w: i32, h: i32, qidx: u16) -> FrameHeader {
+    fn make_ref_hdr(
+        frame_offset: u8,
+        frame_type: FrameType,
+        w: i32,
+        h: i32,
+        qidx: u16,
+    ) -> FrameHeader {
         let mut fh = FrameHeader::default();
         fh.frame_offset = frame_offset;
         fh.frame_type = frame_type;
@@ -3013,8 +3077,16 @@ mod tests {
         seqhdr.tlayer_dependency_present = true;
         seqhdr.tlayer_dependencies[1] = 0b01; // layer 1 depends on layer 0 only
         let refs = make_refs_with(&[
-            (0, { let mut fh = make_ref_hdr(2, FrameType::Inter, 320, 240, 50); fh.tlayer_id = 0; fh }),
-            (1, { let mut fh = make_ref_hdr(3, FrameType::Inter, 320, 240, 50); fh.tlayer_id = 2; fh }),
+            (0, {
+                let mut fh = make_ref_hdr(2, FrameType::Inter, 320, 240, 50);
+                fh.tlayer_id = 0;
+                fh
+            }),
+            (1, {
+                let mut fh = make_ref_hdr(3, FrameType::Inter, 320, 240, 50);
+                fh.tlayer_id = 2;
+                fh
+            }),
         ]);
         let n = get_ref_frames(&mut hdr, &seqhdr, &refs, false);
         // ref 1 (tlayer=2) should be filtered out since dep mask only allows layer 0
@@ -3254,19 +3326,31 @@ mod tests {
     fn test_parse_mdcv() {
         let mut data = [0u8; 24];
         // primaries[0] = (100, 200)
-        data[0] = 0; data[1] = 100;
-        data[2] = 0; data[3] = 200;
+        data[0] = 0;
+        data[1] = 100;
+        data[2] = 0;
+        data[3] = 200;
         // primaries[1] = (300, 400)
-        data[4] = 1; data[5] = 44; // 300
-        data[6] = 1; data[7] = 144; // 400
+        data[4] = 1;
+        data[5] = 44; // 300
+        data[6] = 1;
+        data[7] = 144; // 400
         // primaries[2] = (0, 0)
         // white_point = (500, 600)
-        data[12] = 1; data[13] = 244; // 500
-        data[14] = 2; data[15] = 88;  // 600
+        data[12] = 1;
+        data[13] = 244; // 500
+        data[14] = 2;
+        data[15] = 88; // 600
         // max_luminance = 1000 (4 bytes big endian from get_bits(32))
-        data[16] = 0; data[17] = 0; data[18] = 0x03; data[19] = 0xE8;
+        data[16] = 0;
+        data[17] = 0;
+        data[18] = 0x03;
+        data[19] = 0xE8;
         // min_luminance = 50
-        data[20] = 0; data[21] = 0; data[22] = 0; data[23] = 50;
+        data[20] = 0;
+        data[21] = 0;
+        data[22] = 0;
+        data[23] = 50;
         let mut gb = GetBits::new(&data);
         let md = parse_mdcv(&mut gb);
         assert_eq!(md.primaries[0], [100, 200]);
@@ -3371,7 +3455,10 @@ mod tests {
 
     #[test]
     fn test_parse_obus_real_file() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media/avm-v14.1.0-bus.352x288.l5.seg1.obu");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../dav2d/media/avm-v14.1.0-bus.352x288.l5.seg1.obu"
+        );
         let data = std::fs::read(path).expect("Failed to read test OBU file");
         let mut c = make_decoder_ctx();
         c.frame_size_limit = 352 * 288;
@@ -3398,7 +3485,11 @@ mod tests {
     }
 
     fn try_parse_obu_file(filename: &str) -> (bool, Option<(i32, i32)>) {
-        let path = format!("{}/../../dav2d/media/{}", env!("CARGO_MANIFEST_DIR"), filename);
+        let path = format!(
+            "{}/../../dav2d/media/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            filename
+        );
         let data = std::fs::read(&path).unwrap_or_default();
         if data.is_empty() {
             return (false, None);

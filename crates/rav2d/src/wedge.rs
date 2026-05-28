@@ -83,16 +83,14 @@ impl Masks {
         widx: usize,
         ss_idx: usize,
     ) -> &[u8] {
-        let off = (self.wedge_offsets[bs - BS_64X64] as usize * 0x1100
-            + 16 * bw4 * bh4 * widx)
-            >> ss_idx;
+        let off =
+            (self.wedge_offsets[bs - BS_64X64] as usize * 0x1100 + 16 * bw4 * bh4 * widx) >> ss_idx;
         self.wedge_buf(ss_idx, off)
     }
 
     /// Returns the TMVP wedge mask for the given block size and wedge index.
     pub fn wedge_tmvp(&self, bs: usize, bw4: usize, bh4: usize, widx: usize) -> &[u8] {
-        let off = self.wedge_offsets[bs - BS_64X64] as usize * 68
-            + (bw4 * bh4 / 4) * widx;
+        let off = self.wedge_offsets[bs - BS_64X64] as usize * 68 + (bw4 * bh4 / 4) * widx;
         &self.wedge_tmvp[off..]
     }
 
@@ -144,74 +142,346 @@ struct WedgeCodeType {
 use WedgeDirection::*;
 
 static WEDGE_CODEBOOK_16: [WedgeCodeType; 68] = [
-    WedgeCodeType { direction: Wedge0, x_offset: 5, y_offset: 4 },
-    WedgeCodeType { direction: Wedge0, x_offset: 6, y_offset: 4 },
-    WedgeCodeType { direction: Wedge0, x_offset: 7, y_offset: 4 },
-    WedgeCodeType { direction: Wedge14, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge14, x_offset: 5, y_offset: 4 },
-    WedgeCodeType { direction: Wedge14, x_offset: 6, y_offset: 4 },
-    WedgeCodeType { direction: Wedge14, x_offset: 7, y_offset: 4 },
-    WedgeCodeType { direction: Wedge27, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge27, x_offset: 5, y_offset: 4 },
-    WedgeCodeType { direction: Wedge27, x_offset: 6, y_offset: 4 },
-    WedgeCodeType { direction: Wedge27, x_offset: 7, y_offset: 4 },
-    WedgeCodeType { direction: Wedge45, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge45, x_offset: 5, y_offset: 4 },
-    WedgeCodeType { direction: Wedge45, x_offset: 6, y_offset: 4 },
-    WedgeCodeType { direction: Wedge45, x_offset: 7, y_offset: 4 },
-    WedgeCodeType { direction: Wedge63, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge63, x_offset: 4, y_offset: 3 },
-    WedgeCodeType { direction: Wedge63, x_offset: 4, y_offset: 2 },
-    WedgeCodeType { direction: Wedge63, x_offset: 4, y_offset: 1 },
-    WedgeCodeType { direction: Wedge90, x_offset: 4, y_offset: 3 },
-    WedgeCodeType { direction: Wedge90, x_offset: 4, y_offset: 2 },
-    WedgeCodeType { direction: Wedge90, x_offset: 4, y_offset: 1 },
-    WedgeCodeType { direction: Wedge117, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge117, x_offset: 4, y_offset: 3 },
-    WedgeCodeType { direction: Wedge117, x_offset: 4, y_offset: 2 },
-    WedgeCodeType { direction: Wedge117, x_offset: 4, y_offset: 1 },
-    WedgeCodeType { direction: Wedge135, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge135, x_offset: 3, y_offset: 4 },
-    WedgeCodeType { direction: Wedge135, x_offset: 2, y_offset: 4 },
-    WedgeCodeType { direction: Wedge135, x_offset: 1, y_offset: 4 },
-    WedgeCodeType { direction: Wedge153, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge153, x_offset: 3, y_offset: 4 },
-    WedgeCodeType { direction: Wedge153, x_offset: 2, y_offset: 4 },
-    WedgeCodeType { direction: Wedge153, x_offset: 1, y_offset: 4 },
-    WedgeCodeType { direction: Wedge166, x_offset: 4, y_offset: 4 },
-    WedgeCodeType { direction: Wedge166, x_offset: 3, y_offset: 4 },
-    WedgeCodeType { direction: Wedge166, x_offset: 2, y_offset: 4 },
-    WedgeCodeType { direction: Wedge166, x_offset: 1, y_offset: 4 },
-    WedgeCodeType { direction: Wedge180, x_offset: 3, y_offset: 4 },
-    WedgeCodeType { direction: Wedge180, x_offset: 2, y_offset: 4 },
-    WedgeCodeType { direction: Wedge180, x_offset: 1, y_offset: 4 },
-    WedgeCodeType { direction: Wedge194, x_offset: 3, y_offset: 4 },
-    WedgeCodeType { direction: Wedge194, x_offset: 2, y_offset: 4 },
-    WedgeCodeType { direction: Wedge194, x_offset: 1, y_offset: 4 },
-    WedgeCodeType { direction: Wedge207, x_offset: 3, y_offset: 4 },
-    WedgeCodeType { direction: Wedge207, x_offset: 2, y_offset: 4 },
-    WedgeCodeType { direction: Wedge207, x_offset: 1, y_offset: 4 },
-    WedgeCodeType { direction: Wedge225, x_offset: 3, y_offset: 4 },
-    WedgeCodeType { direction: Wedge225, x_offset: 2, y_offset: 4 },
-    WedgeCodeType { direction: Wedge225, x_offset: 1, y_offset: 4 },
-    WedgeCodeType { direction: Wedge243, x_offset: 4, y_offset: 5 },
-    WedgeCodeType { direction: Wedge243, x_offset: 4, y_offset: 6 },
-    WedgeCodeType { direction: Wedge243, x_offset: 4, y_offset: 7 },
-    WedgeCodeType { direction: Wedge270, x_offset: 4, y_offset: 5 },
-    WedgeCodeType { direction: Wedge270, x_offset: 4, y_offset: 6 },
-    WedgeCodeType { direction: Wedge270, x_offset: 4, y_offset: 7 },
-    WedgeCodeType { direction: Wedge297, x_offset: 4, y_offset: 5 },
-    WedgeCodeType { direction: Wedge297, x_offset: 4, y_offset: 6 },
-    WedgeCodeType { direction: Wedge297, x_offset: 4, y_offset: 7 },
-    WedgeCodeType { direction: Wedge315, x_offset: 5, y_offset: 4 },
-    WedgeCodeType { direction: Wedge315, x_offset: 6, y_offset: 4 },
-    WedgeCodeType { direction: Wedge315, x_offset: 7, y_offset: 4 },
-    WedgeCodeType { direction: Wedge333, x_offset: 5, y_offset: 4 },
-    WedgeCodeType { direction: Wedge333, x_offset: 6, y_offset: 4 },
-    WedgeCodeType { direction: Wedge333, x_offset: 7, y_offset: 4 },
-    WedgeCodeType { direction: Wedge346, x_offset: 5, y_offset: 4 },
-    WedgeCodeType { direction: Wedge346, x_offset: 6, y_offset: 4 },
-    WedgeCodeType { direction: Wedge346, x_offset: 7, y_offset: 4 },
+    WedgeCodeType {
+        direction: Wedge0,
+        x_offset: 5,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge0,
+        x_offset: 6,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge0,
+        x_offset: 7,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge14,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge14,
+        x_offset: 5,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge14,
+        x_offset: 6,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge14,
+        x_offset: 7,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge27,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge27,
+        x_offset: 5,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge27,
+        x_offset: 6,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge27,
+        x_offset: 7,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge45,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge45,
+        x_offset: 5,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge45,
+        x_offset: 6,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge45,
+        x_offset: 7,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge63,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge63,
+        x_offset: 4,
+        y_offset: 3,
+    },
+    WedgeCodeType {
+        direction: Wedge63,
+        x_offset: 4,
+        y_offset: 2,
+    },
+    WedgeCodeType {
+        direction: Wedge63,
+        x_offset: 4,
+        y_offset: 1,
+    },
+    WedgeCodeType {
+        direction: Wedge90,
+        x_offset: 4,
+        y_offset: 3,
+    },
+    WedgeCodeType {
+        direction: Wedge90,
+        x_offset: 4,
+        y_offset: 2,
+    },
+    WedgeCodeType {
+        direction: Wedge90,
+        x_offset: 4,
+        y_offset: 1,
+    },
+    WedgeCodeType {
+        direction: Wedge117,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge117,
+        x_offset: 4,
+        y_offset: 3,
+    },
+    WedgeCodeType {
+        direction: Wedge117,
+        x_offset: 4,
+        y_offset: 2,
+    },
+    WedgeCodeType {
+        direction: Wedge117,
+        x_offset: 4,
+        y_offset: 1,
+    },
+    WedgeCodeType {
+        direction: Wedge135,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge135,
+        x_offset: 3,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge135,
+        x_offset: 2,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge135,
+        x_offset: 1,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge153,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge153,
+        x_offset: 3,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge153,
+        x_offset: 2,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge153,
+        x_offset: 1,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge166,
+        x_offset: 4,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge166,
+        x_offset: 3,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge166,
+        x_offset: 2,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge166,
+        x_offset: 1,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge180,
+        x_offset: 3,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge180,
+        x_offset: 2,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge180,
+        x_offset: 1,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge194,
+        x_offset: 3,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge194,
+        x_offset: 2,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge194,
+        x_offset: 1,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge207,
+        x_offset: 3,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge207,
+        x_offset: 2,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge207,
+        x_offset: 1,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge225,
+        x_offset: 3,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge225,
+        x_offset: 2,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge225,
+        x_offset: 1,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge243,
+        x_offset: 4,
+        y_offset: 5,
+    },
+    WedgeCodeType {
+        direction: Wedge243,
+        x_offset: 4,
+        y_offset: 6,
+    },
+    WedgeCodeType {
+        direction: Wedge243,
+        x_offset: 4,
+        y_offset: 7,
+    },
+    WedgeCodeType {
+        direction: Wedge270,
+        x_offset: 4,
+        y_offset: 5,
+    },
+    WedgeCodeType {
+        direction: Wedge270,
+        x_offset: 4,
+        y_offset: 6,
+    },
+    WedgeCodeType {
+        direction: Wedge270,
+        x_offset: 4,
+        y_offset: 7,
+    },
+    WedgeCodeType {
+        direction: Wedge297,
+        x_offset: 4,
+        y_offset: 5,
+    },
+    WedgeCodeType {
+        direction: Wedge297,
+        x_offset: 4,
+        y_offset: 6,
+    },
+    WedgeCodeType {
+        direction: Wedge297,
+        x_offset: 4,
+        y_offset: 7,
+    },
+    WedgeCodeType {
+        direction: Wedge315,
+        x_offset: 5,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge315,
+        x_offset: 6,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge315,
+        x_offset: 7,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge333,
+        x_offset: 5,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge333,
+        x_offset: 6,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge333,
+        x_offset: 7,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge346,
+        x_offset: 5,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge346,
+        x_offset: 6,
+        y_offset: 4,
+    },
+    WedgeCodeType {
+        direction: Wedge346,
+        x_offset: 7,
+        y_offset: 4,
+    },
 ];
 
 // -- Helper functions --
@@ -230,11 +500,12 @@ fn subsample_420(dst: &mut [u8], src: &[u8], w8: usize, h8: usize) {
     let stride = w8 * 8;
     for y in 0..h8 * 4 {
         for x in 0..w8 * 4 {
-            dst[y * w8 * 4 + x] = ((src[y * 2 * stride + x * 2]     as u16
-                                   + src[y * 2 * stride + x * 2 + 1] as u16
-                                   + src[(y * 2 + 1) * stride + x * 2]     as u16
-                                   + src[(y * 2 + 1) * stride + x * 2 + 1] as u16
-                                   + 2) >> 2) as u8;
+            dst[y * w8 * 4 + x] = ((src[y * 2 * stride + x * 2] as u16
+                + src[y * 2 * stride + x * 2 + 1] as u16
+                + src[(y * 2 + 1) * stride + x * 2] as u16
+                + src[(y * 2 + 1) * stride + x * 2 + 1] as u16
+                + 2)
+                >> 2) as u8;
         }
     }
 }
@@ -243,9 +514,9 @@ fn subsample_422(dst: &mut [u8], src: &[u8], w8: usize, h8: usize) {
     let stride = w8 * 8;
     for y in 0..h8 * 8 {
         for x in 0..w8 * 4 {
-            dst[y * w8 * 4 + x] = ((src[y * stride + x * 2]     as u16
-                                   + src[y * stride + x * 2 + 1] as u16
-                                   + 1) >> 1) as u8;
+            dst[y * w8 * 4 + x] =
+                ((src[y * stride + x * 2] as u16 + src[y * stride + x * 2 + 1] as u16 + 1) >> 1)
+                    as u8;
         }
     }
 }
@@ -280,8 +551,7 @@ fn gen_master(master: &mut [u8; 128 * 128], mul: i32, wd: WedgeDirection) {
         0, -1, -2, -2, -4, -4, -4, -2, -2, -1, 0, 1, 2, 2, 4, 4, 4, 2, 2, 1,
     ];
     static WEIGHT: [i8; 29] = [
-        8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2,
-        2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+        8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
     ];
 
     let idx = wd as usize;
@@ -302,10 +572,9 @@ fn gen_master(master: &mut [u8; 128 * 128], mul: i32, wd: WedgeDirection) {
 
 fn build_nondc_ii_masks(mask_v: &mut [u8], w: usize, h: usize, step: usize) {
     static II_WEIGHTS_1D: [u8; 64] = [
-        60, 56, 52, 48, 45, 42, 39, 37, 34, 32, 30, 28, 26, 24, 22, 21,
-        19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 10,  9,  8,  8,  7,  7,
-         6,  6,  6,  5,  5,  4,  4,  4,  4,  3,  3,  3,  3,  3,  2,  2,
-         2,  2,  2,  2,  2,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+        60, 56, 52, 48, 45, 42, 39, 37, 34, 32, 30, 28, 26, 24, 22, 21, 19, 18, 17, 16, 15, 14, 13,
+        12, 11, 10, 10, 9, 8, 8, 7, 7, 6, 6, 6, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2,
+        2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     ];
 
     let area = w * h;
@@ -360,22 +629,32 @@ fn init_wedge_masks(masks: &mut Masks) {
             // Copy 444 mask from master
             {
                 let off_444 = ($masks.wedge_offsets[bsi - BS_64X64] as usize * 0x1100
-                    + 16 * bw4 * bh4 * widx) >> 0;
+                    + 16 * bw4 * bh4 * widx)
+                    >> 0;
                 let dst = &mut $masks.wedge_444[off_444..];
-                copy2d(dst, $master, w8, h8, $cb.x_offset as usize, $cb.y_offset as usize);
+                copy2d(
+                    dst,
+                    $master,
+                    w8,
+                    h8,
+                    $cb.x_offset as usize,
+                    $cb.y_offset as usize,
+                );
             }
 
             // Build a temporary copy of the 444 mask for subsampling and tmvp
             let wm_len = w8 * 8 * h8 * 8;
             let off_444 = ($masks.wedge_offsets[bsi - BS_64X64] as usize * 0x1100
-                + 16 * bw4 * bh4 * widx) >> 0;
+                + 16 * bw4 * bh4 * widx)
+                >> 0;
             let mut wm_tmp = vec![0u8; wm_len];
             wm_tmp.copy_from_slice(&$masks.wedge_444[off_444..off_444 + wm_len]);
 
             // Subsample 422
             {
                 let off_422 = ($masks.wedge_offsets[bsi - BS_64X64] as usize * 0x1100
-                    + 16 * bw4 * bh4 * widx) >> 1;
+                    + 16 * bw4 * bh4 * widx)
+                    >> 1;
                 let dst = &mut $masks.wedge_422[off_422..];
                 subsample_422(dst, &wm_tmp, w8, h8);
             }
@@ -383,15 +662,16 @@ fn init_wedge_masks(masks: &mut Masks) {
             // Subsample 420
             {
                 let off_420 = ($masks.wedge_offsets[bsi - BS_64X64] as usize * 0x1100
-                    + 16 * bw4 * bh4 * widx) >> 2;
+                    + 16 * bw4 * bh4 * widx)
+                    >> 2;
                 let dst = &mut $masks.wedge_420[off_420..];
                 subsample_420(dst, &wm_tmp, w8, h8);
             }
 
             // Fill TMVP
             {
-                let off_tmvp = $masks.wedge_offsets[bsi - BS_64X64] as usize * 68
-                    + (bw4 * bh4 / 4) * widx;
+                let off_tmvp =
+                    $masks.wedge_offsets[bsi - BS_64X64] as usize * 68 + (bw4 * bh4 / 4) * widx;
                 let dst = &mut $masks.wedge_tmvp[off_tmvp..];
                 fill_tmvp(dst, &wm_tmp, w8, h8);
             }
@@ -462,31 +742,31 @@ fn init_ii_masks(masks: &mut Masks) {
         }};
     }
 
-    fill_ii!(masks,  4,  4, 16);
-    fill_ii!(masks,  4,  8,  8);
-    fill_ii!(masks,  4, 16,  4);
-    fill_ii!(masks,  4, 32,  2);
-    fill_ii!(masks,  4, 64,  1);
-    fill_ii!(masks,  8,  4,  8);
-    fill_ii!(masks,  8,  8,  8);
-    fill_ii!(masks,  8, 16,  4);
-    fill_ii!(masks,  8, 32,  2);
-    fill_ii!(masks,  8, 64,  1);
-    fill_ii!(masks, 16,  4,  4);
-    fill_ii!(masks, 16,  8,  4);
-    fill_ii!(masks, 16, 16,  4);
-    fill_ii!(masks, 16, 32,  2);
-    fill_ii!(masks, 16, 64,  1);
-    fill_ii!(masks, 32,  4,  2);
-    fill_ii!(masks, 32,  8,  2);
-    fill_ii!(masks, 32, 16,  2);
-    fill_ii!(masks, 32, 32,  2);
-    fill_ii!(masks, 32, 64,  1);
-    fill_ii!(masks, 64,  4,  1);
-    fill_ii!(masks, 64,  8,  1);
-    fill_ii!(masks, 64, 16,  1);
-    fill_ii!(masks, 64, 32,  1);
-    fill_ii!(masks, 64, 64,  1);
+    fill_ii!(masks, 4, 4, 16);
+    fill_ii!(masks, 4, 8, 8);
+    fill_ii!(masks, 4, 16, 4);
+    fill_ii!(masks, 4, 32, 2);
+    fill_ii!(masks, 4, 64, 1);
+    fill_ii!(masks, 8, 4, 8);
+    fill_ii!(masks, 8, 8, 8);
+    fill_ii!(masks, 8, 16, 4);
+    fill_ii!(masks, 8, 32, 2);
+    fill_ii!(masks, 8, 64, 1);
+    fill_ii!(masks, 16, 4, 4);
+    fill_ii!(masks, 16, 8, 4);
+    fill_ii!(masks, 16, 16, 4);
+    fill_ii!(masks, 16, 32, 2);
+    fill_ii!(masks, 16, 64, 1);
+    fill_ii!(masks, 32, 4, 2);
+    fill_ii!(masks, 32, 8, 2);
+    fill_ii!(masks, 32, 16, 2);
+    fill_ii!(masks, 32, 32, 2);
+    fill_ii!(masks, 32, 64, 1);
+    fill_ii!(masks, 64, 4, 1);
+    fill_ii!(masks, 64, 8, 1);
+    fill_ii!(masks, 64, 16, 1);
+    fill_ii!(masks, 64, 32, 1);
+    fill_ii!(masks, 64, 64, 1);
 }
 
 /// Map pixel dimensions (w, h) to the corresponding `BlockSize`.
@@ -494,28 +774,28 @@ fn init_ii_masks(masks: &mut Masks) {
 /// The C code uses token-pasting (`BS_##w##x##h`); we do a match.
 const fn block_size_for_dims(w: usize, h: usize) -> BlockSize {
     match (w, h) {
-        ( 4,  4) => BlockSize::Bs4x4,
-        ( 4,  8) => BlockSize::Bs4x8,
-        ( 4, 16) => BlockSize::Bs4x16,
-        ( 4, 32) => BlockSize::Bs4x32,
-        ( 4, 64) => BlockSize::Bs4x64,
-        ( 8,  4) => BlockSize::Bs8x4,
-        ( 8,  8) => BlockSize::Bs8x8,
-        ( 8, 16) => BlockSize::Bs8x16,
-        ( 8, 32) => BlockSize::Bs8x32,
-        ( 8, 64) => BlockSize::Bs8x64,
-        (16,  4) => BlockSize::Bs16x4,
-        (16,  8) => BlockSize::Bs16x8,
+        (4, 4) => BlockSize::Bs4x4,
+        (4, 8) => BlockSize::Bs4x8,
+        (4, 16) => BlockSize::Bs4x16,
+        (4, 32) => BlockSize::Bs4x32,
+        (4, 64) => BlockSize::Bs4x64,
+        (8, 4) => BlockSize::Bs8x4,
+        (8, 8) => BlockSize::Bs8x8,
+        (8, 16) => BlockSize::Bs8x16,
+        (8, 32) => BlockSize::Bs8x32,
+        (8, 64) => BlockSize::Bs8x64,
+        (16, 4) => BlockSize::Bs16x4,
+        (16, 8) => BlockSize::Bs16x8,
         (16, 16) => BlockSize::Bs16x16,
         (16, 32) => BlockSize::Bs16x32,
         (16, 64) => BlockSize::Bs16x64,
-        (32,  4) => BlockSize::Bs32x4,
-        (32,  8) => BlockSize::Bs32x8,
+        (32, 4) => BlockSize::Bs32x4,
+        (32, 8) => BlockSize::Bs32x8,
         (32, 16) => BlockSize::Bs32x16,
         (32, 32) => BlockSize::Bs32x32,
         (32, 64) => BlockSize::Bs32x64,
-        (64,  4) => BlockSize::Bs64x4,
-        (64,  8) => BlockSize::Bs64x8,
+        (64, 4) => BlockSize::Bs64x4,
+        (64, 8) => BlockSize::Bs64x8,
         (64, 16) => BlockSize::Bs64x16,
         (64, 32) => BlockSize::Bs64x32,
         (64, 64) => BlockSize::Bs64x64,

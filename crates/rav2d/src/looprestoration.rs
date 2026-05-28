@@ -1,4 +1,4 @@
-use crate::gdf_tables::{GDF_ALPHA, GDF_BIAS, GDF_INTRA_ERROR, GDF_INTER_ERROR, GDF_WEIGHT};
+use crate::gdf_tables::{GDF_ALPHA, GDF_BIAS, GDF_INTER_ERROR, GDF_INTRA_ERROR, GDF_WEIGHT};
 use crate::intops::{apply_sign, iclip, imax, imin};
 use crate::tables::PC_WIENER_LUT_TO_CLASS;
 
@@ -113,9 +113,11 @@ pub fn compute_gradient_row_8bpc(
                     let dy = offs[d][0];
                     let dx = offs[d][1];
                     let ry = row_off + y;
-                    let a = (rows[(ry as i32 - 1 - dy) as usize][(x as i32 - 1 - dx) as usize] >> shift) as i32;
+                    let a = (rows[(ry as i32 - 1 - dy) as usize][(x as i32 - 1 - dx) as usize]
+                        >> shift) as i32;
                     let b = (rows[ry - 1][x - 1] >> shift) as i32;
-                    let c = (rows[(ry as i32 - 1 + dy) as usize][(x as i32 - 1 + dx) as usize] >> shift) as i32;
+                    let c = (rows[(ry as i32 - 1 + dy) as usize][(x as i32 - 1 + dx) as usize]
+                        >> shift) as i32;
                     grad += (b * 2 - a - c).abs();
                 }
             }
@@ -202,7 +204,9 @@ pub fn gdf_add_8bpc(
     let rnd = 1 << (shift - 1);
     for by in 0..h >> 2 {
         for bx in 0..w >> 2 {
-            if ll_mask[by][0] & (1 << bx) != 0 { continue; }
+            if ll_mask[by][0] & (1 << bx) != 0 {
+                continue;
+            }
             for y in by * 4..by * 4 + 4 {
                 for x in bx * 4..bx * 4 + 4 {
                     let diff = err[y * err_stride + x] as i32 * scale;
@@ -218,32 +222,77 @@ pub const REST_UNIT_STRIDE: usize = 76;
 const ROW_ORIGIN: usize = 6;
 
 pub static GDF_COORDS: [[i8; 2]; 18] = [
-    [6, 0], [5, 0], [4, 0], [3, 0], [2, 1], [2, 0],
-    [2, -1], [1, 2], [1, 1], [1, 0], [1, -1], [1, -2],
-    [0, 6], [0, 5], [0, 4], [0, 3], [0, 2], [0, 1],
+    [6, 0],
+    [5, 0],
+    [4, 0],
+    [3, 0],
+    [2, 1],
+    [2, 0],
+    [2, -1],
+    [1, 2],
+    [1, 1],
+    [1, 0],
+    [1, -1],
+    [1, -2],
+    [0, 6],
+    [0, 5],
+    [0, 4],
+    [0, 3],
+    [0, 2],
+    [0, 1],
 ];
 
 const GRADIENT_BUF_STRIDE: usize = 33;
 
-pub static WIENER_NS_CONFIG_UV: [[i8; 2]; 6] = [
-    [1, 0], [0, 1], [1, 1], [-1, 1], [2, 0], [0, 2],
-];
+pub static WIENER_NS_CONFIG_UV: [[i8; 2]; 6] = [[1, 0], [0, 1], [1, 1], [-1, 1], [2, 0], [0, 2]];
 
 pub static WIENER_NS_CONFIG_UV_FROM_Y: [[i8; 2]; 12] = [
-    [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1],
-    [-1, 1], [1, -1], [2, 0], [-2, 0], [0, 2], [0, -2],
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [-1, -1],
+    [-1, 1],
+    [1, -1],
+    [2, 0],
+    [-2, 0],
+    [0, 2],
+    [0, -2],
 ];
 
 pub static PC_WIENER_CONFIG: [[i8; 2]; 12] = [
-    [1, 0], [0, 1], [2, 0], [0, 2], [1, 1], [-1, 1],
-    [2, 1], [2, -1], [1, 2], [1, -2], [3, 0], [0, 3],
+    [1, 0],
+    [0, 1],
+    [2, 0],
+    [0, 2],
+    [1, 1],
+    [-1, 1],
+    [2, 1],
+    [2, -1],
+    [1, 2],
+    [1, -2],
+    [3, 0],
+    [0, 3],
 ];
 
 pub static WIENER_NS_CONFIG_Y: [[i8; 2]; 16] = [
-    [1, 0], [0, 1], [2, 0], [0, 2],
-    [1, 1], [-1, 1], [2, 1], [2, -1],
-    [1, 2], [1, -2], [3, 0], [0, 3],
-    [4, 0], [0, 4], [3, 3], [3, -3],
+    [1, 0],
+    [0, 1],
+    [2, 0],
+    [0, 2],
+    [1, 1],
+    [-1, 1],
+    [2, 1],
+    [2, -1],
+    [1, 2],
+    [1, -2],
+    [3, 0],
+    [0, 3],
+    [4, 0],
+    [0, 4],
+    [3, 3],
+    [3, -3],
 ];
 
 pub fn backup_row_luma_8bpc(
@@ -269,8 +318,11 @@ pub fn backup_row_luma_8bpc(
         0 => {
             let mut x = 0;
             while x < w {
-                dst[o + x] = ((src[src_o + x] as u16 + src[src2_o + x] as u16
-                    + src[src_o + x + 1] as u16 + src[src2_o + x + 1] as u16) >> 2) as u8;
+                dst[o + x] = ((src[src_o + x] as u16
+                    + src[src2_o + x] as u16
+                    + src[src_o + x + 1] as u16
+                    + src[src2_o + x + 1] as u16)
+                    >> 2) as u8;
                 x += 1 + ss_hor;
             }
         }
@@ -290,14 +342,17 @@ pub fn backup_row_luma_8bpc(
                 for i in 0..4usize {
                     let si = src_o - 4 + i;
                     let s2i = src2_o - 4 + i;
-                    dst[o - 4 + i] = ((src[si] as u16 + src[s2i] as u16
-                        + src[si + 1] as u16 + src[s2i + 1] as u16) >> 2) as u8;
+                    dst[o - 4 + i] = ((src[si] as u16
+                        + src[s2i] as u16
+                        + src[si + 1] as u16
+                        + src[s2i + 1] as u16)
+                        >> 2) as u8;
                 }
             }
             1 => {
                 for i in 0..4usize {
-                    dst[o - 4 + i] = ((src[src_o - 4 + i] as u16
-                        + src[src2_o - 4 + i] as u16) >> 1) as u8;
+                    dst[o - 4 + i] =
+                        ((src[src_o - 4 + i] as u16 + src[src2_o - 4 + i] as u16) >> 1) as u8;
                 }
             }
             _ => {
@@ -317,14 +372,17 @@ pub fn backup_row_luma_8bpc(
                 for i in 0..4usize {
                     let si = src_o + w + i;
                     let s2i = src2_o + w + i;
-                    dst[o + w + i] = ((src[si] as u16 + src[s2i] as u16
-                        + src[si + 1] as u16 + src[s2i + 1] as u16) >> 2) as u8;
+                    dst[o + w + i] = ((src[si] as u16
+                        + src[s2i] as u16
+                        + src[si + 1] as u16
+                        + src[s2i + 1] as u16)
+                        >> 2) as u8;
                 }
             }
             1 => {
                 for i in 0..4usize {
-                    dst[o + w + i] = ((src[src_o + w + i] as u16
-                        + src[src2_o + w + i] as u16) >> 1) as u8;
+                    dst[o + w + i] =
+                        ((src[src_o + w + i] as u16 + src[src2_o + w + i] as u16) >> 1) as u8;
                 }
             }
             _ => {
@@ -382,11 +440,41 @@ pub fn ns_wiener_single_y_8bpc(
         ptrs[3] = 4;
     }
 
-    backup_row_8bpc(&mut row_buffers[5], o, &*p, p_off + stride, &left[1], 6, w, 4, edges);
+    backup_row_8bpc(
+        &mut row_buffers[5],
+        o,
+        &*p,
+        p_off + stride,
+        &left[1],
+        6,
+        w,
+        4,
+        edges,
+    );
     ptrs[5] = 5;
-    backup_row_8bpc(&mut row_buffers[6], o, &*p, p_off + 2 * stride, &left[2], 6, w, 4, edges);
+    backup_row_8bpc(
+        &mut row_buffers[6],
+        o,
+        &*p,
+        p_off + 2 * stride,
+        &left[2],
+        6,
+        w,
+        4,
+        edges,
+    );
     ptrs[6] = 6;
-    backup_row_8bpc(&mut row_buffers[7], o, &*p, p_off + 3 * stride, &left[3], 6, w, 4, edges);
+    backup_row_8bpc(
+        &mut row_buffers[7],
+        o,
+        &*p,
+        p_off + 3 * stride,
+        &left[3],
+        6,
+        w,
+        4,
+        edges,
+    );
     ptrs[7] = 7;
 
     let mut bak_idx: usize = 8;
@@ -394,21 +482,38 @@ pub fn ns_wiener_single_y_8bpc(
     for y in 0..h {
         if y + 4 < h {
             backup_row_8bpc(
-                &mut row_buffers[bak_idx], o, &*p,
-                p_off + (y + 4) * stride, &left[y + 4], 6, w, 4, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                &*p,
+                p_off + (y + 4) * stride,
+                &left[y + 4],
+                6,
+                w,
+                4,
+                edges,
             );
             ptrs[8] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
             backup_row_lpf_8bpc(
-                &mut row_buffers[bak_idx], o, &*p,
-                p_off + (y + 4) * stride, w, 4, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                &*p,
+                p_off + (y + 4) * stride,
+                w,
+                4,
+                edges,
             );
             ptrs[8] = bak_idx;
         } else if y + 2 < h && edges & LR_HAVE_BOTTOM != 0 {
             let offset_y = y + 4 - h;
             backup_row_lpf_8bpc(
-                &mut row_buffers[bak_idx], o, lpf_bottom,
-                lpf_bottom_off + offset_y * stride, w, 4, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                lpf_bottom,
+                lpf_bottom_off + offset_y * stride,
+                w,
+                4,
+                edges,
             );
             ptrs[8] = bak_idx;
         } else {
@@ -416,10 +521,14 @@ pub fn ns_wiener_single_y_8bpc(
         }
 
         bak_idx += 1;
-        if bak_idx == 9 { bak_idx = 0; }
+        if bak_idx == 9 {
+            bak_idx = 0;
+        }
 
         for bx in 0..(w >> 2) {
-            if ll_mask[y >> 2][0] & (1 << bx) != 0 { continue; }
+            if ll_mask[y >> 2][0] & (1 << bx) != 0 {
+                continue;
+            }
             for x in bx * 4..bx * 4 + 4 {
                 let m = row_buffers[ptrs[4]][o + x] as i32;
                 let mut s = m << 7;
@@ -438,7 +547,9 @@ pub fn ns_wiener_single_y_8bpc(
             }
         }
 
-        for r in 0..8 { ptrs[r] = ptrs[r + 1]; }
+        for r in 0..8 {
+            ptrs[r] = ptrs[r + 1];
+        }
     }
 }
 
@@ -490,11 +601,41 @@ fn wiener_multi_8bpc(
         ptrs[3] = 4;
     }
 
-    backup_row_8bpc(&mut row_buffers[5], o, &*p, p_off + stride, &left[1], 6, w, 4, edges);
+    backup_row_8bpc(
+        &mut row_buffers[5],
+        o,
+        &*p,
+        p_off + stride,
+        &left[1],
+        6,
+        w,
+        4,
+        edges,
+    );
     ptrs[5] = 5;
-    backup_row_8bpc(&mut row_buffers[6], o, &*p, p_off + 2 * stride, &left[2], 6, w, 4, edges);
+    backup_row_8bpc(
+        &mut row_buffers[6],
+        o,
+        &*p,
+        p_off + 2 * stride,
+        &left[2],
+        6,
+        w,
+        4,
+        edges,
+    );
     ptrs[6] = 6;
-    backup_row_8bpc(&mut row_buffers[7], o, &*p, p_off + 3 * stride, &left[3], 6, w, 4, edges);
+    backup_row_8bpc(
+        &mut row_buffers[7],
+        o,
+        &*p,
+        p_off + 3 * stride,
+        &left[3],
+        6,
+        w,
+        4,
+        edges,
+    );
     ptrs[7] = 7;
 
     let mut bak_idx: usize = 8;
@@ -506,35 +647,69 @@ fn wiener_multi_8bpc(
 
         if by + 1 < bh {
             backup_row_8bpc(
-                &mut row_buffers[bak_idx], o, &*p,
-                p_off + (by4 + 4) * stride, &left[by4 + 4], 6, w, 4, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                &*p,
+                p_off + (by4 + 4) * stride,
+                &left[by4 + 4],
+                6,
+                w,
+                4,
+                edges,
             );
             ptrs[8] = bak_idx;
             backup_row_8bpc(
-                &mut row_buffers[9], o, &*p,
-                p_off + (by4 + 5) * stride, &left[by4 + 5], 6, w, 4, edges,
+                &mut row_buffers[9],
+                o,
+                &*p,
+                p_off + (by4 + 5) * stride,
+                &left[by4 + 5],
+                6,
+                w,
+                4,
+                edges,
             );
             ptrs[9] = 9;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
             backup_row_lpf_8bpc(
-                &mut row_buffers[bak_idx], o, &*p,
-                p_off + (by4 + 4) * stride, w, 4, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                &*p,
+                p_off + (by4 + 4) * stride,
+                w,
+                4,
+                edges,
             );
             ptrs[8] = bak_idx;
             backup_row_lpf_8bpc(
-                &mut row_buffers[9], o, &*p,
-                p_off + (by4 + 5) * stride, w, 4, edges,
+                &mut row_buffers[9],
+                o,
+                &*p,
+                p_off + (by4 + 5) * stride,
+                w,
+                4,
+                edges,
             );
             ptrs[9] = 9;
         } else if edges & LR_HAVE_BOTTOM != 0 {
             backup_row_lpf_8bpc(
-                &mut row_buffers[bak_idx], o, lpf_bottom,
-                lpf_bottom_off, w, 4, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                lpf_bottom,
+                lpf_bottom_off,
+                w,
+                4,
+                edges,
             );
             ptrs[8] = bak_idx;
             backup_row_lpf_8bpc(
-                &mut row_buffers[9], o, lpf_bottom,
-                lpf_bottom_off + stride, w, 4, edges,
+                &mut row_buffers[9],
+                o,
+                lpf_bottom,
+                lpf_bottom_off + stride,
+                w,
+                4,
+                edges,
             );
             ptrs[9] = 9;
         } else {
@@ -554,21 +729,38 @@ fn wiener_multi_8bpc(
         for y in by4..by4 + 4 {
             if y + 4 < h {
                 backup_row_8bpc(
-                    &mut row_buffers[bak_idx], o, &*p,
-                    p_off + (y + 4) * stride, &left[y + 4], 6, w, 4, edges,
+                    &mut row_buffers[bak_idx],
+                    o,
+                    &*p,
+                    p_off + (y + 4) * stride,
+                    &left[y + 4],
+                    6,
+                    w,
+                    4,
+                    edges,
                 );
                 ptrs[8] = bak_idx;
             } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
                 backup_row_lpf_8bpc(
-                    &mut row_buffers[bak_idx], o, &*p,
-                    p_off + (y + 4) * stride, w, 4, edges,
+                    &mut row_buffers[bak_idx],
+                    o,
+                    &*p,
+                    p_off + (y + 4) * stride,
+                    w,
+                    4,
+                    edges,
                 );
                 ptrs[8] = bak_idx;
             } else if y + 2 < h && edges & LR_HAVE_BOTTOM != 0 {
                 let offset_y = y + 4 - h;
                 backup_row_lpf_8bpc(
-                    &mut row_buffers[bak_idx], o, lpf_bottom,
-                    lpf_bottom_off + offset_y * stride, w, 4, edges,
+                    &mut row_buffers[bak_idx],
+                    o,
+                    lpf_bottom,
+                    lpf_bottom_off + offset_y * stride,
+                    w,
+                    4,
+                    edges,
                 );
                 ptrs[8] = bak_idx;
             } else {
@@ -576,10 +768,14 @@ fn wiener_multi_8bpc(
             }
 
             bak_idx += 1;
-            if bak_idx == 9 { bak_idx = 0; }
+            if bak_idx == 9 {
+                bak_idx = 0;
+            }
 
             for bx in 0..bw {
-                if ll_mask[y >> 2][0] & (1 << bx) != 0 { continue; }
+                if ll_mask[y >> 2][0] & (1 << bx) != 0 {
+                    continue;
+                }
 
                 if let Some(fu) = filters_user {
                     let filter = &fu[classes[bx] as usize];
@@ -590,9 +786,11 @@ fn wiener_multi_8bpc(
                             let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
                             let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
                             let a = row_buffers[ptrs[(4 + dy) as usize]]
-                                [(o as i32 + x as i32 + dx) as usize] as i32;
+                                [(o as i32 + x as i32 + dx) as usize]
+                                as i32;
                             let b = row_buffers[ptrs[(4 - dy) as usize]]
-                                [(o as i32 + x as i32 - dx) as usize] as i32;
+                                [(o as i32 + x as i32 - dx) as usize]
+                                as i32;
                             s += (a + b - 2 * m) * filter[i] as i32;
                         }
                         p[p_off + y * stride + x] = iclip((s + 64) >> 7, 0, 255) as u8;
@@ -605,9 +803,11 @@ fn wiener_multi_8bpc(
                             let dy = PC_WIENER_CONFIG[i][0] as i32;
                             let dx = PC_WIENER_CONFIG[i][1] as i32;
                             let a = row_buffers[ptrs[(4 + dy) as usize]]
-                                [(o as i32 + x as i32 + dx) as usize] as i32;
+                                [(o as i32 + x as i32 + dx) as usize]
+                                as i32;
                             let b = row_buffers[ptrs[(4 - dy) as usize]]
-                                [(o as i32 + x as i32 - dx) as usize] as i32;
+                                [(o as i32 + x as i32 - dx) as usize]
+                                as i32;
                             s += filter[i] as i32 * (a + b);
                         }
                         p[p_off + y * stride + x] = iclip((s + 64) >> 7, 0, 255) as u8;
@@ -615,7 +815,9 @@ fn wiener_multi_8bpc(
                 }
             }
 
-            for r in 0..8 { ptrs[r] = ptrs[r + 1]; }
+            for r in 0..8 {
+                ptrs[r] = ptrs[r + 1];
+            }
         }
     }
 }
@@ -639,8 +841,23 @@ pub fn ns_wiener_multi_8bpc(
     ll_mask: &[[u16; 4]],
 ) {
     wiener_multi_8bpc(
-        p, p_off, stride, left, lpf, lpf_off, lpf_bottom, lpf_bottom_off,
-        w, h, Some(filters_user), None, subclass_lut, noskip_mask, base_q, edges, ll_mask,
+        p,
+        p_off,
+        stride,
+        left,
+        lpf,
+        lpf_off,
+        lpf_bottom,
+        lpf_bottom_off,
+        w,
+        h,
+        Some(filters_user),
+        None,
+        subclass_lut,
+        noskip_mask,
+        base_q,
+        edges,
+        ll_mask,
     );
 }
 
@@ -663,8 +880,23 @@ pub fn pc_wiener_8bpc(
     ll_mask: &[[u16; 4]],
 ) {
     wiener_multi_8bpc(
-        p, p_off, stride, left, lpf, lpf_off, lpf_bottom, lpf_bottom_off,
-        w, h, None, Some(filters_pretrained), subclass_lut, noskip_mask, base_q, edges, ll_mask,
+        p,
+        p_off,
+        stride,
+        left,
+        lpf,
+        lpf_off,
+        lpf_bottom,
+        lpf_bottom_off,
+        w,
+        h,
+        None,
+        Some(filters_pretrained),
+        subclass_lut,
+        noskip_mask,
+        base_q,
+        edges,
+        ll_mask,
     );
 }
 
@@ -717,33 +949,86 @@ pub fn ns_wiener_single_uv_8bpc(
         c_ptrs[1] = 2;
     }
 
-    backup_row_8bpc(&mut c_buffers[3], o, &*p, p_off + stride, &left[1], 6, w, 2, edges);
+    backup_row_8bpc(
+        &mut c_buffers[3],
+        o,
+        &*p,
+        p_off + stride,
+        &left[1],
+        6,
+        w,
+        2,
+        edges,
+    );
     c_ptrs[3] = 3;
     let mut bak_idx: usize = 4;
 
-    backup_row_luma_8bpc(&mut l_buffers[2], o, luma, luma_off, lstride, luma_w, edges, ss_hor, ss_ver, ds_flt);
+    backup_row_luma_8bpc(
+        &mut l_buffers[2],
+        o,
+        luma,
+        luma_off,
+        lstride,
+        luma_w,
+        edges,
+        ss_hor,
+        ss_ver,
+        ds_flt,
+    );
     l_ptrs[2] = 2;
 
     if edges & LR_HAVE_TOP_INTEGRATED != 0 {
         backup_row_luma_8bpc(
-            &mut l_buffers[0], o, luma, luma_off - 4 * lstride,
-            lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+            &mut l_buffers[0],
+            o,
+            luma,
+            luma_off - 4 * lstride,
+            lstride,
+            luma_w,
+            edges,
+            ss_hor,
+            ss_ver,
+            ds_flt,
         );
         l_ptrs[0] = 0;
         backup_row_luma_8bpc(
-            &mut l_buffers[1], o, luma, luma_off - 2 * lstride,
-            lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+            &mut l_buffers[1],
+            o,
+            luma,
+            luma_off - 2 * lstride,
+            lstride,
+            luma_w,
+            edges,
+            ss_hor,
+            ss_ver,
+            ds_flt,
         );
         l_ptrs[1] = 1;
     } else if edges & LR_HAVE_TOP != 0 {
         backup_row_luma_8bpc(
-            &mut l_buffers[0], o, luma_top, luma_top_off,
-            0, luma_w, edges, ss_hor, ss_ver, ds_flt,
+            &mut l_buffers[0],
+            o,
+            luma_top,
+            luma_top_off,
+            0,
+            luma_w,
+            edges,
+            ss_hor,
+            ss_ver,
+            ds_flt,
         );
         l_ptrs[0] = 0;
         backup_row_luma_8bpc(
-            &mut l_buffers[1], o, luma_top, luma_top_off,
-            lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+            &mut l_buffers[1],
+            o,
+            luma_top,
+            luma_top_off,
+            lstride,
+            luma_w,
+            edges,
+            ss_hor,
+            ss_ver,
+            ds_flt,
         );
         l_ptrs[1] = 1;
     } else {
@@ -752,8 +1037,16 @@ pub fn ns_wiener_single_uv_8bpc(
     }
 
     backup_row_luma_8bpc(
-        &mut l_buffers[3], o, luma, luma_off + (1 << ss_ver) * lstride,
-        lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+        &mut l_buffers[3],
+        o,
+        luma,
+        luma_off + (1 << ss_ver) * lstride,
+        lstride,
+        luma_w,
+        edges,
+        ss_hor,
+        ss_ver,
+        ds_flt,
     );
     l_ptrs[3] = 3;
     let mut lbak_idx: usize = 4;
@@ -762,55 +1055,102 @@ pub fn ns_wiener_single_uv_8bpc(
     for y in 0..h {
         if y + 2 < h {
             backup_row_8bpc(
-                &mut c_buffers[bak_idx], o, &*p,
-                p_off + (y + 2) * stride, &left[y + 2], 6, w, 2, edges,
+                &mut c_buffers[bak_idx],
+                o,
+                &*p,
+                p_off + (y + 2) * stride,
+                &left[y + 2],
+                6,
+                w,
+                2,
+                edges,
             );
             c_ptrs[4] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
             backup_row_lpf_8bpc(
-                &mut c_buffers[bak_idx], o, &*p,
-                p_off + (y + 2) * stride, w, 2, edges,
+                &mut c_buffers[bak_idx],
+                o,
+                &*p,
+                p_off + (y + 2) * stride,
+                w,
+                2,
+                edges,
             );
             c_ptrs[4] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM != 0 {
             let offset_y = y + 2 - h;
             backup_row_lpf_8bpc(
-                &mut c_buffers[bak_idx], o, lpf_bottom,
-                lpf_bottom_off + offset_y * stride, w, 2, edges,
+                &mut c_buffers[bak_idx],
+                o,
+                lpf_bottom,
+                lpf_bottom_off + offset_y * stride,
+                w,
+                2,
+                edges,
             );
             c_ptrs[4] = bak_idx;
         } else {
             c_ptrs[4] = c_ptrs[3];
         }
         bak_idx += 1;
-        if bak_idx == 5 { bak_idx = 0; }
+        if bak_idx == 5 {
+            bak_idx = 0;
+        }
 
         if c_ptrs[4] == c_ptrs[3] {
             l_ptrs[4] = l_ptrs[3];
         } else if y + 2 == h && edges & LR_HAVE_BOTTOM_INTEGRATED == 0 {
             backup_row_luma_8bpc(
-                &mut l_buffers[lbak_idx], o, luma_bottom, luma_bottom_off,
-                lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+                &mut l_buffers[lbak_idx],
+                o,
+                luma_bottom,
+                luma_bottom_off,
+                lstride,
+                luma_w,
+                edges,
+                ss_hor,
+                ss_ver,
+                ds_flt,
             );
             l_ptrs[4] = lbak_idx;
         } else if y + 1 == h && edges & LR_HAVE_BOTTOM_INTEGRATED == 0 {
             backup_row_luma_8bpc(
-                &mut l_buffers[lbak_idx], o, luma_bottom, luma_bottom_off + lstride,
-                0, luma_w, edges, ss_hor, ss_ver, ds_flt,
+                &mut l_buffers[lbak_idx],
+                o,
+                luma_bottom,
+                luma_bottom_off + lstride,
+                0,
+                luma_w,
+                edges,
+                ss_hor,
+                ss_ver,
+                ds_flt,
             );
             l_ptrs[4] = lbak_idx;
         } else {
             backup_row_luma_8bpc(
-                &mut l_buffers[lbak_idx], o, luma, luma_pos + (2 << ss_ver) * lstride,
-                lstride, luma_w, edges, ss_hor, ss_ver, ds_flt,
+                &mut l_buffers[lbak_idx],
+                o,
+                luma,
+                luma_pos + (2 << ss_ver) * lstride,
+                lstride,
+                luma_w,
+                edges,
+                ss_hor,
+                ss_ver,
+                ds_flt,
             );
             l_ptrs[4] = lbak_idx;
         }
         lbak_idx += 1;
-        if lbak_idx == 5 { lbak_idx = 0; }
+        if lbak_idx == 5 {
+            lbak_idx = 0;
+        }
 
         for bx in 0..(w >> 2) {
-            if ll_mask[y >> 2][0] & (1 << bx) != 0 { continue; }
+            if ll_mask[y >> 2][0] & (1 << bx) != 0 {
+                continue;
+            }
             for x in bx * 4..bx * 4 + 4 {
                 let m = c_buffers[c_ptrs[2]][o + x] as i32;
                 let mut s = m << 7;
@@ -835,8 +1175,12 @@ pub fn ns_wiener_single_uv_8bpc(
             }
         }
 
-        for r in 0..4 { c_ptrs[r] = c_ptrs[r + 1]; }
-        for r in 0..4 { l_ptrs[r] = l_ptrs[r + 1]; }
+        for r in 0..4 {
+            c_ptrs[r] = c_ptrs[r + 1];
+        }
+        for r in 0..4 {
+            l_ptrs[r] = l_ptrs[r + 1];
+        }
         luma_pos += lstride << ss_ver;
     }
 }
@@ -867,7 +1211,15 @@ pub fn gdf_prep_8bpc(
 
     if edges & LR_HAVE_TOP_INTEGRATED != 0 {
         for n in 0..6 {
-            backup_row_lpf_8bpc(&mut row_buffers[n], o, lpf, lpf_off + n * stride, w, 6, edges);
+            backup_row_lpf_8bpc(
+                &mut row_buffers[n],
+                o,
+                lpf,
+                lpf_off + n * stride,
+                w,
+                6,
+                edges,
+            );
             ptrs[n] = n;
         }
     } else if edges & LR_HAVE_TOP != 0 {
@@ -880,12 +1232,24 @@ pub fn gdf_prep_8bpc(
         ptrs[2] = 4;
         ptrs[3] = 4;
     } else {
-        for n in 0..6 { ptrs[n] = 6; }
+        for n in 0..6 {
+            ptrs[n] = 6;
+        }
     }
 
     let mut bak_idx = 7usize;
     for y in 1..6 {
-        backup_row_8bpc(&mut row_buffers[bak_idx], o, p, p_off + y * stride, &left[y], 6, w, 6, edges);
+        backup_row_8bpc(
+            &mut row_buffers[bak_idx],
+            o,
+            p,
+            p_off + y * stride,
+            &left[y],
+            6,
+            w,
+            6,
+            edges,
+        );
         ptrs[bak_idx] = bak_idx;
         bak_idx += 1;
     }
@@ -910,28 +1274,47 @@ pub fn gdf_prep_8bpc(
     for y in 0..h {
         if y + 6 < h {
             backup_row_8bpc(
-                &mut row_buffers[bak_idx], o, p,
-                p_off + (y + 6) * stride, &left[y + 6], 6, w, 6, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                p,
+                p_off + (y + 6) * stride,
+                &left[y + 6],
+                6,
+                w,
+                6,
+                edges,
             );
             ptrs[12] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
             backup_row_lpf_8bpc(
-                &mut row_buffers[bak_idx], o, p,
-                p_off + (y + 6) * stride, w, 6, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                p,
+                p_off + (y + 6) * stride,
+                w,
+                6,
+                edges,
             );
             ptrs[12] = bak_idx;
         } else if y + 4 < h && edges & LR_HAVE_BOTTOM != 0 {
             let offset_y = y + 6 - h;
             backup_row_lpf_8bpc(
-                &mut row_buffers[bak_idx], o, lpf_bottom,
-                lpf_bottom_off + offset_y * stride, w, 6, edges,
+                &mut row_buffers[bak_idx],
+                o,
+                lpf_bottom,
+                lpf_bottom_off + offset_y * stride,
+                w,
+                6,
+                edges,
             );
             ptrs[12] = bak_idx;
         } else {
             ptrs[12] = ptrs[11];
         }
         bak_idx += 1;
-        if bak_idx == 13 { bak_idx = 0; }
+        if bak_idx == 13 {
+            bak_idx = 0;
+        }
 
         if y & 1 == 0 {
             let refs: [&[u8]; 13] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
@@ -944,8 +1327,10 @@ pub fn gdf_prep_8bpc(
             let mut grad_sums = [0i32; 4];
             let hx = x1 >> 1;
             for d in 0..4 {
-                grad_sums[d] = grad[0][hx][d] as i32 + grad[0][hx + 1][d] as i32
-                    + grad[1][hx][d] as i32 + grad[1][hx + 1][d] as i32;
+                grad_sums[d] = grad[0][hx][d] as i32
+                    + grad[0][hx + 1][d] as i32
+                    + grad[1][hx][d] as i32
+                    + grad[1][hx + 1][d] as i32;
             }
             let cls = ((grad_sums[0] <= grad_sums[1]) as usize)
                 | (((grad_sums[2] <= grad_sums[3]) as usize) << 1);
@@ -979,7 +1364,8 @@ pub fn gdf_prep_8bpc(
                     let below = iclip((b - m) << 2, -alpha, alpha);
                     let v = iclip(above + below, -512, 511);
                     for idx in 0..3 {
-                        idx_vals[idx] += v * GDF_WEIGHT[weight_base + idx * 88 + k * 4 + cls] as i32;
+                        idx_vals[idx] +=
+                            v * GDF_WEIGHT[weight_base + idx * 88 + k * 4 + cls] as i32;
                     }
                 }
 
@@ -999,7 +1385,9 @@ pub fn gdf_prep_8bpc(
             x1 += 2;
         }
 
-        for r in 0..12 { ptrs[r] = ptrs[r + 1]; }
+        for r in 0..12 {
+            ptrs[r] = ptrs[r + 1];
+        }
     }
 }
 
@@ -1093,29 +1481,41 @@ pub union WienerParamsC {
 }
 
 type WienerFilterFn = unsafe extern "C" fn(
-    dst: *mut u8, dst_stride: isize,
+    dst: *mut u8,
+    dst_stride: isize,
     left: *const [u8; 6],
-    top: *const u8, bottom: *const u8,
-    w: i32, h: i32,
+    top: *const u8,
+    bottom: *const u8,
+    w: i32,
+    h: i32,
     params: *const WienerParamsC,
     edges: u8,
     ll_mask: *const [u16; 4],
 );
 
 type GdfPrepFn = unsafe extern "C" fn(
-    dst: *mut i8, dst_stride: isize,
-    p: *const u8, stride: isize,
+    dst: *mut i8,
+    dst_stride: isize,
+    p: *const u8,
+    stride: isize,
     left: *const [u8; 6],
-    top: *const u8, bottom: *const u8,
-    w: i32, h: i32,
-    ref_dst_idx: i32, qp_idx: i32,
+    top: *const u8,
+    bottom: *const u8,
+    w: i32,
+    h: i32,
+    ref_dst_idx: i32,
+    qp_idx: i32,
     edges: u8,
 );
 
 type GdfAddFn = unsafe extern "C" fn(
-    p: *mut u8, dst_stride: isize,
-    err: *const i8, err_stride: isize,
-    w: i32, h: i32, scale: i32,
+    p: *mut u8,
+    dst_stride: isize,
+    err: *const i8,
+    err_stride: isize,
+    w: i32,
+    h: i32,
+    scale: i32,
     ll_mask: *const [u16; 4],
 );
 
@@ -1153,8 +1553,14 @@ pub struct LrContext<'a> {
     pub restore_planes: i32,
 }
 
-fn backup_nxu(dst: &mut [[u8; 6]], src: &[u8], src_off: usize,
-              src_stride: isize, mut u: i32, n: usize) {
+fn backup_nxu(
+    dst: &mut [[u8; 6]],
+    src: &[u8],
+    src_off: usize,
+    src_stride: isize,
+    mut u: i32,
+    n: usize,
+) {
     let abs_stride = src_stride.unsigned_abs();
     let mut di = 0usize;
     let mut si = src_off;
@@ -1265,62 +1671,75 @@ fn lr_stripe_8bpc(
     let mut noskip_offset = 0usize;
 
     while y + stripe_h <= row_h {
-        edges ^= ((-(((sby + 1) != ctx.sbh) as i32
-            | (y + stripe_h != row_h) as i32)) as u8 ^ edges) & LR_HAVE_BOTTOM;
+        edges ^= ((-(((sby + 1) != ctx.sbh) as i32 | (y + stripe_h != row_h) as i32)) as u8
+            ^ edges)
+            & LR_HAVE_BOTTOM;
 
         let inc = if (edges & (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED | LR_HAVE_BOTTOM_INTEGRATED))
-            == LR_HAVE_TOP && y + 8 < ((ctx.bh * 4) >> ss_ver) { 8 } else { 0 };
+            == LR_HAVE_TOP
+            && y + 8 < ((ctx.bh * 4) >> ss_ver)
+        {
+            8
+        } else {
+            0
+        };
 
-        let sb256_idx = ctx.sb256w as usize
-            * ((((y << ss_ver) + inc) as usize) >> 8)
-            + sb256x as usize;
+        let sb256_idx =
+            ctx.sb256w as usize * ((((y << ss_ver) + inc) as usize) >> 8) + sb256x as usize;
 
         let gdf_enabled = plane == 0
             && ctx.inloop_filters & INLOOPFILTER_GDF != 0
             && sb256_idx < ctx.mask.len()
             && ctx.mask[sb256_idx].gdf[((((y + inc) >> 4) & 12) + sb64x_idx) as usize] != 0;
 
-        if gdf_enabled
-            && let Some(gdf_prep) = ctx.dsp_lr.gdf_prep {
-                // SAFETY: gdf_prep is an FFI function pointer with matching calling convention and signature.
-                let gdf_prep_fn: GdfPrepFn = unsafe { std::mem::transmute(gdf_prep) };
-                let lpf_off = have_tt as usize
-                    * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
+        if gdf_enabled && let Some(gdf_prep) = ctx.dsp_lr.gdf_prep {
+            // SAFETY: gdf_prep is an FFI function pointer with matching calling convention and signature.
+            let gdf_prep_fn: GdfPrepFn = unsafe { std::mem::transmute(gdf_prep) };
+            let lpf_off =
+                have_tt as usize * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
                     + x as usize;
-                let lpf_bottom_off = lpf_off + 6 * abs_stride;
-                let plane_u = plane as usize;
-                unsafe {
-                    gdf_prep_fn(
-                        gdf_err.as_mut_ptr(), 64,
-                        p.as_ptr().add(p_off), stride,
-                        left.as_ptr().add(left_idx),
-                        ctx.lr_db_line[plane_u].as_ptr().add(lpf_off),
-                        ctx.lr_db_line[plane_u].as_ptr().add(lpf_bottom_off),
-                        w, stripe_h,
-                        ref_dst_idx, qp_idx, edges,
-                    );
-                }
+            let lpf_bottom_off = lpf_off + 6 * abs_stride;
+            let plane_u = plane as usize;
+            unsafe {
+                gdf_prep_fn(
+                    gdf_err.as_mut_ptr(),
+                    64,
+                    p.as_ptr().add(p_off),
+                    stride,
+                    left.as_ptr().add(left_idx),
+                    ctx.lr_db_line[plane_u].as_ptr().add(lpf_off),
+                    ctx.lr_db_line[plane_u].as_ptr().add(lpf_bottom_off),
+                    w,
+                    stripe_h,
+                    ref_dst_idx,
+                    qp_idx,
+                    edges,
+                );
             }
+        }
 
         let y4 = (((y << ss_ver) & 255) >> 2) as usize;
 
         if let Some(wfn) = wiener_fn {
             // SAFETY: wfn is an FFI function pointer with matching calling convention and signature.
             let wiener_fn_typed: WienerFilterFn = unsafe { std::mem::transmute(wfn) };
-            let lpf_off = have_tt as usize
-                * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
-                + x as usize;
+            let lpf_off =
+                have_tt as usize * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
+                    + x as usize;
 
             let top_ptr = if (edges & (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED))
                 == (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED)
             {
-                let cdef_off = tile_row_m1 as usize
-                    * (6 - 4 * chroma as usize) * abs_stride
-                    + x as usize;
+                let cdef_off =
+                    tile_row_m1 as usize * (6 - 4 * chroma as usize) * abs_stride + x as usize;
                 let plane_u = plane as usize;
                 if cdef_off < ctx.lr_cdef_line[plane_u].len() {
-                    unsafe { ctx.lr_cdef_line[plane_u].as_ptr().add(cdef_off)
-                        .add((2 * (1 - chroma) as usize) * abs_stride) }
+                    unsafe {
+                        ctx.lr_cdef_line[plane_u]
+                            .as_ptr()
+                            .add(cdef_off)
+                            .add((2 * (1 - chroma) as usize) * abs_stride)
+                    }
                 } else {
                     unsafe { ctx.lr_db_line[plane as usize].as_ptr().add(lpf_off) }
                 }
@@ -1328,7 +1747,9 @@ fn lr_stripe_8bpc(
                 unsafe { ctx.lr_db_line[plane as usize].as_ptr().add(lpf_off) }
             };
             let bottom_ptr = unsafe {
-                ctx.lr_db_line[plane as usize].as_ptr().add(lpf_off + 6 * abs_stride)
+                ctx.lr_db_line[plane as usize]
+                    .as_ptr()
+                    .add(lpf_off + 6 * abs_stride)
             };
 
             let ll_mask_ptr: *const [u16; 4] = if sb256_idx < ctx.mask.len() {
@@ -1380,8 +1801,8 @@ fn lr_stripe_8bpc(
                     ds_flt: ctx.cfl_ds_filter_index,
                 });
                 if chroma != 0 {
-                    let luma_off = (x << ss_hor) as usize
-                        + (y << ss_ver) as usize * lstride.unsigned_abs();
+                    let luma_off =
+                        (x << ss_hor) as usize + (y << ss_ver) as usize * lstride.unsigned_abs();
                     let sp = unsafe { &mut (*params.as_mut_ptr()).single };
                     sp.luma = if luma_off < ctx.lf_p[0].len() {
                         unsafe { ctx.lf_p[0].as_ptr().add(luma_off) }
@@ -1397,22 +1818,31 @@ fn lr_stripe_8bpc(
                     } else {
                         std::ptr::null()
                     };
-                    sp.luma_bottom = if llpf_off + 6 * lstride.unsigned_abs() < ctx.lr_db_line[0].len() {
-                        unsafe { ctx.lr_db_line[0].as_ptr().add(llpf_off + 6 * lstride.unsigned_abs()) }
-                    } else {
-                        std::ptr::null()
-                    };
+                    sp.luma_bottom =
+                        if llpf_off + 6 * lstride.unsigned_abs() < ctx.lr_db_line[0].len() {
+                            unsafe {
+                                ctx.lr_db_line[0]
+                                    .as_ptr()
+                                    .add(llpf_off + 6 * lstride.unsigned_abs())
+                            }
+                        } else {
+                            std::ptr::null()
+                        };
                 }
             }
 
             unsafe {
                 wiener_fn_typed(
-                    p.as_mut_ptr().add(p_off), stride,
+                    p.as_mut_ptr().add(p_off),
+                    stride,
                     left.as_ptr().add(left_idx),
-                    top_ptr, bottom_ptr,
-                    w, stripe_h,
+                    top_ptr,
+                    bottom_ptr,
+                    w,
+                    stripe_h,
                     params.as_ptr(),
-                    edges, ll_mask_ptr,
+                    edges,
+                    ll_mask_ptr,
                 );
             }
             if multi_wiener {
@@ -1420,37 +1850,42 @@ fn lr_stripe_8bpc(
             }
         }
 
-        if gdf_enabled
-            && let Some(gdf_add) = ctx.dsp_lr.gdf_add {
-                // SAFETY: gdf_add is an FFI function pointer with matching calling convention and signature.
-                let gdf_add_fn: GdfAddFn = unsafe { std::mem::transmute(gdf_add) };
-                let ll_mask_ptr: *const [u16; 4] = if sb256_idx < ctx.mask.len() {
-                    if plane == 0 {
-                        ctx.mask[sb256_idx].lossless_mask_y[y4][sb64x_idx as usize..].as_ptr()
-                            as *const [u16; 4]
-                    } else {
-                        ctx.mask[sb256_idx].lossless_mask_uv[y4][sb64x_idx as usize..].as_ptr()
-                            as *const [u16; 4]
-                    }
+        if gdf_enabled && let Some(gdf_add) = ctx.dsp_lr.gdf_add {
+            // SAFETY: gdf_add is an FFI function pointer with matching calling convention and signature.
+            let gdf_add_fn: GdfAddFn = unsafe { std::mem::transmute(gdf_add) };
+            let ll_mask_ptr: *const [u16; 4] = if sb256_idx < ctx.mask.len() {
+                if plane == 0 {
+                    ctx.mask[sb256_idx].lossless_mask_y[y4][sb64x_idx as usize..].as_ptr()
+                        as *const [u16; 4]
                 } else {
-                    std::ptr::null()
-                };
-                unsafe {
-                    gdf_add_fn(
-                        p.as_mut_ptr().add(p_off), stride,
-                        gdf_err.as_ptr(), 64,
-                        w, stripe_h, gdf_scale,
-                        ll_mask_ptr,
-                    );
+                    ctx.mask[sb256_idx].lossless_mask_uv[y4][sb64x_idx as usize..].as_ptr()
+                        as *const [u16; 4]
                 }
+            } else {
+                std::ptr::null()
+            };
+            unsafe {
+                gdf_add_fn(
+                    p.as_mut_ptr().add(p_off),
+                    stride,
+                    gdf_err.as_ptr(),
+                    64,
+                    w,
+                    stripe_h,
+                    gdf_scale,
+                    ll_mask_ptr,
+                );
             }
+        }
 
         edges &= !(LR_HAVE_BOTTOM_INTEGRATED | LR_HAVE_TOP_INTEGRATED);
         left_idx += stripe_h as usize;
         y += stripe_h;
         edges |= LR_HAVE_TOP;
         stripe_h = imin(64 >> ss_ver, row_h - y);
-        if stripe_h == 0 { break; }
+        if stripe_h == 0 {
+            break;
+        }
     }
 }
 
@@ -1531,10 +1966,19 @@ fn lr_sbrow(
         if lr_sb < ctx.lr_mask.len() && lr_u < ctx.lr_mask[lr_sb].lr[plane as usize].len() {
             let lr_unit = &ctx.lr_mask[lr_sb].lr[plane as usize][lr_u];
             lr_stripe_8bpc(
-                ctx, p, cur_p_off,
+                ctx,
+                p,
+                cur_p_off,
                 &pre_lr_border[1 - bit],
-                x, y, plane, 64, row_h,
-                lr_unit, edges, first_sby_in_tile_row, tile_row_m1,
+                x,
+                y,
+                plane,
+                64,
+                row_h,
+                lr_unit,
+                edges,
+                first_sby_in_tile_row,
+                tile_row_m1,
             );
         }
 
@@ -1553,19 +1997,24 @@ fn lr_sbrow(
     if lr_sb < ctx.lr_mask.len() && lr_u < ctx.lr_mask[lr_sb].lr[plane as usize].len() {
         let lr_unit = &ctx.lr_mask[lr_sb].lr[plane as usize][lr_u];
         lr_stripe_8bpc(
-            ctx, p, cur_p_off,
+            ctx,
+            p,
+            cur_p_off,
             &pre_lr_border[1 - bit],
-            x, y, plane, end_w, row_h,
-            lr_unit, edges, first_sby_in_tile_row, tile_row_m1,
+            x,
+            y,
+            plane,
+            end_w,
+            row_h,
+            lr_unit,
+            edges,
+            first_sby_in_tile_row,
+            tile_row_m1,
         );
     }
 }
 
-pub fn lr_sbrow_8bpc(
-    ctx: &LrContext,
-    dst: &mut [&mut [u8]; 3],
-    sby: i32,
-) {
+pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
     let dst_stride = ctx.cur_stride;
     let restore_planes = ctx.restore_planes;
     let not_last = (sby + 1 < ctx.sbh) as i32;
@@ -1597,18 +2046,40 @@ pub fn lr_sbrow_8bpc(
                 let abs_stride_uv = dst_stride[1].unsigned_abs();
                 let u_off = offset_uv as usize * abs_stride_uv;
                 lr_sbrow(
-                    ctx, dst[1], if u_off <= dst[1].len() { dst[1].len() - u_off } else { 0 },
-                    y_stripe, w, h, y_stripe + (8 >> ss_ver), 1,
-                    first_top, tile_row - 1,
+                    ctx,
+                    dst[1],
+                    if u_off <= dst[1].len() {
+                        dst[1].len() - u_off
+                    } else {
+                        0
+                    },
+                    y_stripe,
+                    w,
+                    h,
+                    y_stripe + (8 >> ss_ver),
+                    1,
+                    first_top,
+                    tile_row - 1,
                 );
             }
             if restore_planes & LR_RESTORE_V != 0 {
                 let abs_stride_uv = dst_stride[1].unsigned_abs();
                 let v_off = offset_uv as usize * abs_stride_uv;
                 lr_sbrow(
-                    ctx, dst[2], if v_off <= dst[2].len() { dst[2].len() - v_off } else { 0 },
-                    y_stripe, w, h, y_stripe + (8 >> ss_ver), 2,
-                    first_top, tile_row - 1,
+                    ctx,
+                    dst[2],
+                    if v_off <= dst[2].len() {
+                        dst[2].len() - v_off
+                    } else {
+                        0
+                    },
+                    y_stripe,
+                    w,
+                    h,
+                    y_stripe + (8 >> ss_ver),
+                    2,
+                    first_top,
+                    tile_row - 1,
                 );
             }
             offset_uv = 0;
@@ -1624,18 +2095,40 @@ pub fn lr_sbrow_8bpc(
             let abs_stride_uv = dst_stride[1].unsigned_abs();
             let u_off = offset_uv as usize * abs_stride_uv;
             lr_sbrow(
-                ctx, dst[1], if u_off <= dst[1].len() { dst[1].len() - u_off } else { 0 },
-                y_stripe, w, h, row_h, 1,
-                first_bot, tile_row - 1,
+                ctx,
+                dst[1],
+                if u_off <= dst[1].len() {
+                    dst[1].len() - u_off
+                } else {
+                    0
+                },
+                y_stripe,
+                w,
+                h,
+                row_h,
+                1,
+                first_bot,
+                tile_row - 1,
             );
         }
         if restore_planes & LR_RESTORE_V != 0 {
             let abs_stride_uv = dst_stride[1].unsigned_abs();
             let v_off = offset_uv as usize * abs_stride_uv;
             lr_sbrow(
-                ctx, dst[2], if v_off <= dst[2].len() { dst[2].len() - v_off } else { 0 },
-                y_stripe, w, h, row_h, 2,
-                first_bot, tile_row - 1,
+                ctx,
+                dst[2],
+                if v_off <= dst[2].len() {
+                    dst[2].len() - v_off
+                } else {
+                    0
+                },
+                y_stripe,
+                w,
+                h,
+                row_h,
+                2,
+                first_bot,
+                tile_row - 1,
             );
         }
     }
@@ -1652,9 +2145,20 @@ pub fn lr_sbrow_8bpc(
             let abs_stride_y = dst_stride[0].unsigned_abs();
             let y_off = offset_y as usize * abs_stride_y;
             lr_sbrow(
-                ctx, dst[0], if y_off <= dst[0].len() { dst[0].len() - y_off } else { 0 },
-                y_stripe, w, h, y_stripe + 8, 0,
-                FirstSbInTileRow::Top, tile_row - 1,
+                ctx,
+                dst[0],
+                if y_off <= dst[0].len() {
+                    dst[0].len() - y_off
+                } else {
+                    0
+                },
+                y_stripe,
+                w,
+                h,
+                y_stripe + 8,
+                0,
+                FirstSbInTileRow::Top,
+                tile_row - 1,
             );
             offset_y = 0;
             y_stripe += 8;
@@ -1662,9 +2166,23 @@ pub fn lr_sbrow_8bpc(
         let abs_stride_y = dst_stride[0].unsigned_abs();
         let y_off = offset_y as usize * abs_stride_y;
         lr_sbrow(
-            ctx, dst[0], if y_off <= dst[0].len() { dst[0].len() - y_off } else { 0 },
-            y_stripe, w, h, row_h, 0,
-            if first_sby_in_tile_row_flag != 0 { FirstSbInTileRow::Bottom } else { FirstSbInTileRow::None },
+            ctx,
+            dst[0],
+            if y_off <= dst[0].len() {
+                dst[0].len() - y_off
+            } else {
+                0
+            },
+            y_stripe,
+            w,
+            h,
+            row_h,
+            0,
+            if first_sby_in_tile_row_flag != 0 {
+                FirstSbInTileRow::Bottom
+            } else {
+                FirstSbInTileRow::None
+            },
             tile_row - 1,
         );
     }
@@ -1734,7 +2252,17 @@ mod tests {
         let left = vec![20u8; 16];
         let mut dst = vec![0u8; 32];
         let o = 6;
-        backup_row_8bpc(&mut dst, o, &src, 0, &left, 6, 16, 6, LR_HAVE_LEFT | LR_HAVE_RIGHT);
+        backup_row_8bpc(
+            &mut dst,
+            o,
+            &src,
+            0,
+            &left,
+            6,
+            16,
+            6,
+            LR_HAVE_LEFT | LR_HAVE_RIGHT,
+        );
         assert_eq!(&dst[o..o + 16], &src[0..16]);
     }
 
@@ -1828,9 +2356,7 @@ mod tests {
         }
         let mut dst = vec![0u8; 32];
         let o = 4;
-        backup_row_luma_8bpc(
-            &mut dst, o, &src, 4, stride, 8, 0, 1, 1, 0,
-        );
+        backup_row_luma_8bpc(&mut dst, o, &src, 4, stride, 8, 0, 1, 1, 0);
         assert_eq!(dst[o], ((100 + 200 + 100 + 200) >> 2) as u8);
     }
 
@@ -1844,9 +2370,7 @@ mod tests {
         }
         let mut dst = vec![0u8; 32];
         let o = 4;
-        backup_row_luma_8bpc(
-            &mut dst, o, &src, 4, stride, 8, 0, 0, 1, 1,
-        );
+        backup_row_luma_8bpc(&mut dst, o, &src, 4, stride, 8, 0, 0, 1, 1);
         for x in 0..8 {
             assert_eq!(dst[o + x], 150);
         }
@@ -1862,9 +2386,7 @@ mod tests {
         }
         let mut dst = vec![0u8; 32];
         let o = 4;
-        backup_row_luma_8bpc(
-            &mut dst, o, &src, 4, stride, 8, 0, 0, 1, 2,
-        );
+        backup_row_luma_8bpc(&mut dst, o, &src, 4, stride, 8, 0, 0, 1, 2);
         for x in 0..8 {
             assert_eq!(dst[o + x], 100);
         }
@@ -1877,8 +2399,16 @@ mod tests {
         let mut dst = vec![0u8; 32];
         let o = 6;
         backup_row_luma_8bpc(
-            &mut dst, o, &src, 6, stride, 8,
-            LR_HAVE_LEFT | LR_HAVE_RIGHT, 0, 1, 2,
+            &mut dst,
+            o,
+            &src,
+            6,
+            stride,
+            8,
+            LR_HAVE_LEFT | LR_HAVE_RIGHT,
+            0,
+            1,
+            2,
         );
         assert_eq!(&dst[o..o + 8], &[80u8; 8]);
         assert_eq!(&dst[o - 4..o], &[80u8; 4]);
@@ -1904,14 +2434,27 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
         ns_wiener_single_y_8bpc(
-            &mut p, p_off, stride,
-            &left, &lpf, 4, &lpf_bottom, 4,
-            w, h, &filter, edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            4,
+            &lpf_bottom,
+            4,
+            w,
+            h,
+            &filter,
+            edges,
+            &ll_mask,
         );
         for y in 0..h {
             for x in 0..w {
-                assert_eq!(p[p_off + y * stride + x], 128,
-                    "pixel ({x},{y}) changed from 128");
+                assert_eq!(
+                    p[p_off + y * stride + x],
+                    128,
+                    "pixel ({x},{y}) changed from 128"
+                );
             }
         }
     }
@@ -1932,14 +2475,27 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
         ns_wiener_single_y_8bpc(
-            &mut p, p_off, stride,
-            &left, &lpf, 4, &lpf_bottom, 4,
-            w, h, &filter, edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            4,
+            &lpf_bottom,
+            4,
+            w,
+            h,
+            &filter,
+            edges,
+            &ll_mask,
         );
         for y in 0..h {
             for x in 0..w {
-                assert_eq!(p[p_off + y * stride + x], orig[p_off + y * stride + x],
-                    "pixel ({x},{y}) changed despite full skip mask");
+                assert_eq!(
+                    p[p_off + y * stride + x],
+                    orig[p_off + y * stride + x],
+                    "pixel ({x},{y}) changed despite full skip mask"
+                );
             }
         }
     }
@@ -1959,13 +2515,25 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
         ns_wiener_single_y_8bpc(
-            &mut p, p_off, stride,
-            &left, &lpf, 4, &lpf_bottom, 4,
-            w, h, &filter, edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            4,
+            &lpf_bottom,
+            4,
+            w,
+            h,
+            &filter,
+            edges,
+            &ll_mask,
         );
         let filtered = p[p_off + 4 * stride + 4];
-        assert!(filtered > 110 && filtered < 128,
-            "noisy pixel should move toward neighbors: got {filtered}");
+        assert!(
+            filtered > 110 && filtered < 128,
+            "noisy pixel should move toward neighbors: got {filtered}"
+        );
     }
 
     #[test]
@@ -1988,9 +2556,21 @@ mod tests {
         assert_eq!(PC_WIENER_CONFIG[11], [0, 3]);
     }
 
-    fn make_wiener_multi_test_data(_w: usize, h: usize, stride: usize)
-        -> (Vec<u8>, usize, Vec<[u8; 6]>, Vec<u8>, usize, Vec<u8>, usize, Vec<[u16; 4]>, Vec<u16>)
-    {
+    fn make_wiener_multi_test_data(
+        _w: usize,
+        h: usize,
+        stride: usize,
+    ) -> (
+        Vec<u8>,
+        usize,
+        Vec<[u8; 6]>,
+        Vec<u8>,
+        usize,
+        Vec<u8>,
+        usize,
+        Vec<[u16; 4]>,
+        Vec<u16>,
+    ) {
         let p_off = stride + 4;
         let p = vec![128u8; stride * (h + 8)];
         let left = vec![[128u8; 6]; h + 8];
@@ -2000,7 +2580,17 @@ mod tests {
         let lpf_bottom_off = 4usize;
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
         let noskip_mask = vec![0xFFFFu16; (h >> 2) + 1];
-        (p, p_off, left, lpf, lpf_off, lpf_bottom, lpf_bottom_off, ll_mask, noskip_mask)
+        (
+            p,
+            p_off,
+            left,
+            lpf,
+            lpf_off,
+            lpf_bottom,
+            lpf_bottom_off,
+            ll_mask,
+            noskip_mask,
+        )
     }
 
     #[test]
@@ -2015,9 +2605,22 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
 
         ns_wiener_multi_8bpc(
-            &mut p, p_off, stride, &left, &lpf, lpf_off, &lpf_bottom, lpf_bottom_off,
-            w, h, &filters_user, &subclass_lut, &noskip_mask, 32,
-            edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            lpf_off,
+            &lpf_bottom,
+            lpf_bottom_off,
+            w,
+            h,
+            &filters_user,
+            &subclass_lut,
+            &noskip_mask,
+            32,
+            edges,
+            &ll_mask,
         );
 
         for y in 0..h {
@@ -2040,9 +2643,22 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
 
         pc_wiener_8bpc(
-            &mut p, p_off, stride, &left, &lpf, lpf_off, &lpf_bottom, lpf_bottom_off,
-            w, h, &filters_pt, &subclass_lut, &noskip_mask, 32,
-            edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            lpf_off,
+            &lpf_bottom,
+            lpf_bottom_off,
+            w,
+            h,
+            &filters_pt,
+            &subclass_lut,
+            &noskip_mask,
+            32,
+            edges,
+            &ll_mask,
         );
 
         for y in 0..h {
@@ -2059,21 +2675,40 @@ mod tests {
         let stride = 16;
         let (mut p, p_off, left, lpf, lpf_off, lpf_bottom, lpf_bottom_off, _, noskip_mask) =
             make_wiener_multi_test_data(w, h, stride);
-        for i in 0..p.len() { p[i] = 100; }
+        for i in 0..p.len() {
+            p[i] = 100;
+        }
         let subclass_lut = vec![0u8; 256];
         let filters_user = [[127i8; 18]; 1];
         let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
 
         ns_wiener_multi_8bpc(
-            &mut p, p_off, stride, &left, &lpf, lpf_off, &lpf_bottom, lpf_bottom_off,
-            w, h, &filters_user, &subclass_lut, &noskip_mask, 32,
-            edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            lpf_off,
+            &lpf_bottom,
+            lpf_bottom_off,
+            w,
+            h,
+            &filters_user,
+            &subclass_lut,
+            &noskip_mask,
+            32,
+            edges,
+            &ll_mask,
         );
 
         for y in 0..h {
             for x in 0..w {
-                assert_eq!(p[p_off + y * stride + x], 100, "skip mask should prevent changes");
+                assert_eq!(
+                    p[p_off + y * stride + x],
+                    100,
+                    "skip mask should prevent changes"
+                );
             }
         }
     }
@@ -2098,10 +2733,29 @@ mod tests {
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
 
         ns_wiener_single_uv_8bpc(
-            &mut p, p_off, stride, &left, &lpf, 4, &lpf_bottom, 4,
-            w, h, &filter,
-            &luma, luma_off, lstride, &luma_top, 8, &luma_bottom, 8,
-            1, 1, 2, edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            4,
+            &lpf_bottom,
+            4,
+            w,
+            h,
+            &filter,
+            &luma,
+            luma_off,
+            lstride,
+            &luma_top,
+            8,
+            &luma_bottom,
+            8,
+            1,
+            1,
+            2,
+            edges,
+            &ll_mask,
         );
 
         for y in 0..h {
@@ -2131,10 +2785,29 @@ mod tests {
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
 
         ns_wiener_single_uv_8bpc(
-            &mut p, p_off, stride, &left, &lpf, 4, &lpf_bottom, 4,
-            w, h, &filter,
-            &luma, luma_off, lstride, &luma_top, 4, &luma_bottom, 4,
-            0, 0, 2, edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            4,
+            &lpf_bottom,
+            4,
+            w,
+            h,
+            &filter,
+            &luma,
+            luma_off,
+            lstride,
+            &luma_top,
+            4,
+            &luma_bottom,
+            4,
+            0,
+            0,
+            2,
+            edges,
+            &ll_mask,
         );
 
         for y in 0..h {
@@ -2164,10 +2837,29 @@ mod tests {
         let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
 
         ns_wiener_single_uv_8bpc(
-            &mut p, p_off, stride, &left, &lpf, 4, &lpf_bottom, 4,
-            w, h, &filter,
-            &luma, luma_off, lstride, &luma_top, 4, &luma_bottom, 4,
-            0, 0, 2, edges, &ll_mask,
+            &mut p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            4,
+            &lpf_bottom,
+            4,
+            w,
+            h,
+            &filter,
+            &luma,
+            luma_off,
+            lstride,
+            &luma_top,
+            4,
+            &luma_bottom,
+            4,
+            0,
+            0,
+            2,
+            edges,
+            &ll_mask,
         );
 
         for y in 0..h {
@@ -2198,9 +2890,21 @@ mod tests {
         let mut dst = vec![0i8; h * w];
 
         gdf_prep_8bpc(
-            &mut dst, w, &p, p_off, stride,
-            &left, &lpf, 6, &lpf_bottom, 6,
-            w, h, 0, 0, edges,
+            &mut dst,
+            w,
+            &p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            6,
+            &lpf_bottom,
+            6,
+            w,
+            h,
+            0,
+            0,
+            edges,
         );
 
         for y in 0..h {
@@ -2224,9 +2928,21 @@ mod tests {
         let mut dst = vec![0i8; h * w];
 
         gdf_prep_8bpc(
-            &mut dst, w, &p, p_off, stride,
-            &left, &lpf, 6, &lpf_bottom, 6,
-            w, h, 1, 0, edges,
+            &mut dst,
+            w,
+            &p,
+            p_off,
+            stride,
+            &left,
+            &lpf,
+            6,
+            &lpf_bottom,
+            6,
+            w,
+            h,
+            1,
+            0,
+            edges,
         );
 
         for y in 0..h {
