@@ -1,7 +1,10 @@
 # rav2d
 
+[![crates.io](https://img.shields.io/crates/v/rav2d.svg)](https://crates.io/crates/rav2d)
+[![docs.rs](https://img.shields.io/docsrs/rav2d)](https://docs.rs/rav2d)
 [![CI](https://github.com/stukenov/rav2d/actions/workflows/ci.yml/badge.svg)](https://github.com/stukenov/rav2d/actions/workflows/ci.yml)
 [![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 **rav2d** is a Rust port of [dav2d](https://code.videolan.org/videolan/dav2d), a cross-platform **AV2** video decoder focused on speed, correctness, and memory safety.
 
@@ -23,6 +26,12 @@ Video decoders parse untrusted bitstreams from the internet — they are a prime
 
 ## Quick Start
 
+Add the decoder library to your project:
+
+```sh
+cargo add rav2d
+```
+
 ```rust
 use rav2d::{Decoder, Settings, Data, Rav2dError};
 
@@ -43,6 +52,10 @@ loop {
 ```
 
 ### CLI
+
+```sh
+cargo install rav2d-cli
+```
 
 ```sh
 # Decode IVF to Y4M
