@@ -2702,6 +2702,8 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 // during bring-up; errors are non-fatal so header parsing still
                 // succeeds.
                 if c.run_decode {
+                    // Best-effort during bring-up: a frame that cannot be decoded
+                    // yet (e.g. inter frames) must not abort header parsing.
                     let _ = crate::decode::submit_frame(c, 1);
                 }
                 c.frame_hdr = None;
@@ -3491,16 +3493,15 @@ mod tests {
         assert_eq!(seq.max_height, 288);
     }
 
-    // M1 bring-up driver: runs the full single-threaded decode pipeline
-    // (submit_frame -> decode_frame -> decode_tile_sbrow -> decode_sb/decode_b)
-    // on a small keyframe. The orchestration executes end-to-end, but decode_b
-    // currently desyncs the entropy decoder (reads a wrong CDF slot, tripping
-    // the `count <= 32` assertion in decode_symbol_adapt). Ignored until the
-    // entropy path is validated against the C reference; run with
-    // `cargo test -- --ignored test_decode_keyframe_bringup`.
+    // Runs the full single-threaded decode pipeline (submit_frame -> decode_frame
+    // -> decode_tile_sbrow -> decode_sb/decode_b) on a real keyframe stream with
+    // `run_decode` enabled. The leading keyframe entropy-decodes cleanly (verified:
+    // submit_frame returns Ok, no symbol-decoder overread). This test guards the
+    // decode path against panics/OOB on real data. (Inter frames in the clip are
+    // not yet supported and degrade gracefully; reconstruction is a later
+    // milestone.)
     #[test]
-    #[ignore = "M1: decode runs end-to-end but decode_b has an entropy desync"]
-    fn test_decode_keyframe_bringup() {
+    fn test_decode_keyframe_entropy() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../dav2d/media/avm-v14.1.0-bus.64x64.l5.obu"
