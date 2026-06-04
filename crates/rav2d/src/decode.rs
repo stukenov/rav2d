@@ -2066,6 +2066,16 @@ pub struct ReconCtx<'a, 'f> {
     pub rt: &'a mut crate::refmvs::Tile,
     /// Frame-level reference-MV state (`f->rf`): iw4/ih4/sbsz + header refs.
     pub rf: &'a crate::refmvs::Frame,
+    /// Current-frame temporal MV grid (`f->mvs` == `rf.rp`), written by the inter
+    /// splat so later frames can reference these MVs. Empty when ref_frame_mvs is
+    /// disabled. Held separately from `rf` (which is shared immutably) so the
+    /// per-block temporal save can mutate it.
+    pub cur_mvs: &'a mut [crate::refmvs::TemporalBlock],
+    /// Per-reference picture pixel planes for inter motion compensation
+    /// (`f->refp[i].p`). `None` for refs the current frame does not use.
+    pub refp: &'a [Option<std::sync::Arc<crate::picture::Picture>>; 7],
+    /// Per-reference scaling parameters (`f->svc[i]`); scale==0 means unscaled.
+    pub svc: &'a [[ScalableMotionParams; 2]; 7],
     /// Sequence/frame headers needed by `refmvs_find` for IntraBC candidates.
     pub seq_hdr: &'a crate::headers::SequenceHeader,
     pub frm_hdr: &'a crate::headers::FrameHeader,
@@ -2107,6 +2117,9 @@ pub fn decode_tile_sbrow_entropy(
     c_root_bs: BlockSize,
     rt: &mut crate::refmvs::Tile,
     rf: &crate::refmvs::Frame,
+    cur_mvs: &mut [crate::refmvs::TemporalBlock],
+    refp: &[Option<std::sync::Arc<crate::picture::Picture>>; 7],
+    svc: &[[ScalableMotionParams; 2]; 7],
     seq_hdr: &crate::headers::SequenceHeader,
     frm_hdr: &crate::headers::FrameHeader,
 ) -> Result<(), ()> {
@@ -2304,6 +2317,9 @@ pub fn decode_tile_sbrow_entropy(
             prev_ccsomap: [prev_ccsomap[0], prev_ccsomap[1], prev_ccsomap[2]],
             rt: &mut *rt,
             rf,
+            cur_mvs: &mut *cur_mvs,
+            refp,
+            svc,
             seq_hdr,
             frm_hdr,
         };
@@ -2582,7 +2598,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     // ref_frame_mvs is enabled, sized for the whole frame; the per-block splat
     // (splat_oneref_mv's `t_dst`) writes decoded MVs into `rf.rp` so later frames
     // can reference them. `rf.rp` is dav2d's `f->mvs` (the same buffer).
-    let _ = (&mvs, &refp, &svc);
+    let _ = &mvs;
     if refmvs_active && seq_hdr.ref_frame_mvs {
         let needed = (fc_sb256h as usize) * 32 * ((b4_stride_v >> 1) as usize);
         if rf.rp.len() != needed {
@@ -2618,6 +2634,14 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
             by += sb_step;
         }
     }
+    // Hold the current-frame temporal MV grid separately so the inter splat can
+    // mutate it while `rf` itself stays shared immutably (refmvs_find reads it).
+    let mut cur_mvs: Vec<refmvs::TemporalBlock> = std::mem::take(&mut rf.rp);
+    // Reference pixel planes for inter MC, shared from the FrameContext refp.
+    let refp_pics: [Option<std::sync::Arc<crate::picture::Picture>>; 7] =
+        std::array::from_fn(|i| refp[i].pic.clone());
+    let svc_v = *svc;
+
     let rf_ref: &refmvs::Frame = &*rf;
     let mut rt = refmvs::Tile {
         rp_proj: Vec::new(),
@@ -2755,6 +2779,9 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     c_root_bs,
                     &mut rt,
                     rf_ref,
+                    &mut cur_mvs,
+                    &refp_pics,
+                    &svc_v,
                     seq_hdr,
                     frame_hdr,
                 )?;
@@ -2793,6 +2820,10 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
             by += sb_step;
         }
     }
+
+    // Restore the (now-populated) temporal MV grid into `rf.rp` so the
+    // reference-list update can publish it to c.refs[i].refmvs.
+    rf.rp = cur_mvs;
 
     Ok(())
 }
@@ -6150,6 +6181,201 @@ fn decode_b(
         }
     }
 
+    // ---- Inter reference-MV resolution + splat (decode.c:1066-1322) --------
+    // Single-reference only: resolve the block MV (refmvs_find DRL candidate +
+    // parsed residual, or the global MV) and splat it into the refmvs grid +
+    // temporal grid. Compound (ref[1] != -1), warp-causal/extend/delta motion
+    // and TIP are deferred; their per-block MC is handled separately.
+    if has_luma && b.is_intra == 0 && !intrabc {
+        use crate::levels::{InterPredMode, Mv, MvXY, RefPair, TIP_FRAME};
+        let by4r = (by & 63) as usize;
+        let refs = unsafe { b.ref_pair.r };
+        let is_comp = refs[1] != -1;
+        let inter_mode = unsafe { b.data.inter.inter_mode };
+        let motion_mode = unsafe { b.data.inter.motion_mode };
+        let mv_prec = unsafe { b.data.inter.mv_prec } as i32;
+        let amvd = unsafe { b.data.inter.amvd };
+
+        if !is_comp && refs[0] != TIP_FRAME as i8 {
+            // Resolve the single-ref block MV.
+            if inter_mode == InterPredMode::GlobalMv as u8 {
+                let gmv = crate::env::get_gmv_2d(
+                    &recon.frm_hdr.gmv.m[refs[0] as usize],
+                    bx,
+                    by,
+                    bw4,
+                    bh4,
+                    recon.rf.iw4,
+                    recon.rf.ih4,
+                    recon.frm_hdr,
+                );
+                unsafe {
+                    b.data.inter.mv[0] = Mv { c: gmv };
+                }
+            } else {
+                let mut mvstack = [crate::refmvs::Candidate::default(); 6];
+                let mut n_mvs = 0i32;
+                let mut warp_cnt = 0i32;
+                let want_warp = inter_mode > InterPredMode::NewMv as u8;
+                let mut warp_arr = [[0i32; 7]; 6];
+                let rp_proj_off = recon.rt.rp_proj_off;
+                let rp_proj_slice: &[crate::refmvs::SnglMvBlock] =
+                    if recon.rf.rp_proj.is_empty() {
+                        &[]
+                    } else {
+                        &recon.rf.rp_proj[rp_proj_off..]
+                    };
+                crate::refmvs::refmvs_find(
+                    recon.rt,
+                    recon.rf,
+                    rp_proj_slice,
+                    &recon.rf.rp_traj,
+                    &mut mvstack,
+                    if want_warp {
+                        Some(&mut warp_arr[..])
+                    } else {
+                        None
+                    },
+                    &mut n_mvs,
+                    &mut warp_cnt,
+                    RefPair {
+                        r: [refs[0], -1],
+                    },
+                    bs as u8,
+                    false,
+                    by,
+                    bx,
+                    recon.seq_hdr,
+                    recon.frm_hdr,
+                );
+                let diff = unsafe { b.data.inter.mv[0] };
+                let drl = unsafe { b.data.inter.drl_idx[0] } as usize;
+                let mut mv = if inter_mode == InterPredMode::WarpMv as u8 {
+                    let wri = unsafe { b.data.inter.warp_ref_idx } as usize;
+                    let prec = if unsafe { b.data.inter.warpmv_with_mvd } != 0 {
+                        mv_prec
+                    } else {
+                        6
+                    };
+                    crate::env::get_warpmv_2d(
+                        &[
+                            warp_arr[wri][0],
+                            warp_arr[wri][1],
+                            warp_arr[wri][2],
+                            warp_arr[wri][3],
+                            warp_arr[wri][4],
+                            warp_arr[wri][5],
+                        ],
+                        bx,
+                        by,
+                        bw4,
+                        bh4,
+                        recon.rf.iw4,
+                        recon.rf.ih4,
+                        prec,
+                    )
+                } else {
+                    unsafe { mvstack[drl].mv[0].c }
+                };
+                if inter_mode == InterPredMode::NewMv as u8
+                    || inter_mode == InterPredMode::WarpNewMv as u8
+                    || (inter_mode == InterPredMode::WarpMv as u8
+                        && unsafe { b.data.inter.warpmv_with_mvd } != 0)
+                {
+                    if amvd == 0 && mv_prec <= 3 {
+                        crate::env::mv_reduce_prec(&mut mv, mv_prec);
+                    }
+                    unsafe {
+                        mv.x += diff.c.x;
+                        mv.y += diff.c.y;
+                    }
+                }
+                unsafe {
+                    b.data.inter.mv[0] = Mv { c: mv };
+                }
+            }
+
+            // refmv bank + splat (decode.c:1307-1322 single-ref).
+            if recon.seq_hdr.refmv_bank {
+                crate::refmvs::bank_add(
+                    &mut recon.rt.bank,
+                    bs,
+                    by,
+                    bx,
+                    fi.sb_step,
+                    fi.sb128 != 0,
+                    &b,
+                );
+            }
+            // splat_oneref_mv (decode.c:545-597), translational path. Warp/
+            // global-affine splat (mf==2 / mf==1 with warp) is deferred.
+            let blk_mv = unsafe { b.data.inter.mv[0] };
+            let gmv_affine = inter_mode == InterPredMode::GlobalMv as u8
+                && imin(bw4, bh4) > 1
+                && recon.frm_hdr.gmv.m[refs[0] as usize].wm_type
+                    > crate::headers::WarpedMotionType::Translation;
+            if motion_mode <= MotionMode::InterIntra as u8 && !gmv_affine {
+                let mf = (inter_mode == InterPredMode::GlobalMv as u8 && imin(bw4, bh4) > 1) as i8;
+                let mut s_src = crate::refmvs::Block {
+                    mv: [
+                        blk_mv,
+                        Mv {
+                            c: MvXY {
+                                y: crate::levels::INVALID_MV,
+                                x: 0,
+                            },
+                        },
+                    ],
+                    r#ref: RefPair { r: [refs[0], -1] },
+                    bs: bs as u8,
+                    mf,
+                    subpel_filter: unsafe { b.data.inter.filter },
+                    ..Default::default()
+                };
+                let s_off = by4r * 128 + (bx & 127) as usize;
+                let mut t_src = crate::refmvs::TemporalBlock::default();
+                // Temporal grid write target (rf.rp = f->mvs), unless TIP / no
+                // ref_frame_mvs.
+                let write_temporal = recon.seq_hdr.ref_frame_mvs
+                    && refs[0] != TIP_FRAME as i8
+                    && !recon.cur_mvs.is_empty();
+                if write_temporal {
+                    let q = crate::refmvs::quantize_mv(blk_mv);
+                    unsafe {
+                        t_src.mv.mv[0] = q;
+                        t_src.mv.mv[1] = q;
+                        t_src.r#ref.r[0] = refs[0];
+                        t_src.r#ref.r[1] = refs[0];
+                        if q.n == crate::refmvs::INVALID_TRAJ {
+                            t_src.r#ref.pair = -1;
+                        }
+                    }
+                    let t_stride = recon.rf.rp_stride;
+                    let t_off = (by >> 1) as isize * t_stride + (bx >> 1) as isize;
+                    crate::refmvs::splat_mv(
+                        &mut recon.rt.r[s_off..],
+                        &mut s_src,
+                        Some(&mut recon.cur_mvs[t_off as usize..]),
+                        t_stride,
+                        &t_src,
+                        bw4,
+                        bh4,
+                    );
+                } else {
+                    crate::refmvs::splat_mv(
+                        &mut recon.rt.r[s_off..],
+                        &mut s_src,
+                        None,
+                        0,
+                        &t_src,
+                        bw4,
+                        bh4,
+                    );
+                }
+            }
+        }
+    }
+
     // ---- Reconstruction leaf (intra 8bpc) ----------------------------------
     // Mirrors the luma path of `dav2d_recon_b` (recon_tmpl.c:3292-3478) plus
     // `recon_b_luma_tx` (recon_tmpl.c:2443-2675), followed by the chroma path
@@ -9440,6 +9666,9 @@ mod tests {
             };
             let __seqh = crate::headers::SequenceHeader::default();
             let __frmh = crate::headers::FrameHeader::default();
+            let mut __cur_mvs: Vec<crate::refmvs::TemporalBlock> = Vec::new();
+            let __refp: [Option<std::sync::Arc<crate::picture::Picture>>; 7] = Default::default();
+            let __svc = [[crate::internal::ScalableMotionParams::default(); 2]; 7];
             let mut $recon = ReconCtx {
                 dst_y: &mut __ty,
                 dst_u: &mut __tu,
@@ -9463,6 +9692,9 @@ mod tests {
                 prev_ccsomap: [None, None, None],
                 rt: &mut __rmt,
                 rf: &__rmf,
+                cur_mvs: &mut __cur_mvs,
+                refp: &__refp,
+                svc: &__svc,
                 seq_hdr: &__seqh,
                 frm_hdr: &__frmh,
             };

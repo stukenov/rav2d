@@ -2328,12 +2328,13 @@ pub fn refmvs_find(
         debug_assert!((ref0 as usize) < TIP_FRAME && ref1 == -1);
         let sz = rt.warp.size[ref0 as usize] as usize;
         let idx = rt.warp.idx[ref0 as usize] as usize;
-        let start = sz + idx - 1;
+        // C uses unsigned wraparound; `start` is only consumed when sz > 0.
+        let start = (sz + idx).wrapping_sub(1);
         for n in 0..sz {
             if *warp_cnt >= 4 {
                 break;
             }
-            let widx = (start - n) & 3;
+            let widx = start.wrapping_sub(n) & 3;
             let mat = &rt.warp.mat[ref0 as usize][widx];
             let wc = *warp_cnt as usize;
             warp_out[wc][..6].copy_from_slice(mat);
