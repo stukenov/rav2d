@@ -3615,7 +3615,8 @@ fn decode_b(
                 b.data.intra.uv_angle = uv_angle;
             }
         } else {
-            let ll = fi.any_lossless;
+            // Per-segment lossless (decode.c:2166), not the frame-wide flag.
+            let ll = fi.seg_lossless[b.seg_id as usize] != 0;
             let mhccp_allowed = fi.mhccp
                 && imax(cbw4, cbh4) <= if ll { 1 } else { 8 }
                 && cbw4 * cbh4 >= if ll { 1 } else { 2 };
