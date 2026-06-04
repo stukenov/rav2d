@@ -1443,8 +1443,16 @@ pub const LR_RESTORE_Y: i32 = 1 << 0;
 pub const LR_RESTORE_U: i32 = 1 << 1;
 pub const LR_RESTORE_V: i32 = 1 << 2;
 
+pub const INLOOPFILTER_DEBLOCK: u32 = 1 << 0;
+pub const INLOOPFILTER_CDEF: u32 = 1 << 1;
+pub const INLOOPFILTER_CCSO: u32 = 1 << 2;
 pub const INLOOPFILTER_WIENER: u32 = 1 << 3;
 pub const INLOOPFILTER_GDF: u32 = 1 << 4;
+pub const INLOOPFILTER_ALL: u32 = INLOOPFILTER_DEBLOCK
+    | INLOOPFILTER_CDEF
+    | INLOOPFILTER_CCSO
+    | INLOOPFILTER_WIENER
+    | INLOOPFILTER_GDF;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

@@ -233,6 +233,12 @@ pub struct FrameContext {
     pub frame_thread: FrameThread,
     pub lf: LoopFilterState,
 
+    /// In-loop filter flag word (DAV2D_INLOOPFILTER_* bits) threaded from the
+    /// decoder's `Settings.inloop_filters`. Defaults to 0 (filters off) so any
+    /// path constructing a `FrameContext` directly keeps pre-filter behaviour;
+    /// `submit_frame` sets it from the configured filters.
+    pub inloop_filters: u32,
+
     /// Output picture buffer that reconstruction writes into (the pixel planes
     /// that `cur` only describes as metadata).
     pub cur_pic: crate::picture::Picture,
@@ -329,6 +335,11 @@ pub struct DecoderContext {
     pub strict_std_compliance: bool,
     pub output_invisible_frames: bool,
     pub n_passes: i32,
+
+    /// In-loop filter flag word (DAV2D_INLOOPFILTER_* bits) from the configured
+    /// `Settings.inloop_filters`. Threaded onto each `FrameContext` in
+    /// `submit_frame` so the per-superblock-row filter pass can gate each stage.
+    pub inloop_filters: u32,
 
     /// Bring-up gate: run the single-threaded frame decode from `parse_obus`.
     /// Off by default while reconstruction and the entropy-path bugs are being

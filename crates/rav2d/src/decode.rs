@@ -2770,6 +2770,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     fc.dsp = c.dsp.clone();
     fc.tile = std::mem::take(&mut c.tile);
     fc.n_tile_data = c.n_tile_data;
+    fc.inloop_filters = c.inloop_filters;
 
     // Allocate the output picture that reconstruction writes into. During
     // bring-up we use the default allocator; the decoder's configured allocator

@@ -30,6 +30,16 @@ pub enum InloopFilterType {
     All = 31,
 }
 
+impl InloopFilterType {
+    /// Raw in-loop-filter bit word matching dav2d.h's DAV2D_INLOOPFILTER_*
+    /// (DEBLOCK=1<<0, CDEF=1<<1, CCSO=1<<2, WIENER=1<<3, GDF=1<<4). The enum's
+    /// numeric repr already matches these C bits; bit 2 is published as
+    /// `Restoration` but semantically means CCSO per dav2d.h.
+    pub(crate) fn to_flags(self) -> u32 {
+        self as u8 as u32
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 /// Which frame types to decode.
@@ -247,6 +257,7 @@ impl Decoder {
             strict_std_compliance: s.strict_std_compliance,
             output_invisible_frames: s.output_invisible_frames,
             n_passes: 1,
+            inloop_filters: s.inloop_filters.to_flags(),
             run_decode: s.run_decode,
             frame_out: None,
         };
