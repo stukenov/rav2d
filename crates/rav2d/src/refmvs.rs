@@ -2200,7 +2200,9 @@ pub fn refmvs_find(
         };
         let sz = rt.bank.size[c] as usize;
         let idx = rt.bank.idx[c] as usize;
-        let start = sz + idx - 1;
+        // `start` is only used inside the `0..sz` loop (skipped when sz==0); use
+        // wrapping arithmetic to mirror the C unsigned wraparound when sz==idx==0.
+        let start = (sz + idx).wrapping_sub(1);
         let comp_idx = if comp { 1 } else { 0 };
         'bank: for n in 0..sz {
             if *cnt >= lim {

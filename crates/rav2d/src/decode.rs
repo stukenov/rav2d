@@ -2064,6 +2064,15 @@ pub struct ReconCtx<'a, 'f> {
     pub cur_ccsomap: &'a mut [u8],
     /// Previous-frame CCSO maps (`f->prev_ccsomap`); `None` per plane if absent.
     pub prev_ccsomap: [Option<&'a [u8]>; 3],
+    /// Per-tile reference-MV state (`t->rt`): spatial `r` grid + above-row `ra` +
+    /// MV/warp banks. Maintained via splat for every block so IntraBC block
+    /// vectors can be predicted from neighbours (decode.c `recon_b`).
+    pub rt: &'a mut crate::refmvs::Tile,
+    /// Frame-level reference-MV state (`f->rf`): iw4/ih4/sbsz + header refs.
+    pub rf: &'a crate::refmvs::Frame,
+    /// Sequence/frame headers needed by `refmvs_find` for IntraBC candidates.
+    pub seq_hdr: &'a crate::headers::SequenceHeader,
+    pub frm_hdr: &'a crate::headers::FrameHeader,
 }
 
 /// Decode one superblock row of a tile (entropy/parse pass).
@@ -2100,6 +2109,10 @@ pub fn decode_tile_sbrow_entropy(
     sb256w: i32,
     root_bs: BlockSize,
     c_root_bs: BlockSize,
+    rt: &mut crate::refmvs::Tile,
+    rf: &crate::refmvs::Frame,
+    seq_hdr: &crate::headers::SequenceHeader,
+    frm_hdr: &crate::headers::FrameHeader,
 ) -> Result<(), ()> {
     let sb_step = fi.sb_step;
     let sb256y = by >> 6;
@@ -2124,6 +2137,24 @@ pub fn decode_tile_sbrow_entropy(
     // active dq must be re-derived when the qindex changes.
     let mut sb_seg_err = false;
 
+    // Reference-MV per-superblock-row init (decode.c:4456). Sets up the above-row
+    // `ra` slice and tile bounds; needed for IntraBC block-vector prediction.
+    // Only maintained when IntraBC is allowed (otherwise `rf` is uninitialised).
+    let refmvs_active = fi.allow_intrabc;
+    if refmvs_active {
+        crate::refmvs::tile_sbrow_init(
+            rt,
+            rf,
+            col_start,
+            col_end,
+            row_start,
+            row_end,
+            by >> 6,
+            tile_row,
+        );
+    }
+    let is_key_or_intra = frame_hdr.is_key_or_intra();
+
     let mut bx = col_start;
     while bx < col_end {
         let a_idx = (tile_row * sb256w + (bx >> 6)) as usize;
@@ -2132,6 +2163,23 @@ pub fn decode_tile_sbrow_entropy(
         // Reset is_coded for this superblock (luma + chroma rows).
         for row in recon_scratch.is_coded.iter_mut() {
             row.fill(0);
+        }
+
+        // Reset the reference-MV `r` grid for this superblock (decode.c
+        // reset_context path); marks all 4x4 units intra (invalid mv) so that
+        // not-yet-decoded neighbours are skipped by refmvs_find.
+        if refmvs_active {
+            let ra_snapshot = rt.ra.clone();
+            crate::refmvs::reset_sb(
+                rt,
+                &ra_snapshot,
+                sb_step,
+                seq_hdr.refmv_bank,
+                is_key_or_intra,
+                frm_hdr.tip.frame_mode,
+                by,
+                bx,
+            );
         }
 
         // Reset CDEF indices for this superblock's coverage in the lf mask.
@@ -2262,6 +2310,10 @@ pub fn decode_tile_sbrow_entropy(
                 prev_ccsomap[1],
                 prev_ccsomap[2],
             ],
+            rt: &mut *rt,
+            rf,
+            seq_hdr,
+            frm_hdr,
         };
 
         decode_sb(
@@ -2294,6 +2346,26 @@ pub fn decode_tile_sbrow_entropy(
         sb_seg_err |= recon.seg_id_err;
 
         bx += sb_step;
+    }
+
+    // Save the bottom row of this SB row into the above-row `ra` buffer for the
+    // next SB row's neighbour access (decode.c:4511 `dav2d_refmvs_save_tmvs`,
+    // single-thread `ra` portion).
+    if refmvs_active {
+        let crate::refmvs::Tile { r, ra, ra_tl, ra_off, .. } = &mut *rt;
+        let col_start8 = col_start >> 1;
+        let col_end8 = (col_end + 1) >> 1;
+        crate::refmvs::save_tmvs(
+            r,
+            &mut ra[*ra_off..],
+            ra_tl,
+            col_start8,
+            col_end8,
+            row_start >> 1,
+            (by + sb_step) >> 1,
+            rf.ih8,
+            rf.iw8,
+        );
     }
 
     // Write back the running per-tile delta-q state.
@@ -2353,6 +2425,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         prev_ccsomap,
         b4_stride,
         sb256h,
+        rf,
         ..
     } = fc;
     let fc_sb256h = *sb256h;
@@ -2472,6 +2545,53 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
 
     let mut l = BlockContext::default();
 
+    // Initialise the reference-MV frame state (`f->rf`) and a per-tile working
+    // Tile. Only the spatial grid / above-row / banks are needed for IntraBC on
+    // an intra frame; temporal candidates are unused (no ref frames).
+    let allow_intrabc = frame_hdr.allow_intrabc != 0;
+    if allow_intrabc {
+        let no_refs: [Option<Vec<refmvs::TemporalBlock>>; 7] = Default::default();
+        refmvs::init_frame(
+            rf,
+            seq_hdr,
+            frame_hdr,
+            &[0u8; 7],
+            &[[0u8; 7]; 7],
+            &[0u8; 7],
+            &no_refs,
+            false,
+            false,
+        );
+    }
+    let rf_ref: &refmvs::Frame = &*rf;
+    let mut rt = refmvs::Tile {
+        rp_proj: Vec::new(),
+        rp_proj_off: 0,
+        rp_traj_off: 0,
+        ra: vec![refmvs::Block::default(); rf_ref.rp_stride.max(1) as usize],
+        ra_off: 0,
+        ra_tl: refmvs::Block::default(),
+        r: vec![refmvs::Block::default(); 64 * 128],
+        tile_col: refmvs::TileRange { start: 0, end: bw },
+        tile_row: refmvs::TileRange { start: 0, end: bh },
+        bank: refmvs::MvBank {
+            mv: [[[Mv::default(); 2]; 4]; 9],
+            cwp_idx: [[0; 4]; 3],
+            r#ref: [RefPair::default(); 4],
+            size: [0; 9],
+            idx: [0; 9],
+            hits: [0; 2],
+            avail: 0,
+        },
+        warp: refmvs::WarpBank {
+            mat: [[[0; 6]; 4]; 7],
+            warp_type: [[0; 4]; 7],
+            hits: 0,
+            size: [0; 7],
+            idx: [0; 7],
+        },
+    };
+
     for tr in 0..rows {
         for tc in 0..cols {
             let ts_idx = (tr * cols + tc) as usize;
@@ -2531,6 +2651,10 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     sb256w,
                     root_bs,
                     c_root_bs,
+                    &mut rt,
+                    rf_ref,
+                    seq_hdr,
+                    frame_hdr,
                 )?;
                 by += sb_step;
             }
@@ -5042,6 +5166,129 @@ fn decode_b(
         for _ in 0..bh4u {
             recon.cur_segmap[off..off + bw4u].fill(seg_id);
             off = (off as isize + stride) as usize;
+        }
+    }
+
+    // ---- Reference-MV resolution + splat (decode.c:972-1326) ---------------
+    // For IntraBC blocks: resolve the block vector by adding the parsed residual
+    // to the DRL-selected predictor from the spatial refmvs candidate list, then
+    // splat the final BV into the refmvs grid. For intra (non-IntraBC) blocks:
+    // splat an "intra" entry (invalid mv) so later IntraBC blocks skip them.
+    if fi.allow_intrabc && has_luma && b.is_intra != 0 {
+        let by4r = (by & 63) as usize;
+        if intrabc {
+            use crate::levels::{Mv, MvXY, RefPair};
+            let mut mvstack = [crate::refmvs::Candidate::default(); 6];
+            let mut n_mvs = 0i32;
+            let mut warp_cnt = 0i32;
+            crate::refmvs::refmvs_find(
+                recon.rt,
+                recon.rf,
+                &[],
+                &Default::default(),
+                &mut mvstack,
+                None,
+                &mut n_mvs,
+                &mut warp_cnt,
+                RefPair { pair: -1 },
+                bs as u8,
+                false,
+                by,
+                bx,
+                recon.seq_hdr,
+                recon.frm_hdr,
+            );
+            let diff = unsafe { b.data.intra.intrabc_mv };
+            let drl = unsafe { b.data.inter.drl_idx[0] } as usize;
+            let mut mv = mvstack[drl].mv[0];
+            if unsafe { mv.n } == 0 {
+                // Force the refmv to a nonzero value (decode.c:990-998).
+                let sbsz = 64 << fi.sb128;
+                if by - fi.sb_step < fi.tile_row_start {
+                    unsafe { mv.c.x = -(8 * (sbsz + 256)) };
+                } else {
+                    unsafe { mv.c.y = -(8 * sbsz) };
+                }
+            }
+            if unsafe { b.data.intra.is_refmv } == 0 {
+                if unsafe { b.data.intra.is_qpel } == 0 {
+                    crate::env::fix_int_mv_precision(unsafe { &mut mv.c });
+                }
+                unsafe {
+                    mv.c.x += diff.c.x;
+                    mv.c.y += diff.c.y;
+                }
+            }
+            unsafe { b.data.intra.intrabc_mv = mv };
+            if std::env::var("RAV2D_IBC2").is_ok() {
+                eprintln!("RIBCMV y={} x={} mvy={} mvx={} drl={} nmvs={}",
+                    by, bx, unsafe { mv.c.y }, unsafe { mv.c.x }, drl, n_mvs);
+            }
+            // splat_intrabc_mv (decode.c:599-625).
+            let mut s_src = crate::refmvs::Block {
+                mv: [mv, Mv { c: MvXY { y: crate::levels::INVALID_MV, x: 0 } }],
+                r#ref: RefPair { pair: -1 },
+                bs: bs as u8,
+                mf: 0,
+                ..Default::default()
+            };
+            let s_off = by4r * 128 + (bx & 127) as usize;
+            let t_src = crate::refmvs::TemporalBlock::default();
+            crate::refmvs::splat_mv(
+                &mut recon.rt.r[s_off..],
+                &mut s_src,
+                None,
+                0,
+                &t_src,
+                bw4,
+                bh4,
+            );
+            if recon.seq_hdr.refmv_bank {
+                b.ref_pair = RefPair { pair: -1 };
+                crate::refmvs::bank_add(
+                    &mut recon.rt.bank,
+                    bs,
+                    by,
+                    bx,
+                    fi.sb_step,
+                    fi.sb128 != 0,
+                    &b,
+                );
+            }
+        } else {
+            // splat_intraref (decode.c:712-737): invalid mv, ref=-1.
+            use crate::levels::{Mv, MvXY, RefPair};
+            let mut s_src = crate::refmvs::Block {
+                mv: [
+                    Mv { c: MvXY { y: crate::levels::INVALID_MV, x: 0 } },
+                    Mv { c: MvXY { y: crate::levels::INVALID_MV, x: 0 } },
+                ],
+                r#ref: RefPair { pair: -1 },
+                bs: bs as u8,
+                mf: 0,
+                ..Default::default()
+            };
+            let s_off = by4r * 128 + (bx & 127) as usize;
+            let t_src = crate::refmvs::TemporalBlock::default();
+            crate::refmvs::splat_mv(
+                &mut recon.rt.r[s_off..],
+                &mut s_src,
+                None,
+                0,
+                &t_src,
+                bw4,
+                bh4,
+            );
+            if recon.seq_hdr.refmv_bank {
+                crate::refmvs::bank_update(
+                    &mut recon.rt.bank,
+                    bs,
+                    by,
+                    bx,
+                    fi.sb_step,
+                    fi.sb128 != 0,
+                );
+            }
         }
     }
 
