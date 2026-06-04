@@ -348,6 +348,12 @@ impl<'a> MsacContext<'a> {
         }
     }
 
+    /// Current internal bit count. Used to detect symbol-decoder overread
+    /// (`cnt <= -15` after decoding a tile superblock row).
+    pub fn cnt(&self) -> i32 {
+        self.cnt
+    }
+
     pub fn check_trailing_bits(&self) -> bool {
         let n_bits = -(self.cnt + 14);
         debug_assert!(n_bits <= 0);

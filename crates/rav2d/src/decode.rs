@@ -1830,6 +1830,280 @@ impl SbFrameInfo {
     }
 }
 
+/// Decode one superblock row of a tile (entropy/parse pass).
+///
+/// Port of the entropy branch of `dav2d_decode_tile_sbrow` (decode.c:4516-4642)
+/// for the single-pass, single-thread case. Reads per-superblock restoration
+/// info and CDEF index reset, then drives `decode_sb` across the row.
+///
+/// NOTE: the inter/IntraBC `refmvs` reset/save hooks (PASS_MVRES) are not yet
+/// wired here — that lands with inter-frame support (M3). Intra/key frames take
+/// none of those paths.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_tile_sbrow_entropy(
+    fi: &SbFrameInfo,
+    frame_hdr: &FrameHeader,
+    ts: &mut crate::internal::TileState,
+    msac: &mut MsacContext,
+    a_arr: &mut [BlockContext],
+    lf_mask: &mut [crate::lf_mask::Av2Filter],
+    lr_mask: &mut [crate::lf_mask::Av2Restoration],
+    l: &mut BlockContext,
+    part_w: &mut Vec<u8>,
+    part_r: &[u8],
+    by: i32,
+    sb256w: i32,
+    root_bs: BlockSize,
+    c_root_bs: BlockSize,
+) -> Result<(), ()> {
+    let sb_step = fi.sb_step;
+    let sb256y = by >> 6;
+    let tile_row = ts.tiling.row;
+    let col_start = ts.tiling.col_start;
+    let col_end = ts.tiling.col_end;
+    let row_start = ts.tiling.row_start;
+    let row_end = ts.tiling.row_end;
+
+    let mut bx = col_start;
+    while bx < col_end {
+        let a_idx = (tile_row * sb256w + (bx >> 6)) as usize;
+        let lf_idx = ((bx >> 6) + sb256y * sb256w) as usize;
+
+        // Reset CDEF indices for this superblock's coverage in the lf mask.
+        match root_bs {
+            BlockSize::Bs64x64 => {
+                let idx = (((bx & 0x30) >> 4) + ((by & 0x30) >> 2)) as usize;
+                lf_mask[lf_idx].cdef_idx[idx] = -1;
+            }
+            BlockSize::Bs128x128 => {
+                let idx = (((bx & 32) >> 4) + ((by & 32) >> 2)) as usize;
+                lf_mask[lf_idx].cdef_idx[idx] = -1;
+                lf_mask[lf_idx].cdef_idx[idx + 1] = -1;
+                lf_mask[lf_idx].cdef_idx[idx + 4] = -1;
+                lf_mask[lf_idx].cdef_idx[idx + 5] = -1;
+            }
+            BlockSize::Bs256x256 => {
+                for k in 0..16 {
+                    lf_mask[lf_idx].cdef_idx[k] = -1;
+                }
+            }
+            _ => {}
+        }
+
+        // Per-plane loop-restoration unit info.
+        let sbsz = sb_step * 4;
+        for p in 0..3 {
+            let (ss_ver, ss_hor) = if p == 0 { (0, 0) } else { (fi.ss_ver, fi.ss_hor) };
+            let rtype_u8 = frame_hdr.restoration.p[p].restoration_type;
+            if rtype_u8 == RestorationType::None as u8 {
+                continue;
+            }
+            let tx = (4 * (bx - col_start)) >> ss_hor;
+            let ty = (4 * (by - row_start)) >> ss_ver;
+            let unit_sz_log2 = frame_hdr.restoration.unit_size[(p != 0) as usize] as i32;
+            let unit_sz = 1i32 << unit_sz_log2;
+            let mask = unit_sz - 1;
+            if (tx | ty) & mask != 0 {
+                continue;
+            }
+            let tw = (col_end * 4) >> ss_hor;
+            let th = (row_end * 4) >> ss_ver;
+            let half_unit = unit_sz >> 1;
+            let fx = (4 * bx) >> ss_hor;
+            let fy = (by * 4) >> ss_ver;
+            if (ty != 0 && fy + half_unit > th) || (tx != 0 && fx + half_unit > tw) {
+                continue;
+            }
+
+            let frame_type = match rtype_u8 {
+                1 => RestorationType::PcWiener,
+                2 => RestorationType::NsWiener,
+                3 => RestorationType::Switchable,
+                _ => RestorationType::None,
+            };
+
+            let sbw = sbsz >> ss_hor;
+            let sbh = sbsz >> ss_ver;
+            let lruw = imax(1, imin(tw - fx + half_unit, sbw) >> unit_sz_log2);
+            let lruh = imax(1, imin(th - fy + half_unit, sbh) >> unit_sz_log2);
+            let vsh = unit_sz_log2 - 7 + ss_ver;
+            let hsh = unit_sz_log2 - 7 + ss_hor;
+            let mut sb_idx = (by >> 6) * sb256w + (bx >> 6);
+            let start_unit_idx = (((by & 0x30) >> 2) + ((bx & 0x30) >> 4)) as usize;
+
+            for _y in 0..lruh {
+                for x in 0..lruw {
+                    let unit_idx = start_unit_idx;
+                    let lr_slot = (sb_idx + (x << hsh)) as usize;
+                    let ns_plane = &frame_hdr.restoration.p[p].ns;
+                    read_restoration_info(
+                        msac,
+                        &mut ts.cdf.m,
+                        &mut ts.ns_wiener_bank[p],
+                        &mut lr_mask[lr_slot].lr[p][unit_idx],
+                        p,
+                        frame_type,
+                        ns_plane,
+                    );
+                }
+                sb_idx += sb256w << vsh;
+            }
+        }
+
+        let mut dir = 0i32;
+        let mut sdp_cfl_disallowed = 0i32;
+        let mut intra_region = 0i32;
+        let mut bx_m = bx;
+        let mut by_m = by;
+        let mut cbx = bx;
+        let mut cby = by;
+        let mut part_w_idx = 0usize;
+        let mut part_r_idx = 0usize;
+
+        decode_sb(
+            fi,
+            &mut bx_m,
+            &mut by_m,
+            &mut cbx,
+            &mut cby,
+            &mut intra_region,
+            &mut sdp_cfl_disallowed,
+            Pass::Entropy as u8,
+            &mut a_arr[a_idx],
+            l,
+            msac,
+            &mut ts.cdf.m,
+            &mut ts.cdf.dmv,
+            part_w,
+            &mut part_w_idx,
+            part_r,
+            &mut part_r_idx,
+            root_bs,
+            c_root_bs,
+            &mut dir,
+        )?;
+
+        bx += sb_step;
+    }
+
+    // Error out on symbol-decoder overread.
+    if msac.cnt() <= -15 {
+        return Err(());
+    }
+
+    Ok(())
+}
+
+/// Run the single-threaded tile/superblock-row decode loop over a frame.
+///
+/// Port of `dav2d_decode_frame_main` (decode.c:5130) for the n_tc == 1 case.
+/// Tiles are decoded sequentially (entropy/recon are tile-independent); the
+/// per-superblock-row post-filter interleaving that the C version performs is
+/// handled separately by the filter pass (M2).
+pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) -> Result<(), ()> {
+    let crate::internal::FrameContext {
+        seq_hdr,
+        frame_hdr,
+        a,
+        ts,
+        lf,
+        sb256w,
+        sb_step,
+        root_bs,
+        bw,
+        bh,
+        refdir,
+        refdist,
+        absrefdist,
+        skip_mode_refs,
+        ..
+    } = fc;
+
+    let seq_hdr = &**seq_hdr;
+    let frame_hdr = &**frame_hdr;
+    let root_bs = *root_bs;
+    let sb256w = *sb256w;
+    let sb_step = *sb_step;
+    let bw = *bw;
+    let bh = *bh;
+    let refdir = *refdir;
+    let skip_mode_refs = *skip_mode_refs;
+
+    let c_root_bs = if seq_hdr.layout == crate::headers::PixelLayout::I400 {
+        BlockSize::Invalid
+    } else {
+        root_bs
+    };
+    let cols = frame_hdr.tiling.t.cols as i32;
+    let rows = frame_hdr.tiling.t.rows as i32;
+    let keyframe = frame_hdr.is_key_or_intra();
+    let is_tip = frame_hdr.tip.frame_mode == 2;
+    let disable_cdf = frame_hdr.disable_cdf_update != 0;
+
+    let mut l = BlockContext::default();
+
+    for tr in 0..rows {
+        for tc in 0..cols {
+            let ts_idx = (tr * cols + tc) as usize;
+            let (cs, ce, rs, re) = {
+                let t = &ts[ts_idx].tiling;
+                (t.col_start, t.col_end, t.row_start, t.row_end)
+            };
+            let fi = SbFrameInfo::from_frame(
+                seq_hdr,
+                frame_hdr,
+                bw,
+                bh,
+                root_bs,
+                sb_step,
+                n_passes,
+                refdir,
+                refdist,
+                absrefdist,
+                skip_mode_refs,
+                cs,
+                ce,
+                rs,
+                re,
+            );
+
+            // MSAC borrows the tile data; move it into a local so the tile's
+            // CDF state remains independently mutable during decode.
+            let buf = std::mem::take(&mut ts[ts_idx].msac_buf);
+            let mut msac = MsacContext::new(&buf, disable_cdf);
+            let mut part_w: Vec<u8> = Vec::new();
+            let part_r: Vec<u8> = Vec::new();
+
+            let mut by = rs;
+            while by < re {
+                reset_context(&mut l, keyframe, is_tip);
+                decode_tile_sbrow_entropy(
+                    &fi,
+                    frame_hdr,
+                    &mut ts[ts_idx],
+                    &mut msac,
+                    a,
+                    &mut lf.mask,
+                    &mut lf.lr_mask,
+                    &mut l,
+                    &mut part_w,
+                    &part_r,
+                    by,
+                    sb256w,
+                    root_bs,
+                    c_root_bs,
+                )?;
+                by += sb_step;
+            }
+
+            drop(msac);
+            ts[ts_idx].msac_buf = buf;
+        }
+    }
+
+    Ok(())
+}
+
 fn get_snglref_ctx(
     a: &BlockContext,
     l: &BlockContext,
