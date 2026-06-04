@@ -2197,6 +2197,18 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let is_tip = frame_hdr.tip.frame_mode == 2;
     let disable_cdf = frame_hdr.disable_cdf_update != 0;
 
+    // Reset the above (a) context array for the whole frame. dav2d does this
+    // unconditionally for the single-threaded path (decode.c:5172-5174); the
+    // multi-threaded reset lives in decode_frame_init. Without this, the above
+    // neighbour `midx`/mode arrays retain default 0 instead of the 0xff "no
+    // neighbour" sentinel, corrupting intra-mode context derivation.
+    {
+        let n_a = (sb256w * rows) as usize;
+        for ctx in a.iter_mut().take(n_a) {
+            reset_context(ctx, keyframe, is_tip);
+        }
+    }
+
     let mut l = BlockContext::default();
 
     for tr in 0..rows {

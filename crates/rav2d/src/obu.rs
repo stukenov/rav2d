@@ -554,9 +554,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     }
 
     if !hdr.reduced_still_picture_header {
-        hdr.opfl_refine = gb.get_bit() != 0;
-        let _opfl_bits = gb.get_bits(2) as u8;
-        // opfl_refine is 2 bits in C, but we stored first bit above — fix:
+        hdr.opfl_refine = gb.get_bits(2) != 0;
         hdr.refine_mv = gb.get_bit() != 0;
         if hdr.tip && (hdr.opfl_refine || hdr.refine_mv) {
             hdr.tip_refine_mv = gb.get_bit() != 0;

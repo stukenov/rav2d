@@ -289,9 +289,7 @@ fn dav2d_reference_decodes_keyframe_clip() {
 
 /// M1 gate: frame-0 LUMA must match the dav2d reference (in-loop filters off,
 /// so pure reconstruction). Chroma + later frames + filters are follow-ups.
-/// ACTIVE DEBUG TARGET: intra-luma recon runs but is not yet bit-exact.
 #[test]
-#[ignore = "M1 debug target: intra-luma recon not yet bit-exact"]
 fn bit_exact_keyframe_luma() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
     if !path.exists() {

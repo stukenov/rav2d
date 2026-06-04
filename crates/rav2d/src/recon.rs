@@ -993,15 +993,6 @@ pub fn decode_coefs(
                         txtp::ADST_ADST,
                         txtp::ADST_DCT,
                         txtp::DCT_ADST,
-                        txtp::DCT_FLIPADST,
-                        txtp::FLIPADST_FLIPADST,
-                        txtp::ADST_FLIPADST,
-                    ],
-                    [
-                        txtp::DCT_DCT,
-                        txtp::ADST_ADST,
-                        txtp::ADST_DCT,
-                        txtp::DCT_ADST,
                         txtp::FLIPADST_FLIPADST,
                         txtp::ADST_FLIPADST,
                         txtp::FLIPADST_ADST,
@@ -1012,6 +1003,15 @@ pub fn decode_coefs(
                         txtp::ADST_DCT,
                         txtp::DCT_ADST,
                         txtp::FLIPADST_DCT,
+                        txtp::ADST_FLIPADST,
+                        txtp::FLIPADST_ADST,
+                    ],
+                    [
+                        txtp::DCT_DCT,
+                        txtp::ADST_ADST,
+                        txtp::ADST_DCT,
+                        txtp::DCT_ADST,
+                        txtp::DCT_FLIPADST,
                         txtp::ADST_FLIPADST,
                         txtp::FLIPADST_ADST,
                     ],
@@ -1647,6 +1647,9 @@ pub fn decode_coefs(
             }};
         }
 
+        // tx_class values follow the dav2d enum: 0=2D, 1=2D_INV, 2=H, 3=V
+        // (recon_tmpl.c:990-1022, which dispatches on 2D/H/V; 2D_INV is not
+        // reached here). The class!() macro arg mirrors that scan orientation.
         match tx_class {
             0 => {
                 let stride = (4 << slh) as usize;
@@ -1656,7 +1659,7 @@ pub fn decode_coefs(
                 let hi_to_low = if chroma { 1i32 } else { 10 };
                 decode_coefs_class!(0, stride, shift, 0, mask, hi_to_low, xy_2d);
             }
-            1 => {
+            2 => {
                 let stride = 32usize;
                 let shift = slh + 2;
                 let mask = (4 << slh) - 1;
@@ -1664,7 +1667,7 @@ pub fn decode_coefs(
                 let hi_to_low = (8 << slh) >> chroma as usize;
                 decode_coefs_class!(1, stride, shift, 0, mask, hi_to_low, xy_h);
             }
-            2 => {
+            3 => {
                 let stride = 32usize;
                 let shift = slw + 2;
                 let shift2 = slh + 2;

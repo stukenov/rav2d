@@ -684,10 +684,11 @@ pub fn ipred_z1(
         filt[1..1 + sz].copy_from_slice(&tl[o..o + sz]);
     }
     filt[0] = filt[1];
+    // C: `filt[sz + 2] = filt[sz + 1] = filt[sz]` (right-associative), so both
+    // sz+1 and sz+2 take filt[sz]. The assignment order matters: set sz+1 from
+    // sz first, then propagate into sz+2 (ipred_tmpl.c:549).
+    filt[sz + 1] = filt[sz];
     filt[sz + 2] = filt[sz + 1];
-    if sz + 1 < filt.len() {
-        filt[sz + 1] = filt[sz];
-    }
 
     let mut ypos = dx * (1 + mrl_idx as i32);
     for y in 0..height {
