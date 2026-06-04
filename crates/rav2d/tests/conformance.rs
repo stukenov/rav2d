@@ -483,3 +483,38 @@ fn trace_clip() {
         let _ = rav2d_decode(&path);
     }
 }
+
+/// Debug helper: print the bounding box / first coordinates of per-plane diffs
+/// for frame 0 of CLIP (rav2d vs dav2d).
+#[test]
+#[ignore = "debug diff-location harness"]
+fn diff_loc() {
+    let clip = std::env::var("CLIP").unwrap();
+    let path = media(&clip);
+    let r = dav2d_decode(&path);
+    let g = rav2d_decode(&path);
+    let (r, g) = (&r[0], &g[0]);
+    for pl in 0..3 {
+        let (ssh, ssv) = ss(r.layout);
+        let pw = if pl == 0 { r.w } else { (r.w + ssh) >> ssh } as usize;
+        let mut coords = Vec::new();
+        for (i, (a, b)) in r.planes[pl].iter().zip(g.planes[pl].iter()).enumerate() {
+            if a != b {
+                coords.push((i % pw, i / pw, *a, *b));
+            }
+        }
+        if coords.is_empty() {
+            eprintln!("plane {pl}: EXACT");
+        } else {
+            let minx = coords.iter().map(|c| c.0).min().unwrap();
+            let maxx = coords.iter().map(|c| c.0).max().unwrap();
+            let miny = coords.iter().map(|c| c.1).min().unwrap();
+            let maxy = coords.iter().map(|c| c.1).max().unwrap();
+            eprintln!(
+                "plane {pl}: {} diffs, bbox x[{minx}..{maxx}] y[{miny}..{maxy}], first 6: {:?}",
+                coords.len(),
+                &coords[..coords.len().min(6)]
+            );
+        }
+    }
+}

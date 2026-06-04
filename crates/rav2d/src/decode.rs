@@ -1735,6 +1735,7 @@ pub fn extend_warpmv(
     };
 }
 
+#[derive(Default)]
 pub struct SbFrameInfo {
     pub bw: i32,
     pub bh: i32,
@@ -9524,6 +9525,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, false);
@@ -9634,6 +9636,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 128,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0xFF; 256];
         let mut msac = MsacContext::new(&data, false);
@@ -9746,6 +9749,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
@@ -9843,6 +9847,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         // All 0xFF data → MSAC will decode 1s for all bool_adapt calls
         let data = vec![0x00; 128];
@@ -9940,6 +9945,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
@@ -10035,6 +10041,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
@@ -10132,6 +10139,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0xAA; 256];
         let mut msac = MsacContext::new(&data, true);
@@ -10231,6 +10239,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0x55; 256];
         let mut msac = MsacContext::new(&data, true);
@@ -10331,6 +10340,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0xAA; 256];
         let mut msac = MsacContext::new(&data, true);
@@ -10399,6 +10409,7 @@ mod tests {
             skip_mode_enabled: false,
             allow_intrabc: false,
             any_lossless: true,
+            seg_lossless: [1; crate::headers::MAX_SEGMENTS],
             has_chroma_layout: true,
             idtx_intra: false,
             mrls: false,
@@ -10436,6 +10447,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         // Feed data that makes dpcm[0]=true and dpcm[1]=true
         let data = vec![0xFF; 256];
@@ -10538,6 +10550,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0x40; 256];
         let mut msac = MsacContext::new(&data, true);
@@ -10649,6 +10662,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         let data = vec![0x80; 512];
         let mut msac = MsacContext::new(&data, true);
@@ -10763,6 +10777,7 @@ mod tests {
             tile_row_start: 0,
             tile_row_end: 64,
             sb_step: 16,
+            ..Default::default()
         };
         // 0xFF data: decode_bool_adapt tends to return 1
         let data = vec![0xFF; 512];
