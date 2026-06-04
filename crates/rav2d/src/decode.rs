@@ -6798,65 +6798,73 @@ fn recon_b_luma_tx(
         orig_y_mode
     };
 
-    // --- decode coefficients (combined pass: always decode) ----------------
+    // --- decode coefficients (combined pass) -------------------------------
     let mut txtp: u16 = 0;
     let mut res_ctx: u8 = 0;
     // Zero the tx coefficient region; decode_coefs may not fully initialise it.
     let cf_n = tw * th;
     recon.cf[..cf_n].fill(0);
 
-    let dq_seg = b.seg_id as usize;
-    let dq_tbl = recon.dq_active[dq_seg][0]; // plane 0 (luma)
-    let qm_ref: Option<&[u8]> = recon.frame.qm[tx][0].as_deref();
+    // IntraBC blocks may set skip_txfm (intra/non-IntraBC blocks force it to 0).
+    // When set, no coefficients are coded: eob=-1, txtp=DCT_DCT, stx=0, and the
+    // lcoef context is filled with 0x40 (recon_tmpl.c:2464-2472).
+    let (mut eob, stx, mut txtp) = if b.skip_txfm != 0 {
+        res_ctx = 0x40;
+        (-1i32, 0i32, crate::levels::txtp::DCT_DCT as u32)
+    } else {
+        let dq_seg = b.seg_id as usize;
+        let dq_tbl = recon.dq_active[dq_seg][0]; // plane 0 (luma)
+        let qm_ref: Option<&[u8]> = recon.frame.qm[tx][0].as_deref();
 
-    let params = crate::recon::DecodeCoefParams {
-        tx,
-        bs: b.bs as usize,
-        plane: 0,
-        intra: is_intra,
-        fsc: b.fsc != 0,
-        lossless,
-        sdp_active: false,
-        y_mode: y_mode as usize,
-        uv_mode: 0,
-        seg_id: dq_seg,
-        seq_fsc: recon.frame.seq_fsc,
-        seq_ist: recon.frame.seq_ist,
-        seq_cctx: recon.frame.seq_cctx,
-        chroma_dctonly: false,
-        reduced_txtp_set: recon.frame.reduced_txtp_set,
-        tcq_enabled: recon.frame.tcq,
-        layout: recon.frame.layout,
-        u_has_cf: 0,
-        cbx: 0,
-        cby: 0,
-        luma_fsc_map: &[],
-        dq_tbl,
-        bitdepth: recon.frame.bitdepth,
-        qm: qm_ref,
-        ss_hor: recon.frame.ss_hor != 0,
-        ss_ver: recon.frame.ss_ver != 0,
-    };
+        let params = crate::recon::DecodeCoefParams {
+            tx,
+            bs: b.bs as usize,
+            plane: 0,
+            intra: is_intra,
+            fsc: b.fsc != 0,
+            lossless,
+            sdp_active: false,
+            y_mode: y_mode as usize,
+            uv_mode: 0,
+            seg_id: dq_seg,
+            seq_fsc: recon.frame.seq_fsc,
+            seq_ist: recon.frame.seq_ist,
+            seq_cctx: recon.frame.seq_cctx,
+            chroma_dctonly: false,
+            reduced_txtp_set: recon.frame.reduced_txtp_set,
+            tcq_enabled: recon.frame.tcq,
+            layout: recon.frame.layout,
+            u_has_cf: 0,
+            cbx: 0,
+            cby: 0,
+            luma_fsc_map: &[],
+            dq_tbl,
+            bitdepth: recon.frame.bitdepth,
+            qm: qm_ref,
+            ss_hor: recon.frame.ss_hor != 0,
+            ss_ver: recon.frame.ss_ver != 0,
+        };
 
-    let mut eob = crate::recon::decode_coefs(
-        msac,
-        recon.cdf_coef,
-        cdf_m,
-        &a.lcoef[bx4..],
-        &l.lcoef[by4..],
-        &params,
-        recon.cf,
-        &mut txtp,
-        &mut res_ctx,
-    );
-    if eob == i32::MIN {
-        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
-            eprintln!("recon luma: eob==MIN bx={} by={} seg={}", bx, by, b.seg_id);
+        let eob = crate::recon::decode_coefs(
+            msac,
+            recon.cdf_coef,
+            cdf_m,
+            &a.lcoef[bx4..],
+            &l.lcoef[by4..],
+            &params,
+            recon.cf,
+            &mut txtp,
+            &mut res_ctx,
+        );
+        if eob == i32::MIN {
+            if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+                eprintln!("recon luma: eob==MIN bx={} by={} seg={}", bx, by, b.seg_id);
+            }
+            return Err(());
         }
-        return Err(());
-    }
-    let stx = (txtp >> 8) as i32;
-    let mut txtp = (txtp & 0xff) as u32;
+        let stx = (txtp >> 8) as i32;
+        (eob, stx, (txtp & 0xff) as u32)
+    };
 
     // dav2d_memset_likely_pow2 of the lcoef context (recon_tmpl.c:2497-2500).
     let aw = imin(tw4, fi.bw - bx).max(0) as usize;
