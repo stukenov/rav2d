@@ -8406,6 +8406,36 @@ mod tests {
             let mut __segmap = vec![0u8; 64 * 64];
             let mut __lf_mask: Vec<crate::lf_mask::Av2Filter> = vec![Default::default(); 4];
             let mut __ccsomap = vec![0u8; 0];
+            let __rmf = crate::refmvs::Frame::default();
+            let mut __rmt = crate::refmvs::Tile {
+                rp_proj: Vec::new(),
+                rp_proj_off: 0,
+                rp_traj_off: 0,
+                ra: vec![crate::refmvs::Block::default(); 1],
+                ra_off: 0,
+                ra_tl: crate::refmvs::Block::default(),
+                r: vec![crate::refmvs::Block::default(); 64 * 128],
+                tile_col: crate::refmvs::TileRange { start: 0, end: 64 },
+                tile_row: crate::refmvs::TileRange { start: 0, end: 64 },
+                bank: crate::refmvs::MvBank {
+                    mv: [[[crate::levels::Mv::default(); 2]; 4]; 9],
+                    cwp_idx: [[0; 4]; 3],
+                    r#ref: [crate::levels::RefPair::default(); 4],
+                    size: [0; 9],
+                    idx: [0; 9],
+                    hits: [0; 2],
+                    avail: 0,
+                },
+                warp: crate::refmvs::WarpBank {
+                    mat: [[[0; 6]; 4]; 7],
+                    warp_type: [[0; 4]; 7],
+                    hits: 0,
+                    size: [0; 7],
+                    idx: [0; 7],
+                },
+            };
+            let __seqh = crate::headers::SequenceHeader::default();
+            let __frmh = crate::headers::FrameHeader::default();
             let mut $recon = ReconCtx {
                 dst_y: &mut __ty,
                 dst_u: &mut __tu,
@@ -8427,6 +8457,10 @@ mod tests {
                 sb256w: 1,
                 cur_ccsomap: &mut __ccsomap,
                 prev_ccsomap: [None, None, None],
+                rt: &mut __rmt,
+                rf: &__rmf,
+                seq_hdr: &__seqh,
+                frm_hdr: &__frmh,
             };
         };
     }
