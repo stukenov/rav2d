@@ -5496,6 +5496,17 @@ fn recon_b_intra(
                 fi.bw * 4,
                 fi.bh * 4,
             );
+            if let Ok(e) = std::env::var("RAV2D_IBCPX") {
+                let mut it = e.split(',');
+                let ty = it.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(-1);
+                let tx = it.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(-1);
+                if ty == by && tx == bx {
+                    let stride = recon.frame.y_stride_px;
+                    let off = 4 * (by as usize * stride + bx as usize);
+                    let row: Vec<u8> = (0..(bw4 * 4).min(16) as usize).map(|i| recon.dst_y[off + i]).collect();
+                    eprintln!("RIBCPX y={} x={} row0: {}", by, bx, row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" "));
+                }
+            }
         }
         recon_b_intra_luma(recon, msac, cdf_m, a, l, b, bx, by, bx4, by4, intrabc, fi)?;
     }
