@@ -458,185 +458,375 @@ pub struct CdefApplyParams {
     pub have_chroma: bool,
 }
 
+/// Per-superblock-row CDEF parameters threaded from the filter driver.
+pub struct CdefBrowParams<'a> {
+    pub bw: i32,
+    pub bh: i32,
+    pub damping: i32,
+    pub layout: crate::headers::PixelLayout,
+    pub on_skip_tx: bool,
+    pub cdef_on: bool,
+    /// `cdef_idx[sb256x][sb64_idx]` per the `Av2Filter` masks; for `sb128` decode
+    /// `sb256x = sbx >> 2`, `sb64_idx = ((by & 0x30) >> 2) + (sbx & 3)`.
+    pub mask_cdef_idx: &'a [[i8; 16]],
+    /// `noskip_mask[sb256x][by_idx][sb64x_idx]`, `by_idx = (by & 0x3e) >> 1`.
+    pub mask_noskip: &'a [[[u16; 4]; 32]],
+    /// Per-cdef-index raw strengths (0..n_strengths) for Y and UV.
+    pub y_strength: &'a [u8],
+    pub uv_strength: &'a [u8],
+}
+
+const UV_DIRS: [[u8; 8]; 2] = [[0, 1, 2, 3, 4, 5, 6, 7], [7, 0, 2, 4, 5, 6, 6, 6]];
+
+/// Backup the bottom 2 rows of the current 8-row band into a toggled CDEF line
+/// bank (each plane bank is laid out with the plane's positive stride spacing so
+/// the next band can read it as `top`). Port of dav2d `backup2lines`
+/// (cdef_apply_tmpl.c:41) for positive strides (single-thread path).
+fn cdef_backup2lines_bank(
+    bank: &mut [Vec<u8>; 3],
+    src_y: &[u8],
+    src_u: &[u8],
+    src_v: &[u8],
+    y_off: usize,
+    uv_off: usize,
+    y_stride: usize,
+    uv_stride: usize,
+    layout: crate::headers::PixelLayout,
+) {
+    // Luma: copy rows 6,7 of the band (`src + 6*stride`, 2*stride bytes).
+    let s = y_off + 6 * y_stride;
+    let n = (2 * y_stride)
+        .min(src_y.len().saturating_sub(s))
+        .min(bank[0].len());
+    bank[0][..n].copy_from_slice(&src_y[s..s + n]);
+
+    if layout != crate::headers::PixelLayout::I400 {
+        let uv_off_rows = if layout == crate::headers::PixelLayout::I420 {
+            2
+        } else {
+            6
+        };
+        let s = uv_off + uv_off_rows * uv_stride;
+        let n = (2 * uv_stride)
+            .min(src_u.len().saturating_sub(s))
+            .min(bank[1].len());
+        bank[1][..n].copy_from_slice(&src_u[s..s + n]);
+        let n = (2 * uv_stride)
+            .min(src_v.len().saturating_sub(s))
+            .min(bank[2].len());
+        bank[2][..n].copy_from_slice(&src_v[s..s + n]);
+    }
+}
+
+/// Backup a pre-CDEF 2x8 left-column block from a plane into `dst[8]`
+/// (`dst[row] = {col x_off-2, col x_off-1}`). Port of dav2d `backup2x8`.
+fn cdef_backup2x8(
+    dst: &mut [[u8; 2]; 8],
+    src: &[u8],
+    base: usize,
+    stride: usize,
+    x_off: usize,
+    rows: usize,
+) {
+    let mut off = base;
+    for d in dst.iter_mut().take(rows) {
+        let s = off + x_off - 2;
+        d[0] = src[s];
+        d[1] = src[s + 1];
+        off += stride;
+    }
+}
+
+/// CDEF over a superblock-row (port of dav2d `cdef_brow`, single-thread
+/// `have_tt == 0` path). `cdef_line` is the toggled top-row backup whose `tf`
+/// bank holds the previous band's bottom 2 rows; `*toggle` flips per 8-row band.
+#[allow(clippy::too_many_arguments)]
 pub fn cdef_brow_8bpc(
     y: &mut [u8],
     u: &mut [u8],
     v: &mut [u8],
-    params: &CdefApplyParams,
+    p: &CdefBrowParams,
     y_stride: isize,
     uv_stride: isize,
-    cdef_idx: &[u8],
-    cdef_y_strengths: &[[i32; 2]],
-    cdef_uv_strengths: &[[i32; 2]],
+    cdef_line: &mut [[Vec<u8>; 3]; 2],
+    toggle: &mut usize,
     by_start: i32,
     by_end: i32,
-    _sby: i32,
+    sby: i32,
+    sbrow_start: bool,
 ) {
-    let damping = params.damping + params.n_bits - 8;
+    let _ = sby;
+    let bitdepth_min_8 = 0; // 8bpc
+    let damping = p.damping + bitdepth_min_8;
     let y_ls = y_stride.unsigned_abs();
     let uv_ls = uv_stride.unsigned_abs();
-    let ss_hor = params.ss_hor as usize;
-    let ss_ver = params.ss_ver as usize;
+    let layout = p.layout;
+    let ss_hor = (layout != crate::headers::PixelLayout::I444) as usize;
+    let ss_ver = (layout == crate::headers::PixelLayout::I420) as usize;
+    let uv_dir = &UV_DIRS[(layout == crate::headers::PixelLayout::I422) as usize];
+    let sbsz = 16i32;
+    let sb64w = (p.bw + sbsz - 1) >> 4;
+    let have_chroma = layout != crate::headers::PixelLayout::I400;
+
+    // Plane base offset of the band's first row.
+    let mut row_y = by_start as usize * 4 * y_ls;
+    let mut row_uv = ((by_start as usize * 4) >> ss_ver) * uv_ls;
+
+    let mut edge_top = if by_start > 0 { CDEF_HAVE_TOP } else { 0 };
 
     let mut by = by_start;
     while by < by_end {
-        let sb64_idx = (by as usize / 16) * params.bw.div_ceil(16);
+        let tf = *toggle;
+        let by_idx = ((by & 0x3e) >> 1) as usize;
+        let mut edges = edge_top | CDEF_HAVE_BOTTOM;
+        if by + 2 >= p.bh {
+            edges &= !CDEF_HAVE_BOTTOM;
+        }
 
-        let mut bx = 0i32;
-        while bx < params.bw as i32 {
-            let sbx = bx as usize / 16;
-            let idx_off = sb64_idx + sbx;
+        // Back up pre-filter bottom 2 rows of this band for the next band's top.
+        if (sbrow_start || by + 2 < by_end) && (edges & CDEF_HAVE_BOTTOM) != 0 {
+            let other = 1 - tf;
+            cdef_backup2lines_bank(
+                &mut cdef_line[other],
+                y,
+                u,
+                v,
+                row_y,
+                row_uv,
+                y_ls,
+                uv_ls,
+                layout,
+            );
+        }
 
-            if idx_off < cdef_idx.len() {
-                let cdef_i = cdef_idx[idx_off] as usize;
+        // Left 2x8 backups (toggled `bit`), one per plane, pre-CDEF.
+        let mut lr_bak: [[[[u8; 2]; 8]; 3]; 2] = [[[[0u8; 2]; 8]; 3]; 2];
+        let mut bit = 0usize;
+        edges &= !CDEF_HAVE_LEFT;
+        edges |= CDEF_HAVE_RIGHT;
+        // `prev_flag` persists across superblocks within a band (dav2d
+        // cdef_apply_tmpl.c:145): the last block's backup state carries over so
+        // the next SB's first block can reuse / skip the left-column backup.
+        let mut prev_flag = 0u8;
 
-                if cdef_i < cdef_y_strengths.len() {
-                    let pri_y = cdef_y_strengths[cdef_i][0];
-                    let sec_y = cdef_y_strengths[cdef_i][1];
+        // Per-sb base offsets that advance with iptrs.
+        let mut sb_y = row_y;
+        let mut sb_uv = row_uv;
 
-                    if pri_y > 0 || sec_y > 0 {
-                        let y_off = by as usize * 4 * y_ls + bx as usize * 4;
-                        let mut variance = 0u32;
-                        let dir = if y_off < y.len() {
-                            cdef_find_dir(&y[y_off..], y_ls, &mut variance)
-                        } else {
-                            0
-                        };
-                        let adj_pri = adjust_strength(pri_y, variance);
+        for sbx in 0..sb64w {
+            let sb256x = (sbx >> 2) as usize;
+            let sb64x_idx = (sbx & 3) as usize;
+            let sb64_idx = (((by & 0x30) >> 2) + (sbx & 3)) as usize;
+            let mask_i = sb256x.min(p.mask_cdef_idx.len().saturating_sub(1));
+            let cdef_idx = if sb256x < p.mask_cdef_idx.len() {
+                p.mask_cdef_idx[mask_i][sb64_idx]
+            } else {
+                -1
+            };
 
-                        if (adj_pri > 0 || sec_y > 0) && y_off + 8 * y_ls + 8 <= y.len() {
-                            let empty_left = [[0u8; 2]; 8];
-                            let top_off = if y_off >= y_ls { y_off - y_ls } else { y_off };
-                            let bot_off = y_off + 8 * y_ls;
-                            let mut edges = CdefEdgeFlags::HAVE_TOP.0
-                                | CdefEdgeFlags::HAVE_BOTTOM.0
-                                | CdefEdgeFlags::HAVE_LEFT.0
-                                | CdefEdgeFlags::HAVE_RIGHT.0;
-                            if by == by_start {
-                                edges &= !CdefEdgeFlags::HAVE_TOP.0;
-                            }
-                            if by + 2 >= by_end {
-                                edges &= !CdefEdgeFlags::HAVE_BOTTOM.0;
-                            }
-                            if bx == 0 {
-                                edges &= !CdefEdgeFlags::HAVE_LEFT.0;
-                            }
-                            if bx + 2 >= params.bw as i32 {
-                                edges &= !CdefEdgeFlags::HAVE_RIGHT.0;
-                            }
-
-                            let y_alias =
-                                unsafe { std::slice::from_raw_parts(y.as_ptr(), y.len()) };
-                            cdef_filter_block_8bpc(
-                                y,
-                                y_ls,
-                                y_off,
-                                &empty_left,
-                                y_alias,
-                                top_off,
-                                y_alias,
-                                bot_off,
-                                adj_pri,
-                                sec_y,
-                                dir as usize,
-                                damping,
-                                8,
-                                8,
-                                edges,
-                            );
-                        }
-                    }
-                }
-
-                if params.have_chroma && cdef_i < cdef_uv_strengths.len() {
-                    let pri_uv = cdef_uv_strengths[cdef_i][0];
-                    let sec_uv = cdef_uv_strengths[cdef_i][1];
-
-                    if pri_uv > 0 || sec_uv > 0 {
-                        let cw = 8 >> ss_hor;
-                        let ch = 8 >> ss_ver;
-                        let empty_left = [[0u8; 2]; 8];
-                        let mut edges = CdefEdgeFlags::HAVE_TOP.0
-                            | CdefEdgeFlags::HAVE_BOTTOM.0
-                            | CdefEdgeFlags::HAVE_LEFT.0
-                            | CdefEdgeFlags::HAVE_RIGHT.0;
-                        if by == by_start {
-                            edges &= !CdefEdgeFlags::HAVE_TOP.0;
-                        }
-                        if by + 2 >= by_end {
-                            edges &= !CdefEdgeFlags::HAVE_BOTTOM.0;
-                        }
-                        if bx == 0 {
-                            edges &= !CdefEdgeFlags::HAVE_LEFT.0;
-                        }
-                        if bx + 2 >= params.bw as i32 {
-                            edges &= !CdefEdgeFlags::HAVE_RIGHT.0;
-                        }
-
-                        let uv_off =
-                            ((by as usize * 4) >> ss_ver) * uv_ls + ((bx as usize * 4) >> ss_hor);
-
-                        if uv_off + ch * uv_ls + cw <= u.len() {
-                            let top_off = if uv_off >= uv_ls {
-                                uv_off - uv_ls
-                            } else {
-                                uv_off
-                            };
-                            let bot_off = uv_off + ch * uv_ls;
-                            let u_alias =
-                                unsafe { std::slice::from_raw_parts(u.as_ptr(), u.len()) };
-                            cdef_filter_block_8bpc(
-                                u,
-                                uv_ls,
-                                uv_off,
-                                &empty_left,
-                                u_alias,
-                                top_off,
-                                u_alias,
-                                bot_off,
-                                pri_uv,
-                                sec_uv,
-                                0,
-                                damping - 1,
-                                cw,
-                                ch,
-                                edges,
-                            );
-                        }
-
-                        if uv_off + ch * uv_ls + cw <= v.len() {
-                            let top_off = if uv_off >= uv_ls {
-                                uv_off - uv_ls
-                            } else {
-                                uv_off
-                            };
-                            let bot_off = uv_off + ch * uv_ls;
-                            let v_alias =
-                                unsafe { std::slice::from_raw_parts(v.as_ptr(), v.len()) };
-                            cdef_filter_block_8bpc(
-                                v,
-                                uv_ls,
-                                uv_off,
-                                &empty_left,
-                                v_alias,
-                                top_off,
-                                v_alias,
-                                bot_off,
-                                pri_uv,
-                                sec_uv,
-                                0,
-                                damping - 1,
-                                cw,
-                                ch,
-                                edges,
-                            );
-                        }
-                    }
-                }
+            if cdef_idx == -1
+                || !p.cdef_on
+                || ((p.y_strength.get(cdef_idx as usize).copied().unwrap_or(0) == 0)
+                    && (p.uv_strength.get(cdef_idx as usize).copied().unwrap_or(0) == 0))
+            {
+                prev_flag = 0;
+                edges |= CDEF_HAVE_LEFT;
+                sb_y += (sbsz * 4) as usize;
+                sb_uv += ((sbsz * 4) as usize) >> ss_hor;
+                continue;
             }
 
-            bx += 2;
+            let noskip_full = if p.on_skip_tx {
+                !0u16
+            } else if sb256x < p.mask_noskip.len() && by_idx < 32 && sb64x_idx < 4 {
+                p.mask_noskip[mask_i][by_idx][sb64x_idx]
+            } else {
+                0
+            };
+
+            let y_lvl = p.y_strength[cdef_idx as usize] as i32;
+            let uv_lvl = p.uv_strength[cdef_idx as usize] as i32;
+            let flag = (y_lvl != 0) as u8 + (((uv_lvl != 0) as u8) << 1);
+
+            let y_pri_lvl = (y_lvl >> 2) << bitdepth_min_8;
+            let mut y_sec_lvl = y_lvl & 3;
+            y_sec_lvl += (y_sec_lvl == 3) as i32;
+            y_sec_lvl <<= bitdepth_min_8;
+
+            let uv_pri_lvl = (uv_lvl >> 2) << bitdepth_min_8;
+            let mut uv_sec_lvl = uv_lvl & 3;
+            uv_sec_lvl += (uv_sec_lvl == 3) as i32;
+            uv_sec_lvl <<= bitdepth_min_8;
+
+            let mut b_y = sb_y;
+            let mut b_uv = sb_uv;
+            let mut bx = sbx * sbsz;
+            let sb_bx_end = imin((sbx + 1) * sbsz, p.bw);
+            while bx < sb_bx_end {
+                if bx + 2 >= p.bw {
+                    edges &= !CDEF_HAVE_RIGHT;
+                }
+
+                let bx_mask = 3u16 << (bx & 14);
+                if (noskip_full & bx_mask) == 0 {
+                    prev_flag = 0;
+                    edges |= CDEF_HAVE_LEFT;
+                    b_y += 8;
+                    b_uv += 8 >> ss_hor;
+                    bx += 2;
+                    continue;
+                }
+
+                let do_left = flag & !prev_flag;
+                prev_flag = flag;
+                if do_left != 0 && (edges & CDEF_HAVE_LEFT) != 0 {
+                    if do_left & BACKUP_2X8_Y != 0 {
+                        cdef_backup2x8(&mut lr_bak[bit][0], y, b_y, y_ls, 0, 8);
+                    }
+                    if have_chroma && do_left & BACKUP_2X8_UV != 0 {
+                        cdef_backup2x8(&mut lr_bak[bit][1], u, b_uv, uv_ls, 0, 8 >> ss_ver);
+                        cdef_backup2x8(&mut lr_bak[bit][2], v, b_uv, uv_ls, 0, 8 >> ss_ver);
+                    }
+                }
+                if (edges & CDEF_HAVE_RIGHT) != 0 {
+                    let other = 1 - bit;
+                    if flag & BACKUP_2X8_Y != 0 {
+                        cdef_backup2x8(&mut lr_bak[other][0], y, b_y, y_ls, 8, 8);
+                    }
+                    if have_chroma && flag & BACKUP_2X8_UV != 0 {
+                        cdef_backup2x8(
+                            &mut lr_bak[other][1],
+                            u,
+                            b_uv,
+                            uv_ls,
+                            8 >> ss_hor,
+                            8 >> ss_ver,
+                        );
+                        cdef_backup2x8(
+                            &mut lr_bak[other][2],
+                            v,
+                            b_uv,
+                            uv_ls,
+                            8 >> ss_hor,
+                            8 >> ss_ver,
+                        );
+                    }
+                }
+
+                let mut variance = 0u32;
+                let dir = if y_pri_lvl != 0 || uv_pri_lvl != 0 {
+                    cdef_find_dir(&y[b_y..], y_ls, &mut variance) as usize
+                } else {
+                    0
+                };
+
+                // Luma top/bottom: top from the toggled pre-CDEF line bank, bottom
+                // in-place (rows below not yet filtered).
+                let top_col = bx as usize * 4;
+                let bot_y = b_y + 8 * y_ls;
+                if y_pri_lvl != 0 {
+                    let adj = adjust_strength(y_pri_lvl, variance);
+                    if adj != 0 || y_sec_lvl != 0 {
+                        cdef_filter_block_8bpc(
+                            y,
+                            y_ls,
+                            b_y,
+                            &lr_bak[bit][0],
+                            &cdef_line[tf][0],
+                            top_col,
+                            unsafe { std::slice::from_raw_parts(y.as_ptr(), y.len()) },
+                            bot_y,
+                            adj,
+                            y_sec_lvl,
+                            dir,
+                            damping,
+                            8,
+                            8,
+                            edges,
+                        );
+                    }
+                } else if y_sec_lvl != 0 {
+                    cdef_filter_block_8bpc(
+                        y,
+                        y_ls,
+                        b_y,
+                        &lr_bak[bit][0],
+                        &cdef_line[tf][0],
+                        top_col,
+                        unsafe { std::slice::from_raw_parts(y.as_ptr(), y.len()) },
+                        bot_y,
+                        0,
+                        y_sec_lvl,
+                        0,
+                        damping,
+                        8,
+                        8,
+                        edges,
+                    );
+                }
+
+                if uv_lvl != 0 && have_chroma {
+                    let uvdir = if uv_pri_lvl != 0 {
+                        uv_dir[dir] as usize
+                    } else {
+                        0
+                    };
+                    let cw = 8 >> ss_hor;
+                    let ch = 8 >> ss_ver;
+                    let top_col_uv = (bx as usize * 4) >> ss_hor;
+                    let bot_uv = b_uv + ch * uv_ls;
+                    cdef_filter_block_8bpc(
+                        u,
+                        uv_ls,
+                        b_uv,
+                        &lr_bak[bit][1],
+                        &cdef_line[tf][1],
+                        top_col_uv,
+                        unsafe { std::slice::from_raw_parts(u.as_ptr(), u.len()) },
+                        bot_uv,
+                        uv_pri_lvl,
+                        uv_sec_lvl,
+                        uvdir,
+                        damping - 1,
+                        cw,
+                        ch,
+                        edges,
+                    );
+                    cdef_filter_block_8bpc(
+                        v,
+                        uv_ls,
+                        b_uv,
+                        &lr_bak[bit][2],
+                        &cdef_line[tf][2],
+                        top_col_uv,
+                        unsafe { std::slice::from_raw_parts(v.as_ptr(), v.len()) },
+                        bot_uv,
+                        uv_pri_lvl,
+                        uv_sec_lvl,
+                        uvdir,
+                        damping - 1,
+                        cw,
+                        ch,
+                        edges,
+                    );
+                }
+
+                bit ^= 1;
+                edges |= CDEF_HAVE_LEFT;
+                b_y += 8;
+                b_uv += 8 >> ss_hor;
+                bx += 2;
+            }
+
+            sb_y += (sbsz * 4) as usize;
+            sb_uv += ((sbsz * 4) as usize) >> ss_hor;
         }
+
+        row_y += 8 * y_ls;
+        row_uv += (8 * uv_ls) >> ss_ver;
+        *toggle ^= 1;
+        edge_top = CDEF_HAVE_TOP;
+        let _ = by_idx;
         by += 2;
     }
 }

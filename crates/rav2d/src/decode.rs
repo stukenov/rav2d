@@ -172,11 +172,7 @@ pub fn init_quant_tables(
 /// Recompute the per-segment dequant tables for a single qindex (used by the
 /// per-superblock delta-q path; mirrors `init_quant_tables` with state pulled
 /// from `SbFrameInfo` instead of `FrameHeader`).
-pub fn init_quant_tables_fi(
-    fi: &SbFrameInfo,
-    qidx: i32,
-    dq: &mut [[[u32; 2]; 3]; MAX_SEGMENTS],
-) {
+pub fn init_quant_tables_fi(fi: &SbFrameInfo, qidx: i32, dq: &mut [[[u32; 2]; 3]; MAX_SEGMENTS]) {
     let n = if fi.seg_enabled { 8 } else { 1 };
     for i in 0..n {
         let yac = if fi.seg_enabled {
@@ -2305,11 +2301,7 @@ pub fn decode_tile_sbrow_entropy(
             lf_idx,
             sb256w,
             cur_ccsomap: &mut cur_ccsomap[..],
-            prev_ccsomap: [
-                prev_ccsomap[0],
-                prev_ccsomap[1],
-                prev_ccsomap[2],
-            ],
+            prev_ccsomap: [prev_ccsomap[0], prev_ccsomap[1], prev_ccsomap[2]],
             rt: &mut *rt,
             rf,
             seq_hdr,
@@ -2352,7 +2344,13 @@ pub fn decode_tile_sbrow_entropy(
     // next SB row's neighbour access (decode.c:4511 `dav2d_refmvs_save_tmvs`,
     // single-thread `ra` portion).
     if refmvs_active {
-        let crate::refmvs::Tile { r, ra, ra_tl, ra_off, .. } = &mut *rt;
+        let crate::refmvs::Tile {
+            r,
+            ra,
+            ra_tl,
+            ra_off,
+            ..
+        } = &mut *rt;
         let col_start8 = col_start >> 1;
         let col_end8 = (col_end + 1) >> 1;
         crate::refmvs::save_tmvs(
@@ -2383,7 +2381,10 @@ pub fn decode_tile_sbrow_entropy(
     // Error out on symbol-decoder overread.
     if msac.cnt() <= -15 {
         if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
-            eprintln!("decode_tile_sbrow_entropy: msac overread cnt={}", msac.cnt());
+            eprintln!(
+                "decode_tile_sbrow_entropy: msac overread cnt={}",
+                msac.cnt()
+            );
         }
         return Err(());
     }
@@ -2425,10 +2426,14 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         prev_ccsomap,
         b4_stride,
         sb256h,
+        sbh,
         rf,
+        inloop_filters,
         ..
     } = fc;
     let fc_sb256h = *sb256h;
+    let fc_sbh = *sbh;
+    let fc_inloop_filters = *inloop_filters;
 
     let seq_hdr = &**seq_hdr;
     let frame_hdr = &**frame_hdr;
@@ -2592,14 +2597,46 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         },
     };
 
+    // Precompute the per-frame filter parameters once (deblock thresholds, CDEF
+    // strength decomposition, etc.) so the per-superblock-row filter pass can run
+    // without re-deriving them. Filters are gated by `fc.inloop_filters`.
+    let filter_params = FilterFrameParams::new(
+        seq_hdr,
+        frame_hdr,
+        bw,
+        bh,
+        ss_hor_v,
+        ss_ver_v,
+        cur_pic.stride[0],
+        cur_pic.stride[1],
+        bitdepth_v as i32,
+        fc_inloop_filters,
+    );
+    // The CDEF pre-filter line toggle runs across the whole frame's filter pass
+    // (dav2d resets `top_pre_cdef_toggle` once per frame in decode_frame_init).
+    lf.cdef_line_toggle = 0;
+    let sb128 = frame_hdr.sb128 as i32;
+
+    // dav2d (decode.c:5144-5164) is per-tile-row: PHASE A decodes ALL tile-cols
+    // for every superblock-row in the tile row, THEN PHASE B runs the deferred
+    // filter pass `for sby: filter_sbrow(sby)`. Filters must run only after a
+    // whole tile row has decoded because intrabc reads pre-filter pixels to the
+    // left within the tile row.
     for tr in 0..rows {
+        // Collect per-tile-col MSAC state that must stay live across the sby
+        // loop (each tile-col's symbol decoder advances one sbrow at a time but
+        // we now interleave tile-cols within a sbrow).
+        let ts_base = (tr * cols) as usize;
+        let mut bufs: Vec<Vec<u8>> = Vec::with_capacity(cols as usize);
+        let mut fis: Vec<SbFrameInfo> = Vec::with_capacity(cols as usize);
+        let mut ranges: Vec<(i32, i32)> = Vec::with_capacity(cols as usize); // (rs, re)
         for tc in 0..cols {
-            let ts_idx = (tr * cols + tc) as usize;
+            let ts_idx = ts_base + tc as usize;
             let (cs, ce, rs, re) = {
                 let t = &ts[ts_idx].tiling;
                 (t.col_start, t.col_end, t.row_start, t.row_end)
             };
-            let fi = SbFrameInfo::from_frame(
+            fis.push(SbFrameInfo::from_frame(
                 seq_hdr,
                 frame_hdr,
                 bw,
@@ -2615,23 +2652,38 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                 ce,
                 rs,
                 re,
-            );
+            ));
+            ranges.push((rs, re));
+            bufs.push(std::mem::take(&mut ts[ts_idx].msac_buf));
+        }
+        // The buffers Vec now owns the tile data; build the symbol decoders
+        // borrowing from it (read-only) so they persist across the sby loop.
+        let mut msacs: Vec<MsacContext> = bufs
+            .iter()
+            .map(|b| MsacContext::new(b, disable_cdf))
+            .collect();
+        let mut part_ws: Vec<Vec<u8>> = (0..cols).map(|_| Vec::new()).collect();
+        let part_r: Vec<u8> = Vec::new();
 
-            // MSAC borrows the tile data; move it into a local so the tile's
-            // CDF state remains independently mutable during decode.
-            let buf = std::mem::take(&mut ts[ts_idx].msac_buf);
-            let mut msac = MsacContext::new(&buf, disable_cdf);
-            let mut part_w: Vec<u8> = Vec::new();
-            let part_r: Vec<u8> = Vec::new();
+        // The tile row spans the same block-row range for every tile-col (only
+        // the column range differs), so derive the sbrow loop from tile-col 0.
+        let (row_rs, row_re) = ranges[0];
 
-            let mut by = rs;
-            while by < re {
+        // PHASE A: decode every superblock-row across all tile-cols.
+        let mut by = row_rs;
+        while by < row_re {
+            for tc in 0..cols as usize {
+                let ts_idx = ts_base + tc;
+                let (rs, re) = ranges[tc];
+                if by < rs || by >= re {
+                    continue;
+                }
                 reset_context(&mut l, keyframe, is_tip);
                 decode_tile_sbrow_entropy(
-                    &fi,
+                    &fis[tc],
                     frame_hdr,
                     &mut ts[ts_idx],
-                    &mut msac,
+                    &mut msacs[tc],
                     a,
                     &mut lf.mask,
                     &mut lf.lr_mask,
@@ -2645,7 +2697,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     prev_segmap_ref,
                     &mut cur_ccsomap[..],
                     prev_ccsomap_ref,
-                    &mut part_w,
+                    &mut part_ws[tc],
                     &part_r,
                     by,
                     sb256w,
@@ -2656,15 +2708,343 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     seq_hdr,
                     frame_hdr,
                 )?;
-                by += sb_step;
             }
+            by += sb_step;
+        }
 
-            drop(msac);
-            ts[ts_idx].msac_buf = buf;
+        // Return the MSAC buffers to the tile states.
+        drop(msacs);
+        for (tc, buf) in bufs.into_iter().enumerate() {
+            ts[ts_base + tc].msac_buf = buf;
+        }
+
+        // PHASE B: deferred per-superblock-row filter pass over the whole tile
+        // row (deblock cols -> deblock rows + copy_db -> CDEF(+CCSO) -> LR).
+        let mut by = row_rs;
+        while by < row_re {
+            let sby = by / sb_step;
+            filter_sbrow(
+                seq_hdr,
+                frame_hdr,
+                lf,
+                &mut *dst_y,
+                &mut *dst_u,
+                &mut *dst_v,
+                &filter_params,
+                fc_inloop_filters,
+                fc_sbh,
+                sb_step,
+                sb256w,
+                sb128,
+                bw,
+                bh,
+                sby,
+            );
+            by += sb_step;
         }
     }
 
     Ok(())
+}
+
+/// Per-frame parameters for the deferred post-filter pass, derived once before
+/// the filter loop runs. Mirrors the constant inputs dav2d reads from
+/// `f->frame_hdr` / `f->lf` inside `dav2d_filter_sbrow*`.
+struct FilterFrameParams {
+    deblock: crate::deblock::DeblockApplyParams,
+    /// Deblock thresholds (stubbed: zeroed; deblock is only correct for the
+    /// level==0 no-op case until the per-4px segmentation/delta-q thresholds are
+    /// connected — see the M2 risks).
+    thr_lut_y: [[u8; 16]; 2],
+    thr_lut_uv: [[[u8; 16]; 2]; 2],
+    y_stride: isize,
+    uv_stride: isize,
+    bw: i32,
+    bh: i32,
+    ss_hor: bool,
+    ss_ver: bool,
+    layout: crate::headers::PixelLayout,
+    // CDEF
+    cdef_damping: i32,
+    cdef_on_skiptx: bool,
+    cdef_y_strength: [u8; crate::headers::MAX_CDEF_STRENGTHS],
+    cdef_uv_strength: [u8; crate::headers::MAX_CDEF_STRENGTHS],
+}
+
+impl FilterFrameParams {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        seq_hdr: &crate::headers::SequenceHeader,
+        frame_hdr: &crate::headers::FrameHeader,
+        bw: i32,
+        bh: i32,
+        ss_hor: i32,
+        ss_ver: i32,
+        y_stride: isize,
+        uv_stride: isize,
+        _bitdepth: i32,
+        _inloop: u32,
+    ) -> Self {
+        let db = &frame_hdr.deblock;
+        let deblock = crate::deblock::DeblockApplyParams {
+            y_stride,
+            uv_stride,
+            bw: bw as usize,
+            bh: bh as usize,
+            sb128: frame_hdr.sb128 != 0,
+            ss_hor: ss_hor != 0,
+            ss_ver: ss_ver != 0,
+            level_y: [db.level_y[0] as i32, db.level_y[1] as i32],
+            level_u: db.level_u as i32,
+            level_v: db.level_v as i32,
+            have_chroma: seq_hdr.layout != crate::headers::PixelLayout::I400,
+        };
+        FilterFrameParams {
+            deblock,
+            thr_lut_y: [[0u8; 16]; 2],
+            thr_lut_uv: [[[0u8; 16]; 2]; 2],
+            y_stride,
+            uv_stride,
+            bw,
+            bh,
+            ss_hor: ss_hor != 0,
+            ss_ver: ss_ver != 0,
+            layout: seq_hdr.layout,
+            cdef_damping: frame_hdr.cdef.damping as i32,
+            cdef_on_skiptx: frame_hdr.cdef.on_skiptx != 0,
+            cdef_y_strength: frame_hdr.cdef.y_strength,
+            cdef_uv_strength: frame_hdr.cdef.uv_strength,
+        }
+    }
+}
+
+/// Deferred per-superblock-row filter pass. Port of `dav2d_filter_sbrow`
+/// (recon_tmpl.c:4028) for the single-thread (`n_tc == 1`) path, in the exact
+/// dav2d order: deblock cols -> deblock rows -> copy_db -> CDEF(+CCSO) -> LR.
+/// Each stage is gated on `inloop` (DAV2D_INLOOPFILTER_* bits) plus the relevant
+/// frame-header enable.
+#[allow(clippy::too_many_arguments)]
+fn filter_sbrow(
+    seq_hdr: &crate::headers::SequenceHeader,
+    frame_hdr: &crate::headers::FrameHeader,
+    lf: &mut crate::internal::LoopFilterState,
+    dst_y: &mut [u8],
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    fp: &FilterFrameParams,
+    inloop: u32,
+    sbh: i32,
+    sb_step: i32,
+    sb256w: i32,
+    sb128: i32,
+    bw: i32,
+    bh: i32,
+    sby: i32,
+) {
+    use crate::looprestoration::{
+        INLOOPFILTER_CCSO, INLOOPFILTER_CDEF, INLOOPFILTER_DEBLOCK, INLOOPFILTER_GDF,
+        INLOOPFILTER_WIENER,
+    };
+
+    let deblock_on = inloop & INLOOPFILTER_DEBLOCK != 0
+        && (fp.deblock.level_y[0] != 0 || fp.deblock.level_y[1] != 0);
+
+    // mask row for this sbrow: dav2d uses (sby >> (2 - sb128)) * sb256w.
+    let mask_row = ((sby >> (2 - sb128)) * sb256w) as usize;
+
+    // (1) deblock cols. The deblock primitives consume a flattened per-4px mask
+    // layout (`[[[u16;4];5]]`) that does not yet have an `Av2Filter` adapter and
+    // hardcode their thresholds, so they are only correct for the level==0 no-op
+    // path (the M2 clip). Wiring the real mask/threshold plumbing is deferred to
+    // the deblock-conformance follow-up; here the call is gated on a non-zero
+    // level and given empty mask/segmap when (rarely) reached during bring-up.
+    let empty_masks: &[[[u16; 4]; 5]] = &[];
+    let empty_segmap: &[u8] = &[];
+    let _ = mask_row;
+    if deblock_on {
+        let start_of_tile_row =
+            (lf.start_of_tile_row.get(sby as usize).copied().unwrap_or(0) & 1) != 0;
+        crate::deblock::deblock_sbrow_cols_8bpc(
+            dst_y,
+            dst_u,
+            dst_v,
+            &fp.deblock,
+            empty_masks,
+            empty_segmap,
+            &fp.thr_lut_y,
+            &fp.thr_lut_uv,
+            sby,
+            start_of_tile_row,
+        );
+    }
+
+    // (2) deblock rows, then copy_db (store post-deblock / pre-CDEF lines).
+    if deblock_on {
+        crate::deblock::deblock_sbrow_rows_8bpc(
+            dst_y,
+            dst_u,
+            dst_v,
+            &fp.deblock,
+            empty_masks,
+            empty_segmap,
+            &fp.thr_lut_y,
+            &fp.thr_lut_uv,
+            sby,
+        );
+    }
+    // dav2d's gate also enables copy_db when CDEF is on, because the *multi*-
+    // threaded CDEF path reads `lr_db_line` across the sbrow/tile-row seam. In
+    // the single-thread (`have_tt == 0`) path CDEF reads only the toggled
+    // `cdef_line` banks, so `lr_db_line` is consumed only by loop restoration;
+    // restrict copy_db to the restore_planes case so we do not require allocating
+    // `lr_db_line` for CDEF-only frames (its output would be dead).
+    let copy_db_on =
+        lf.restore_planes != 0 && inloop & (INLOOPFILTER_WIENER | INLOOPFILTER_GDF) != 0;
+    if copy_db_on {
+        // Allocate the deblocked-line store (dav2d's `lr_db_line`, n_tc==1 uses
+        // num_lines == 20) so backup_db has somewhere to write. Each plane line
+        // buffer is `stride * 20` bytes (positive-stride layout).
+        let num_lines = 20usize;
+        let y_ls = fp.y_stride.unsigned_abs();
+        let uv_ls = fp.uv_stride.unsigned_abs();
+        if lf.lr_db_line[0].len() != y_ls * num_lines {
+            lf.lr_db_line[0] = vec![0u8; y_ls * num_lines];
+        }
+        if seq_hdr.layout != crate::headers::PixelLayout::I400 {
+            for b in lf.lr_db_line.iter_mut().skip(1) {
+                if b.len() != uv_ls * num_lines {
+                    *b = vec![0u8; uv_ls * num_lines];
+                }
+            }
+        }
+        let src: [&[u8]; 3] = [&*dst_y, &*dst_u, &*dst_v];
+        crate::deblock::copy_db_8bpc(
+            &mut lf.lr_db_line,
+            &src,
+            &[fp.y_stride, fp.uv_stride],
+            bw as usize,
+            bh as usize,
+            sby,
+            frame_hdr.sb128 != 0,
+            fp.ss_hor,
+            fp.ss_ver,
+            lf.restore_planes != 0,
+        );
+    }
+
+    // (3) CDEF (+CCSO). CCSO is folded into this stage in dav2d; rav2d has no
+    // CCSO driver yet, so it is gated off here (it is a no-op for the M2 clip,
+    // whose frame header disables CCSO). Only luma+chroma CDEF runs.
+    if seq_hdr.cdef && inloop & (INLOOPFILTER_CDEF | INLOOPFILTER_CCSO) != 0 {
+        // Allocate the toggled CDEF top-row backup banks lazily (2 banks x 3
+        // planes, 2 rows each at the plane's positive stride).
+        let y_ls = fp.y_stride.unsigned_abs();
+        let uv_ls = fp.uv_stride.unsigned_abs();
+        let need_y = 2 * y_ls;
+        let need_uv = 2 * uv_ls;
+        for bank in lf.cdef_line.iter_mut() {
+            if bank[0].len() != need_y {
+                bank[0] = vec![0u8; need_y];
+            }
+            if seq_hdr.layout != crate::headers::PixelLayout::I400 {
+                for b in bank.iter_mut().skip(1) {
+                    if b.len() != need_uv {
+                        *b = vec![0u8; need_uv];
+                    }
+                }
+            }
+        }
+        // dav2d resets the toggle at the start of each frame's CDEF (the toggle
+        // here lives on `lf` so it persists across sbrows within the frame).
+        let start = sby * sb_step;
+        // Cross-sbrow seam: re-filter the 2 block-rows straddling the boundary
+        // with the previous mask row (dav2d recon_tmpl.c:4001-4009). For a single
+        // superblock-row frame (the M2 clip) sby is always 0 so this is skipped.
+        if sby > 0 {
+            let prev_mask_row = (((sby - 1) >> (2 - sb128)) * sb256w) as usize;
+            let bp = crate::cdef::CdefBrowParams {
+                bw,
+                bh,
+                damping: fp.cdef_damping,
+                layout: fp.layout,
+                on_skip_tx: fp.cdef_on_skiptx,
+                cdef_on: inloop & INLOOPFILTER_CDEF != 0,
+                mask_cdef_idx: &collect_cdef_idx(&lf.mask, prev_mask_row, sb256w),
+                mask_noskip: &collect_noskip(&lf.mask, prev_mask_row, sb256w),
+                y_strength: &fp.cdef_y_strength,
+                uv_strength: &fp.cdef_uv_strength,
+            };
+            crate::cdef::cdef_brow_8bpc(
+                dst_y,
+                dst_u,
+                dst_v,
+                &bp,
+                fp.y_stride,
+                fp.uv_stride,
+                &mut lf.cdef_line,
+                &mut lf.cdef_line_toggle,
+                start - 2,
+                start,
+                sby,
+                true,
+            );
+        }
+        let n_blks = sb_step - 2 * ((sby + 1 < sbh) as i32);
+        let end = (start + n_blks).min(bh);
+        let bp = crate::cdef::CdefBrowParams {
+            bw,
+            bh,
+            damping: fp.cdef_damping,
+            layout: fp.layout,
+            on_skip_tx: fp.cdef_on_skiptx,
+            cdef_on: inloop & INLOOPFILTER_CDEF != 0,
+            mask_cdef_idx: &collect_cdef_idx(&lf.mask, mask_row, sb256w),
+            mask_noskip: &collect_noskip(&lf.mask, mask_row, sb256w),
+            y_strength: &fp.cdef_y_strength,
+            uv_strength: &fp.cdef_uv_strength,
+        };
+        crate::cdef::cdef_brow_8bpc(
+            dst_y,
+            dst_u,
+            dst_v,
+            &bp,
+            fp.y_stride,
+            fp.uv_stride,
+            &mut lf.cdef_line,
+            &mut lf.cdef_line_toggle,
+            start,
+            end,
+            sby,
+            false,
+        );
+    }
+
+    // (4) Loop restoration (Wiener / GDF). Gated by restore_planes; the M2 clip
+    // disables restoration so this branch is inert. Full LR dispatch (the
+    // Rust-native kernel selection) lands with the LR ABI work.
+    let _ = (INLOOPFILTER_WIENER, INLOOPFILTER_GDF);
+}
+
+/// Extract the per-SB256 `cdef_idx` arrays for one mask row into a contiguous
+/// slice the CDEF brow can index by `sb256x`.
+fn collect_cdef_idx(mask: &[crate::lf_mask::Av2Filter], row: usize, sb256w: i32) -> Vec<[i8; 16]> {
+    (0..sb256w as usize)
+        .map(|i| mask.get(row + i).map(|m| m.cdef_idx).unwrap_or([-1; 16]))
+        .collect()
+}
+
+fn collect_noskip(
+    mask: &[crate::lf_mask::Av2Filter],
+    row: usize,
+    sb256w: i32,
+) -> Vec<[[u16; 4]; 32]> {
+    (0..sb256w as usize)
+        .map(|i| {
+            mask.get(row + i)
+                .map(|m| m.noskip_mask)
+                .unwrap_or([[0; 4]; 32])
+        })
+        .collect()
 }
 
 /// Orchestrate a single-threaded frame decode: init -> CDF init -> main loop.
@@ -2943,8 +3323,17 @@ fn decode_b(
     if std::env::var("RAV2D_TRACE").is_ok() {
         eprintln!(
             "BLK y={} x={} cby={} cbx={} bs={} lbs={} cbs={} hasL={} hasC={} ireg={} rng={}",
-            by, bx, cby, cbx, bs as i32, lbs as i32, cbs as i32, has_luma as i32,
-            has_chroma as i32, intra_region, msac.dbg_rng()
+            by,
+            bx,
+            cby,
+            cbx,
+            bs as i32,
+            lbs as i32,
+            cbs as i32,
+            has_luma as i32,
+            has_chroma as i32,
+            intra_region,
+            msac.dbg_rng()
         );
     }
     let trace_blk = std::env::var("RAV2D_BLK")
@@ -3113,11 +3502,11 @@ fn decode_b(
                 } else {
                     0
                 };
-                let diff = msac.decode_symbol_adapt(cdf_m.seg_id(ext_flag as usize, seg_ctx as usize), 7)
+                let diff = msac
+                    .decode_symbol_adapt(cdf_m.seg_id(ext_flag as usize, seg_ctx as usize), 7)
                     + (ext_flag << 3);
                 let last_active = fi.seg_last_active_segid as i32;
-                let mut sid =
-                    neg_deinterleave(diff as i32, pred_seg_id as i32, last_active + 1);
+                let mut sid = neg_deinterleave(diff as i32, pred_seg_id as i32, last_active + 1);
                 if sid > last_active {
                     sid = 0;
                 }
@@ -3161,99 +3550,109 @@ fn decode_b(
     // These are used by intrabc, FSC, MRL, multi_mrl, DIP, morph_pred.
     // boff[i] = -1 means unavailable.
     let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
-    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_morph, nb_dip, nb_boff) =
-        if has_luma {
-            let mut fsc = [0u8; 2];
-            let mut mrl = [0u8; 2];
-            let mut mmrl = [0u8; 2];
-            let mut ibc = [0u8; 2];
-            let mut mid = [0xffu8; 2];
-            let mut mvp = [0u8; 2];
-            let mut mm = [0u8; 2];
-            let mut mp = [0u8; 2];
-            let mut dp = [0u8; 2];
-            let mut boff = [-1i32; 2];
-            let mut idx = 0usize;
+    let (
+        nb_fsc,
+        nb_mrl,
+        nb_multi_mrl,
+        nb_intrabc,
+        nb_midx,
+        nb_mvprec,
+        nb_motion_mode,
+        nb_morph,
+        nb_dip,
+        nb_boff,
+    ) = if has_luma {
+        let mut fsc = [0u8; 2];
+        let mut mrl = [0u8; 2];
+        let mut mmrl = [0u8; 2];
+        let mut ibc = [0u8; 2];
+        let mut mid = [0xffu8; 2];
+        let mut mvp = [0u8; 2];
+        let mut mm = [0u8; 2];
+        let mut mp = [0u8; 2];
+        let mut dp = [0u8; 2];
+        let mut boff = [-1i32; 2];
+        let mut idx = 0usize;
 
-            if have_left && bh4 == h4 {
-                let off = (by4 + bh4 as usize).saturating_sub(1);
-                fsc[0] = l.fsc[off];
-                mrl[0] = l.mrl[off];
-                mmrl[0] = l.multi_mrl[off];
-                ibc[0] = l.intrabc[off];
-                mid[0] = l.midx[off];
-                mvp[0] = l.mvprec[off];
-                mm[0] = l.motion_mode[off];
-                mp[0] = l.morph_pred[off];
-                dp[0] = l.dip[off];
-                boff[0] = off as i32;
-                idx += 1;
+        if have_left && bh4 == h4 {
+            let off = (by4 + bh4 as usize).saturating_sub(1);
+            fsc[0] = l.fsc[off];
+            mrl[0] = l.mrl[off];
+            mmrl[0] = l.multi_mrl[off];
+            ibc[0] = l.intrabc[off];
+            mid[0] = l.midx[off];
+            mvp[0] = l.mvprec[off];
+            mm[0] = l.motion_mode[off];
+            mp[0] = l.morph_pred[off];
+            dp[0] = l.dip[off];
+            boff[0] = off as i32;
+            idx += 1;
+        }
+        if have_top_in_sb && bw4 == w4 {
+            let off = (bx4 + bw4 as usize).saturating_sub(1);
+            fsc[idx] = a.fsc[off];
+            mrl[idx] = a.mrl[off];
+            mmrl[idx] = a.multi_mrl[off];
+            ibc[idx] = a.intrabc[off];
+            mid[idx] = a.midx[off];
+            mvp[idx] = a.mvprec[off];
+            mm[idx] = a.motion_mode[off];
+            mp[idx] = a.morph_pred[off];
+            dp[idx] = a.dip[off];
+            boff[idx] = off as i32;
+            idx += 1;
+        }
+        if have_left && idx < 2 {
+            fsc[idx] = l.fsc[by4];
+            mrl[idx] = l.mrl[by4];
+            mmrl[idx] = l.multi_mrl[by4];
+            ibc[idx] = l.intrabc[by4];
+            mid[idx] = l.midx[by4];
+            mvp[idx] = l.mvprec[by4];
+            mm[idx] = l.motion_mode[by4];
+            mp[idx] = l.morph_pred[by4];
+            dp[idx] = l.dip[by4];
+            boff[idx] = by4 as i32;
+            idx += 1;
+        }
+        if have_top_in_sb && idx < 2 {
+            fsc[idx] = a.fsc[bx4];
+            mrl[idx] = a.mrl[bx4];
+            mmrl[idx] = a.multi_mrl[bx4];
+            ibc[idx] = a.intrabc[bx4];
+            mid[idx] = a.midx[bx4];
+            mvp[idx] = a.mvprec[bx4];
+            mm[idx] = a.motion_mode[bx4];
+            mp[idx] = a.morph_pred[bx4];
+            dp[idx] = a.dip[bx4];
+            boff[idx] = bx4 as i32;
+            if idx == 0 {
+                fsc[1] = fsc[0];
+                mrl[1] = mrl[0];
+                mmrl[1] = mmrl[0];
+                ibc[1] = ibc[0];
+                mid[1] = mid[0];
+                mvp[1] = mvp[0];
+                mm[1] = mm[0];
+                mp[1] = mp[0];
+                dp[1] = dp[0];
             }
-            if have_top_in_sb && bw4 == w4 {
-                let off = (bx4 + bw4 as usize).saturating_sub(1);
-                fsc[idx] = a.fsc[off];
-                mrl[idx] = a.mrl[off];
-                mmrl[idx] = a.multi_mrl[off];
-                ibc[idx] = a.intrabc[off];
-                mid[idx] = a.midx[off];
-                mvp[idx] = a.mvprec[off];
-                mm[idx] = a.motion_mode[off];
-                mp[idx] = a.morph_pred[off];
-                dp[idx] = a.dip[off];
-                boff[idx] = off as i32;
-                idx += 1;
-            }
-            if have_left && idx < 2 {
-                fsc[idx] = l.fsc[by4];
-                mrl[idx] = l.mrl[by4];
-                mmrl[idx] = l.multi_mrl[by4];
-                ibc[idx] = l.intrabc[by4];
-                mid[idx] = l.midx[by4];
-                mvp[idx] = l.mvprec[by4];
-                mm[idx] = l.motion_mode[by4];
-                mp[idx] = l.morph_pred[by4];
-                dp[idx] = l.dip[by4];
-                boff[idx] = by4 as i32;
-                idx += 1;
-            }
-            if have_top_in_sb && idx < 2 {
-                fsc[idx] = a.fsc[bx4];
-                mrl[idx] = a.mrl[bx4];
-                mmrl[idx] = a.multi_mrl[bx4];
-                ibc[idx] = a.intrabc[bx4];
-                mid[idx] = a.midx[bx4];
-                mvp[idx] = a.mvprec[bx4];
-                mm[idx] = a.motion_mode[bx4];
-                mp[idx] = a.morph_pred[bx4];
-                dp[idx] = a.dip[bx4];
-                boff[idx] = bx4 as i32;
-                if idx == 0 {
-                    fsc[1] = fsc[0];
-                    mrl[1] = mrl[0];
-                    mmrl[1] = mmrl[0];
-                    ibc[1] = ibc[0];
-                    mid[1] = mid[0];
-                    mvp[1] = mvp[0];
-                    mm[1] = mm[0];
-                    mp[1] = mp[0];
-                    dp[1] = dp[0];
-                }
-            }
-            (fsc, mrl, mmrl, ibc, mid, mvp, mm, mp, dp, boff)
-        } else {
-            (
-                [0u8; 2],
-                [0u8; 2],
-                [0u8; 2],
-                [0u8; 2],
-                [0xffu8; 2],
-                [0u8; 2],
-                [0u8; 2],
-                [0u8; 2],
-                [0u8; 2],
-                [-1i32; 2],
-            )
-        };
+        }
+        (fsc, mrl, mmrl, ibc, mid, mvp, mm, mp, dp, boff)
+    } else {
+        (
+            [0u8; 2],
+            [0u8; 2],
+            [0u8; 2],
+            [0u8; 2],
+            [0xffu8; 2],
+            [0u8; 2],
+            [0u8; 2],
+            [0u8; 2],
+            [0u8; 2],
+            [-1i32; 2],
+        )
+    };
 
     // intrabc
     if has_luma {
@@ -3262,17 +3661,34 @@ fn decode_b(
             let ctx = (nb_intrabc[0] + nb_intrabc[1]) as usize;
             if std::env::var("RAV2D_IBC").is_ok() {
                 let c = cdf_m.intrabc(ctx);
-                eprintln!("IBC y={} x={} ctx={} cdf0={} cdf1={} rng_in={} dif={}", by, bx, ctx, c[0], c[1], msac.dbg_rng(), msac.dbg_dif());
+                eprintln!(
+                    "IBC y={} x={} ctx={} cdf0={} cdf1={} rng_in={} dif={}",
+                    by,
+                    bx,
+                    ctx,
+                    c[0],
+                    c[1],
+                    msac.dbg_rng(),
+                    msac.dbg_dif()
+                );
             }
             b.intrabc = msac.decode_bool_adapt(cdf_m.intrabc(ctx)) as u8;
         }
     }
     let intrabc = has_luma && b.intrabc != 0;
     if trace_blk {
-        eprintln!("  CK intrabc b.intrabc={} intra={} rng={}", b.intrabc, b.is_intra, msac.dbg_rng());
+        eprintln!(
+            "  CK intrabc b.intrabc={} intra={} rng={}",
+            b.intrabc,
+            b.is_intra,
+            msac.dbg_rng()
+        );
     }
     if intrabc && std::env::var("RAV2D_IBC2").is_ok() {
-        eprintln!("IBC2 y={} x={} bs={} bw4={} bh4={} hasC={} cbs={}", by, bx, bs as i32, bw4, bh4, has_chroma, cbs as i32);
+        eprintln!(
+            "IBC2 y={} x={} bs={} bw4={} bh4={} hasC={} cbs={}",
+            by, bx, bs as i32, bw4, bh4, has_chroma, cbs as i32
+        );
     }
 
     // skip_txfm
@@ -3335,8 +3751,7 @@ fn decode_b(
                     .decode_symbol_adapt(cdf_m.seg_id(ext_flag as usize, seg_ctx as usize), 7)
                     + (ext_flag << 3);
                 let last_active = fi.seg_last_active_segid as i32;
-                let mut sid =
-                    neg_deinterleave(diff as i32, pred_seg_id as i32, last_active + 1);
+                let mut sid = neg_deinterleave(diff as i32, pred_seg_id as i32, last_active + 1);
                 if sid > last_active {
                     sid = 0;
                 }
@@ -3420,7 +3835,8 @@ fn decode_b(
                     v = 1;
                 } else {
                     let rem = fi.cdef_n_strengths as i32 - 3;
-                    v = 1 + msac.decode_symbol_adapt(cdf_m.cdef_idx(rem as usize), (rem + 1) as usize)
+                    v = 1 + msac
+                        .decode_symbol_adapt(cdf_m.cdef_idx(rem as usize), (rem + 1) as usize)
                         as i8;
                 }
                 if trace_blk {
@@ -3460,7 +3876,13 @@ fn decode_b(
                 };
                 let v = msac.decode_bool_adapt(cdf_m.ccso(p, ctx)) as u8;
                 if trace_blk {
-                    eprintln!("  CK ccso p={} ctx={} v={} rng={}", p, ctx, v, msac.dbg_rng());
+                    eprintln!(
+                        "  CK ccso p={} ctx={} v={} rng={}",
+                        p,
+                        ctx,
+                        v,
+                        msac.dbg_rng()
+                    );
                 }
                 v
             };
@@ -3672,7 +4094,12 @@ fn decode_b(
             b.fsc = msac.decode_bool_adapt(cdf_m.fsc(fsc_ctx, sz_ctx)) as u8;
         }
         if trace_blk {
-            eprintln!("  CK ymode={} fsc={} rng={}", unsafe { b.data.intra.y_mode }, b.fsc, msac.dbg_rng());
+            eprintln!(
+                "  CK ymode={} fsc={} rng={}",
+                unsafe { b.data.intra.y_mode },
+                b.fsc,
+                msac.dbg_rng()
+            );
         }
 
         // MRL (Multi-Reference Line) index
@@ -3855,7 +4282,12 @@ fn decode_b(
             }
         }
         if trace_blk {
-            eprintln!("  CK uvmode uv={} cfl_type={} rng={}", unsafe { b.data.intra.uv_mode }, unsafe { b.data.intra.cfl_type }, msac.dbg_rng());
+            eprintln!(
+                "  CK uvmode uv={} cfl_type={} rng={}",
+                unsafe { b.data.intra.uv_mode },
+                unsafe { b.data.intra.cfl_type },
+                msac.dbg_rng()
+            );
         }
     }
 
@@ -3907,7 +4339,12 @@ fn decode_b(
     }
 
     if trace_blk {
-        eprintln!("  CK predip dip={} pal={} rng={}", unsafe { b.data.intra.dip }, unsafe { b.data.intra.pal_sz }, msac.dbg_rng());
+        eprintln!(
+            "  CK predip dip={} pal={} rng={}",
+            unsafe { b.data.intra.dip },
+            unsafe { b.data.intra.pal_sz },
+            msac.dbg_rng()
+        );
     }
 
     // TX partition (intra path)
@@ -3916,7 +4353,12 @@ fn decode_b(
         read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
     }
     if trace_blk {
-        eprintln!("  CK txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
+        eprintln!(
+            "  CK txpart tx_part={} tx_size_ll={} rng={}",
+            b.tx_part,
+            b.tx_size_ll,
+            msac.dbg_rng()
+        );
     }
 
     // is_sm flags for reconstruction (smooth mode neighbours)
@@ -4017,7 +4459,11 @@ fn decode_b(
             b.data.intra.is_refmv = msac.decode_bool_adapt(cdf_m.intrabc_mode()) as u8;
         }
         if trace_blk {
-            eprintln!("  CK ibc_mode is_refmv={} rng={}", unsafe { b.data.intra.is_refmv }, msac.dbg_rng());
+            eprintln!(
+                "  CK ibc_mode is_refmv={} rng={}",
+                unsafe { b.data.intra.is_refmv },
+                msac.dbg_rng()
+            );
         }
 
         unsafe {
@@ -4032,7 +4478,12 @@ fn decode_b(
             }
         }
         if trace_blk {
-            eprintln!("  CK ibc_drl drl={} maxbits={} rng={}", unsafe { b.data.inter.drl_idx[0] }, fi.max_bvp_drl_bits, msac.dbg_rng());
+            eprintln!(
+                "  CK ibc_drl drl={} maxbits={} rng={}",
+                unsafe { b.data.inter.drl_idx[0] },
+                fi.max_bvp_drl_bits,
+                msac.dbg_rng()
+            );
         }
 
         let is_refmv = unsafe { b.data.intra.is_refmv };
@@ -4045,7 +4496,12 @@ fn decode_b(
             }
         }
         if trace_blk {
-            eprintln!("  CK ibc_qpel is_qpel={} fim={} rng={}", unsafe { b.data.intra.is_qpel }, fi.force_integer_mv, msac.dbg_rng());
+            eprintln!(
+                "  CK ibc_qpel is_qpel={} fim={} rng={}",
+                unsafe { b.data.intra.is_qpel },
+                fi.force_integer_mv,
+                msac.dbg_rng()
+            );
         }
 
         // IntraBC MV residual
@@ -4062,10 +4518,23 @@ fn decode_b(
                 b.data.intra.intrabc_mv = mv;
             }
             if trace_blk {
-                eprintln!("  CK ibc_mv mvy={} mvx={} prec={} rng={}", unsafe { b.data.intra.intrabc_mv.c.y }, unsafe { b.data.intra.intrabc_mv.c.x }, mv_prec, msac.dbg_rng());
+                eprintln!(
+                    "  CK ibc_mv mvy={} mvx={} prec={} rng={}",
+                    unsafe { b.data.intra.intrabc_mv.c.y },
+                    unsafe { b.data.intra.intrabc_mv.c.x },
+                    mv_prec,
+                    msac.dbg_rng()
+                );
             }
             if std::env::var("RAV2D_IBC2").is_ok() {
-                eprintln!("IBC2MV y={} x={} mvy={} mvx={} prec={}", by, bx, unsafe { b.data.intra.intrabc_mv.c.y }, unsafe { b.data.intra.intrabc_mv.c.x }, mv_prec);
+                eprintln!(
+                    "IBC2MV y={} x={} mvy={} mvx={} prec={}",
+                    by,
+                    bx,
+                    unsafe { b.data.intra.intrabc_mv.c.y },
+                    unsafe { b.data.intra.intrabc_mv.c.x },
+                    mv_prec
+                );
             }
         }
 
@@ -4090,7 +4559,12 @@ fn decode_b(
         let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
         read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
         if trace_blk {
-            eprintln!("  CK ibc_txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
+            eprintln!(
+                "  CK ibc_txpart tx_part={} tx_size_ll={} rng={}",
+                b.tx_part,
+                b.tx_size_ll,
+                msac.dbg_rng()
+            );
         }
 
         // IntraBC context write-back
@@ -5089,7 +5563,7 @@ fn decode_b(
         // TX partition for inter
         if has_luma {
             let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
-        read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
+            read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
         }
 
         // Inter context write-back
@@ -5222,12 +5696,27 @@ fn decode_b(
             }
             unsafe { b.data.intra.intrabc_mv = mv };
             if std::env::var("RAV2D_IBC2").is_ok() {
-                eprintln!("RIBCMV y={} x={} mvy={} mvx={} drl={} nmvs={}",
-                    by, bx, unsafe { mv.c.y }, unsafe { mv.c.x }, drl, n_mvs);
+                eprintln!(
+                    "RIBCMV y={} x={} mvy={} mvx={} drl={} nmvs={}",
+                    by,
+                    bx,
+                    unsafe { mv.c.y },
+                    unsafe { mv.c.x },
+                    drl,
+                    n_mvs
+                );
             }
             // splat_intrabc_mv (decode.c:599-625).
             let mut s_src = crate::refmvs::Block {
-                mv: [mv, Mv { c: MvXY { y: crate::levels::INVALID_MV, x: 0 } }],
+                mv: [
+                    mv,
+                    Mv {
+                        c: MvXY {
+                            y: crate::levels::INVALID_MV,
+                            x: 0,
+                        },
+                    },
+                ],
                 r#ref: RefPair { pair: -1 },
                 bs: bs as u8,
                 mf: 0,
@@ -5261,8 +5750,18 @@ fn decode_b(
             use crate::levels::{Mv, MvXY, RefPair};
             let mut s_src = crate::refmvs::Block {
                 mv: [
-                    Mv { c: MvXY { y: crate::levels::INVALID_MV, x: 0 } },
-                    Mv { c: MvXY { y: crate::levels::INVALID_MV, x: 0 } },
+                    Mv {
+                        c: MvXY {
+                            y: crate::levels::INVALID_MV,
+                            x: 0,
+                        },
+                    },
+                    Mv {
+                        c: MvXY {
+                            y: crate::levels::INVALID_MV,
+                            x: 0,
+                        },
+                    },
                 ],
                 r#ref: RefPair { pair: -1 },
                 bs: bs as u8,
@@ -5305,10 +5804,18 @@ fn decode_b(
             recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
         )?;
         if intrabc && std::env::var("RAV2D_IBC2").is_ok() {
-            eprintln!("RIBC y={} x={} mvy={} mvx={} refmv={} drl={} qpel={} morph={} rng={}",
-                by, bx, unsafe { b.data.intra.intrabc_mv.c.y }, unsafe { b.data.intra.intrabc_mv.c.x },
-                unsafe { b.data.intra.is_refmv }, unsafe { b.data.inter.drl_idx[0] },
-                unsafe { b.data.intra.is_qpel }, unsafe { b.data.intra.morph_pred }, msac.dbg_rng());
+            eprintln!(
+                "RIBC y={} x={} mvy={} mvx={} refmv={} drl={} qpel={} morph={} rng={}",
+                by,
+                bx,
+                unsafe { b.data.intra.intrabc_mv.c.y },
+                unsafe { b.data.intra.intrabc_mv.c.x },
+                unsafe { b.data.intra.is_refmv },
+                unsafe { b.data.inter.drl_idx[0] },
+                unsafe { b.data.intra.is_qpel },
+                unsafe { b.data.intra.morph_pred },
+                msac.dbg_rng()
+            );
         }
         if trace_blk {
             eprintln!("  CK post_chroma_recon rng={}", msac.dbg_rng());
@@ -5366,7 +5873,11 @@ fn recon_b_intra(
         // Split into 64x64 (or 128x128) sub-blocks. csplit[bs - 128x128][ss].
         const CSPLIT: [[BlockSize; 3]; 3] = [
             // BS_128x128
-            [BlockSize::Bs64x64, BlockSize::Bs128x64, BlockSize::Bs128x128],
+            [
+                BlockSize::Bs64x64,
+                BlockSize::Bs128x64,
+                BlockSize::Bs128x128,
+            ],
             // BS_128x64
             [BlockSize::Bs64x64, BlockSize::Bs64x64, BlockSize::Bs128x64],
             // BS_64x128
@@ -5379,16 +5890,32 @@ fn recon_b_intra(
         let (step, lbs2, cbs2i) = if imax(bw4, bh4) == 64 {
             (
                 32,
-                if lbs == BlockSize::Invalid { BlockSize::Invalid } else { BlockSize::Bs128x128 },
-                if cbs == BlockSize::Invalid { BlockSize::Invalid } else { BlockSize::Bs128x128 },
+                if lbs == BlockSize::Invalid {
+                    BlockSize::Invalid
+                } else {
+                    BlockSize::Bs128x128
+                },
+                if cbs == BlockSize::Invalid {
+                    BlockSize::Invalid
+                } else {
+                    BlockSize::Bs128x128
+                },
             )
         } else {
             let csplit_row = (bs as i32 - BlockSize::Bs128x128 as i32) as usize;
             let csi = (ss_hor + ss_ver) as usize;
             (
                 16,
-                if lbs == BlockSize::Invalid { BlockSize::Invalid } else { BlockSize::Bs64x64 },
-                if cbs == BlockSize::Invalid { BlockSize::Invalid } else { CSPLIT[csplit_row][csi] },
+                if lbs == BlockSize::Invalid {
+                    BlockSize::Invalid
+                } else {
+                    BlockSize::Bs64x64
+                },
+                if cbs == BlockSize::Invalid {
+                    BlockSize::Invalid
+                } else {
+                    CSPLIT[csplit_row][csi]
+                },
             )
         };
 
@@ -5426,8 +5953,22 @@ fn recon_b_intra(
                 {
                     // 256px case: recurse one more level (lbs2 == 128x128).
                     recon_b_intra(
-                        recon, msac, cdf_m, a, l, b, sub_bx, sub_by, sub_cbx, sub_cby, lbs2,
-                        if read_cbs != BlockSize::Invalid { read_cbs } else { recon_cbs },
+                        recon,
+                        msac,
+                        cdf_m,
+                        a,
+                        l,
+                        b,
+                        sub_bx,
+                        sub_by,
+                        sub_cbx,
+                        sub_cby,
+                        lbs2,
+                        if read_cbs != BlockSize::Invalid {
+                            read_cbs
+                        } else {
+                            recon_cbs
+                        },
                         lbs2 != BlockSize::Invalid,
                         read_cbs != BlockSize::Invalid || recon_cbs != BlockSize::Invalid,
                         fi,
@@ -5437,18 +5978,34 @@ fn recon_b_intra(
                     // but `b.bs` (passed to coef decode) stays the full block.
                     if lbs2 != BlockSize::Invalid {
                         recon_b_intra_luma_geom(
-                            recon, msac, cdf_m, a, l, b, sub_bx, sub_by, lbs2 as usize, fi,
+                            recon,
+                            msac,
+                            cdf_m,
+                            a,
+                            l,
+                            b,
+                            sub_bx,
+                            sub_by,
+                            lbs2 as usize,
+                            fi,
                         )?;
                     }
                     // Chroma: read phase with the first sub-block, recon with the last.
-                    let phase = match (read_cbs != BlockSize::Invalid, recon_cbs != BlockSize::Invalid) {
+                    let phase = match (
+                        read_cbs != BlockSize::Invalid,
+                        recon_cbs != BlockSize::Invalid,
+                    ) {
                         (true, true) => Some(ChromaPhase::Both),
                         (true, false) => Some(ChromaPhase::ReadOnly),
                         (false, true) => Some(ChromaPhase::ReconOnly),
                         (false, false) => None,
                     };
                     if let Some(ph) = phase {
-                        let ccbs = if read_cbs != BlockSize::Invalid { read_cbs } else { recon_cbs };
+                        let ccbs = if read_cbs != BlockSize::Invalid {
+                            read_cbs
+                        } else {
+                            recon_cbs
+                        };
                         let sdp_active = lbs2 == BlockSize::Invalid;
                         recon_b_intra_chroma_phase(
                             recon, msac, cdf_m, a, l, b, sub_cbx, sub_cby, ccbs, sdp_active, fi, ph,
@@ -5505,8 +6062,18 @@ fn recon_b_intra(
                 if ty == by && tx == bx {
                     let stride = recon.frame.y_stride_px;
                     let off = 4 * (by as usize * stride + bx as usize);
-                    let row: Vec<u8> = (0..(bw4 * 4).min(16) as usize).map(|i| recon.dst_y[off + i]).collect();
-                    eprintln!("RIBCPX y={} x={} row0: {}", by, bx, row.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" "));
+                    let row: Vec<u8> = (0..(bw4 * 4).min(16) as usize)
+                        .map(|i| recon.dst_y[off + i])
+                        .collect();
+                    eprintln!(
+                        "RIBCPX y={} x={} row0: {}",
+                        by,
+                        bx,
+                        row.iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
                 }
             }
         }
@@ -5538,7 +6105,9 @@ fn recon_b_intra(
             }
         }
         let sdp_active = lbs == BlockSize::Invalid;
-        recon_b_intra_chroma(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, intrabc, sdp_active, fi)?;
+        recon_b_intra_chroma(
+            recon, msac, cdf_m, a, l, b, cbx, cby, cbs, intrabc, sdp_active, fi,
+        )?;
     }
     Ok(())
 }
@@ -6084,7 +6653,18 @@ fn recon_b_intra_chroma(
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     recon_b_intra_chroma_phase(
-        recon, msac, cdf_m, a, l, b, cbx, cby, cbs, sdp_active, fi, ChromaPhase::Both,
+        recon,
+        msac,
+        cdf_m,
+        a,
+        l,
+        b,
+        cbx,
+        cby,
+        cbs,
+        sdp_active,
+        fi,
+        ChromaPhase::Both,
     )
 }
 
@@ -6198,97 +6778,110 @@ fn recon_b_intra_chroma_phase(
             }
         }
     } else if phase != ChromaPhase::ReconOnly {
-    for pl in 0..2 {
-        let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
-        let mut y = 0;
-        while y < ch4ss {
-            let mut x = 0;
-            while x < cw4ss {
-                let i = (y * cbw4ss as i32 + x) as usize;
-                let mut txtp: u16 = 0;
-                let mut res_ctx: u8 = 0;
-                // TU coefficient region is txw*txh*16 coefs (= ctw*cth), placed at
-                // i*16 within the per-plane block buffer (recon_tmpl.c cf[pl][i*16]).
-                let cf_slot = &mut cf[i * 16..];
-                let tu_n = (uv_t_dim.w as usize * 4) * (uv_t_dim.h as usize * 4);
-                cf_slot[..tu_n].fill(0);
+        for pl in 0..2 {
+            let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
+            let mut y = 0;
+            while y < ch4ss {
+                let mut x = 0;
+                while x < cw4ss {
+                    let i = (y * cbw4ss as i32 + x) as usize;
+                    let mut txtp: u16 = 0;
+                    let mut res_ctx: u8 = 0;
+                    // TU coefficient region is txw*txh*16 coefs (= ctw*cth), placed at
+                    // i*16 within the per-plane block buffer (recon_tmpl.c cf[pl][i*16]).
+                    let cf_slot = &mut cf[i * 16..];
+                    let tu_n = (uv_t_dim.w as usize * 4) * (uv_t_dim.h as usize * 4);
+                    cf_slot[..tu_n].fill(0);
 
-                let dq_tbl = recon.dq_active[seg_id][1 + pl];
-                let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
+                    let dq_tbl = recon.dq_active[seg_id][1 + pl];
+                    let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
 
-                let acoef = &a.ccoef[pl][(cbx4 + x as usize)..];
-                let lcoef = &l.ccoef[pl][(cby4 + y as usize)..];
+                    let acoef = &a.ccoef[pl][(cbx4 + x as usize)..];
+                    let lcoef = &l.ccoef[pl][(cby4 + y as usize)..];
 
-                let params = crate::recon::DecodeCoefParams {
-                    tx: uvtx,
-                    bs: cbs as u8 as usize,
-                    plane: (pl + 1) as i32,
-                    intra: is_intra,
-                    fsc: b.fsc != 0,
-                    lossless,
-                    sdp_active,
-                    y_mode: 0,
-                    uv_mode: uv_mode as usize,
-                    seg_id,
-                    seq_fsc: recon.frame.seq_fsc,
-                    seq_ist: recon.frame.seq_ist,
-                    seq_cctx: recon.frame.seq_cctx,
-                    chroma_dctonly: false,
-                    reduced_txtp_set: recon.frame.reduced_txtp_set,
-                    tcq_enabled: recon.frame.tcq,
-                    layout: recon.frame.layout,
-                    u_has_cf,
-                    cbx,
-                    cby,
-                    luma_fsc_map: &luma_fsc_map,
-                    dq_tbl,
-                    bitdepth: recon.frame.bitdepth,
-                    qm: qm_ref,
-                    ss_hor: ss_hor != 0,
-                    ss_ver: ss_ver != 0,
-                };
+                    let params = crate::recon::DecodeCoefParams {
+                        tx: uvtx,
+                        bs: cbs as u8 as usize,
+                        plane: (pl + 1) as i32,
+                        intra: is_intra,
+                        fsc: b.fsc != 0,
+                        lossless,
+                        sdp_active,
+                        y_mode: 0,
+                        uv_mode: uv_mode as usize,
+                        seg_id,
+                        seq_fsc: recon.frame.seq_fsc,
+                        seq_ist: recon.frame.seq_ist,
+                        seq_cctx: recon.frame.seq_cctx,
+                        chroma_dctonly: false,
+                        reduced_txtp_set: recon.frame.reduced_txtp_set,
+                        tcq_enabled: recon.frame.tcq,
+                        layout: recon.frame.layout,
+                        u_has_cf,
+                        cbx,
+                        cby,
+                        luma_fsc_map: &luma_fsc_map,
+                        dq_tbl,
+                        bitdepth: recon.frame.bitdepth,
+                        qm: qm_ref,
+                        ss_hor: ss_hor != 0,
+                        ss_ver: ss_ver != 0,
+                    };
 
-                let eob = crate::recon::decode_coefs(
-                    msac,
-                    recon.cdf_coef,
-                    cdf_m,
-                    acoef,
-                    lcoef,
-                    &params,
-                    cf_slot,
-                    &mut txtp,
-                    &mut res_ctx,
-                );
-                if eob == i32::MIN {
-                    if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
-                        eprintln!("recon chroma: eob==MIN cbx={} cby={} seg={}", cbx, cby, b.seg_id);
+                    let eob = crate::recon::decode_coefs(
+                        msac,
+                        recon.cdf_coef,
+                        cdf_m,
+                        acoef,
+                        lcoef,
+                        &params,
+                        cf_slot,
+                        &mut txtp,
+                        &mut res_ctx,
+                    );
+                    if eob == i32::MIN {
+                        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+                            eprintln!(
+                                "recon chroma: eob==MIN cbx={} cby={} seg={}",
+                                cbx, cby, b.seg_id
+                            );
+                        }
+                        return Err(());
                     }
-                    return Err(());
-                }
-                if pl == 0 {
-                    u_has_cf = (eob >= 0) as i32;
-                }
-                tu_txtp[i][pl] = txtp;
-                tu_eob[i][pl] = eob as i16;
+                    if pl == 0 {
+                        u_has_cf = (eob >= 0) as i32;
+                    }
+                    tu_txtp[i][pl] = txtp;
+                    tu_eob[i][pl] = eob as i16;
 
-                if std::env::var("RAV2D_CTX").is_ok() && cby < 8 {
-                    eprintln!("CHROMATX cby={} cbx={} pl={} uvtx={} txtp={} eob={} uvmode={} cfl_type={} rng={}",
-                        cby, cbx, pl, uvtx, txtp & 0xff, eob, uv_mode, unsafe { b.data.intra.cfl_type }, msac.dbg_rng());
-                }
+                    if std::env::var("RAV2D_CTX").is_ok() && cby < 8 {
+                        eprintln!(
+                            "CHROMATX cby={} cbx={} pl={} uvtx={} txtp={} eob={} uvmode={} cfl_type={} rng={}",
+                            cby,
+                            cbx,
+                            pl,
+                            uvtx,
+                            txtp & 0xff,
+                            eob,
+                            uv_mode,
+                            unsafe { b.data.intra.cfl_type },
+                            msac.dbg_rng()
+                        );
+                    }
 
-                let aw = imin(ctw4, 64 - (cbx4 + x as usize) as i32).max(0) as usize;
-                let lh = imin(cth4, 64 - (cby4 + y as usize) as i32).max(0) as usize;
-                if aw > 0 {
-                    a.ccoef[pl][cbx4 + x as usize..cbx4 + x as usize + aw].fill(res_ctx);
+                    let aw = imin(ctw4, 64 - (cbx4 + x as usize) as i32).max(0) as usize;
+                    let lh = imin(cth4, 64 - (cby4 + y as usize) as i32).max(0) as usize;
+                    if aw > 0 {
+                        a.ccoef[pl][cbx4 + x as usize..cbx4 + x as usize + aw].fill(res_ctx);
+                    }
+                    if lh > 0 {
+                        l.ccoef[pl][cby4 + y as usize..cby4 + y as usize + lh].fill(res_ctx);
+                    }
+                    x += txw;
                 }
-                if lh > 0 {
-                    l.ccoef[pl][cby4 + y as usize..cby4 + y as usize + lh].fill(res_ctx);
-                }
-                x += txw;
+                y += txh;
             }
-            y += txh;
         }
-    }
     } // end coef-read phase
 
     // Stash decoded coefficients for the deferred recon phase, or restore them.
@@ -7056,16 +7649,28 @@ fn recon_b_luma_tx(
         let pred_angle = angle_eff | intra_flags;
         let max_w = 4 * fi.bw - 4 * bx;
         let max_h = 4 * fi.bh - 4 * by;
-        if std::env::var("RAV2D_PRED").map(|s| {
-            let mut it = s.split(',');
-            it.next().and_then(|v| v.parse::<i32>().ok()) == Some(by)
-                && it.next().and_then(|v| v.parse::<i32>().ok()) == Some(bx)
-        }).unwrap_or(false) {
+        if std::env::var("RAV2D_PRED")
+            .map(|s| {
+                let mut it = s.split(',');
+                it.next().and_then(|v| v.parse::<i32>().ok()) == Some(by)
+                    && it.next().and_then(|v| v.parse::<i32>().ok()) == Some(bx)
+            })
+            .unwrap_or(false)
+        {
             let topo = edge_o;
-            eprintln!("PRED y={} x={} m={} tw={} th={} mrl={} edge_top={:?} edge_left={:?}",
-                by, bx, m, tw, th, mrl_idx,
-                &recon.edge[topo+1..topo+1+tw.min(8)],
-                (1..=th.min(8)).map(|i| recon.edge[topo - i]).collect::<Vec<_>>());
+            eprintln!(
+                "PRED y={} x={} m={} tw={} th={} mrl={} edge_top={:?} edge_left={:?}",
+                by,
+                bx,
+                m,
+                tw,
+                th,
+                mrl_idx,
+                &recon.edge[topo + 1..topo + 1 + tw.min(8)],
+                (1..=th.min(8))
+                    .map(|i| recon.edge[topo - i])
+                    .collect::<Vec<_>>()
+            );
         }
         dispatch_ipred(
             m,
@@ -7081,11 +7686,14 @@ fn recon_b_luma_tx(
             max_h,
             &recon.frame.ibp_weights,
         );
-        if std::env::var("RAV2D_PRED").map(|s| {
-            let mut it = s.split(',');
-            it.next().and_then(|v| v.parse::<i32>().ok()) == Some(by)
-                && it.next().and_then(|v| v.parse::<i32>().ok()) == Some(bx)
-        }).unwrap_or(false) {
+        if std::env::var("RAV2D_PRED")
+            .map(|s| {
+                let mut it = s.split(',');
+                it.next().and_then(|v| v.parse::<i32>().ok()) == Some(by)
+                    && it.next().and_then(|v| v.parse::<i32>().ok()) == Some(bx)
+            })
+            .unwrap_or(false)
+        {
             let p: Vec<u8> = (0..tw.min(8)).map(|i| recon.dst_y[dst_off + i]).collect();
             eprintln!("PRED y={} x={} predrow0={:?}", by, bx, p);
         }
@@ -7182,7 +7790,18 @@ fn recon_b_luma_tx(
         }
         eprintln!(
             "LUMATX y={} x={} tx={} txtp={} eob={} ymode={} ang={} dip={} mrl={} fsc={} sum={} first={:?}",
-            by, bx, tx, txtp & 0xff, eob, y_mode, intra.y_angle as i32, intra.dip as i32 - 1, intra.mrl_index, b.fsc, sum, first
+            by,
+            bx,
+            tx,
+            txtp & 0xff,
+            eob,
+            y_mode,
+            intra.y_angle as i32,
+            intra.dip as i32 - 1,
+            intra.mrl_index,
+            b.fsc,
+            sum,
+            first
         );
     }
 
@@ -7262,7 +7881,14 @@ pub fn decode_sb(
     if std::env::var("RAV2D_TRACE_SB").is_ok() {
         eprintln!(
             "SB y={} x={} bs={} lbs={} cbs={} ireg={} dir={} rng={}",
-            *by, *bx, bs as i32, lbs as i32, cbs as i32, *intra_region, *dir_ptr, msac.dbg_rng()
+            *by,
+            *bx,
+            bs as i32,
+            lbs as i32,
+            cbs as i32,
+            *intra_region,
+            *dir_ptr,
+            msac.dbg_rng()
         );
     }
 
@@ -7389,9 +8015,18 @@ pub fn decode_sb(
                     msac.decode_bool_adapt(cdf_m.part_split(pl, ctx2))
                 };
                 if std::env::var("RAV2D_PART").is_ok() {
-                    eprintln!("PART y={} x={} bs={} pl={} ctx1={} ctx2={} is_split={} L0={:?} rng={}",
-                        *by, *bx, bs as i32, pl, ctx1, ctx2, is_split,
-                        &l.partition[0][0..8], msac.dbg_rng());
+                    eprintln!(
+                        "PART y={} x={} bs={} pl={} ctx1={} ctx2={} is_split={} L0={:?} rng={}",
+                        *by,
+                        *bx,
+                        bs as i32,
+                        pl,
+                        ctx1,
+                        ctx2,
+                        is_split,
+                        &l.partition[0][0..8],
+                        msac.dbg_rng()
+                    );
                 }
 
                 if is_split == 0 {

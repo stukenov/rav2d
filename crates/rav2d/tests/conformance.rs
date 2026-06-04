@@ -89,9 +89,18 @@ unsafe fn extract_planes(pic: &rav2d::sys::Dav2dPicture) -> FramePlanes {
     }
 }
 
-/// Decode a clip with the dav2d C reference library. Returns one `FramePlanes`
-/// per output frame.
+/// DAV2D_INLOOPFILTER_ALL (deblock | cdef | ccso | wiener | gdf).
+const DAV2D_INLOOPFILTER_ALL: u32 = 31;
+
+/// Decode a clip with the dav2d C reference library, with in-loop filters off
+/// (pure reconstruction). Returns one `FramePlanes` per output frame.
 pub fn dav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
+    dav2d_decode_filters(path, 0)
+}
+
+/// Decode a clip with the dav2d C reference library at the given in-loop-filter
+/// flag word (0 = none, 31 = all). Single-threaded, film grain off.
+pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePlanes> {
     use rav2d::sys;
     let data = std::fs::read(path).expect("read clip");
     let mut frames = Vec::new();
@@ -99,12 +108,11 @@ pub fn dav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
     unsafe {
         let mut settings: sys::Dav2dSettings = std::mem::zeroed();
         sys::dav2d_default_settings(&mut settings);
-        // Deterministic single-threaded reference. Disable in-loop filters and
-        // film grain so the reference is PURE reconstruction — rav2d has no
-        // post-filters yet, so comparing pre-filter pixels isolates recon.
+        // Deterministic single-threaded reference. Film grain off so only the
+        // in-loop filters differ between the pure-recon and filtered harnesses.
         settings.n_threads = 1;
         settings.apply_grain = 0;
-        settings.inloop_filters = 0; // DAV2D_INLOOPFILTER_NONE
+        settings.inloop_filters = inloop_filters;
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
         let r = sys::dav2d_open(&mut ctx, &settings);
@@ -164,15 +172,24 @@ pub fn dav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
 // rav2d decode
 // ---------------------------------------------------------------------------
 
-/// Decode a clip with rav2d. Returns one `FramePlanes` per output frame.
-/// (Until reconstruction + output queueing land, this yields no frames.)
+/// Decode a clip with rav2d, in-loop filters off (pure reconstruction). Returns
+/// one `FramePlanes` per output frame.
 pub fn rav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
+    rav2d_decode_filters(path, rav2d::InloopFilterType::None)
+}
+
+/// Decode a clip with rav2d at the given in-loop filter setting.
+pub fn rav2d_decode_filters(
+    path: &PathBuf,
+    inloop_filters: rav2d::InloopFilterType,
+) -> Vec<FramePlanes> {
     use rav2d::{Data, Decoder, Settings};
     let bytes = std::fs::read(path).expect("read clip");
     let mut s = Settings::default();
     s.n_threads = 1;
     s.apply_grain = false;
     s.run_decode = true;
+    s.inloop_filters = inloop_filters;
     let mut dec = Decoder::open(&s).expect("open");
 
     let mut frames = Vec::new();
@@ -392,6 +409,66 @@ fn bit_exact_keyframe_clip() {
     assert_bit_exact(&reference, &got, "bus.64x64.l5");
 }
 
+/// M2 gate: frame-0 ALL PLANES must match the dav2d reference WITH in-loop
+/// filters ON (both decoders run deblock + CDEF (+CCSO) + loop restoration). The
+/// bus.64x64.l5 keyframe exercises CDEF (chroma strength 1), so this validates
+/// the per-superblock-row post-filter pipeline. Film grain stays off (M4).
+#[test]
+fn bit_exact_keyframe_filtered() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode_filters(&path, DAV2D_INLOOPFILTER_ALL);
+    let got = rav2d_decode_filters(&path, rav2d::InloopFilterType::All);
+    assert!(!got.is_empty(), "rav2d produced no frames");
+    assert!(!reference.is_empty(), "dav2d produced no frames");
+    assert_eq!(
+        (reference[0].w, reference[0].h),
+        (got[0].w, got[0].h),
+        "frame 0 dims differ"
+    );
+
+    let (ssh, _ssv) = ss(reference[0].layout);
+    let plane_names = ["luma", "U", "V"];
+    let mut failures = Vec::new();
+    for pl in 0..3 {
+        let r = &reference[0].planes[pl];
+        let g = &got[0].planes[pl];
+        assert_eq!(
+            r.len(),
+            g.len(),
+            "frame 0 plane {} size differs",
+            plane_names[pl]
+        );
+        let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
+        if diff != 0 {
+            let first = r.iter().zip(g.iter()).position(|(a, b)| a != b).unwrap();
+            let stride = if pl == 0 {
+                reference[0].w as usize
+            } else {
+                ((reference[0].w + ssh) >> ssh) as usize
+            };
+            failures.push(format!(
+                "plane {} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
+                plane_names[pl],
+                r.len(),
+                first % stride,
+                first / stride,
+                r[first],
+                g[first]
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        panic!(
+            "frame 0 not bit-exact (filters on):\n  {}",
+            failures.join("\n  ")
+        );
+    }
+}
+
 /// Informational frame-0 (keyframe, all-intra) sweep across the media clips:
 /// for each, compare rav2d's first frame's planes to dav2d (filters/grain off).
 /// Catches panics per clip so one failure doesn't mask the rest. Prints a table;
@@ -471,7 +548,8 @@ fn intra_frame0_sweep() {
 #[test]
 #[ignore = "debug trace harness"]
 fn trace_clip() {
-    let clip = std::env::var("CLIP").unwrap_or_else(|_| "avm-v14.1.0-bus.64x64.l5.lossless.obu".into());
+    let clip =
+        std::env::var("CLIP").unwrap_or_else(|_| "avm-v14.1.0-bus.64x64.l5.lossless.obu".into());
     let path = media(&clip);
     let which = std::env::var("WHICH").unwrap_or_else(|_| "both".into());
     if which == "dav2d" || which == "both" {

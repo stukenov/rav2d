@@ -3421,6 +3421,7 @@ mod tests {
             strict_std_compliance: false,
             output_invisible_frames: false,
             n_passes: 1,
+            inloop_filters: 0,
             run_decode: false,
             frame_out: None,
         }

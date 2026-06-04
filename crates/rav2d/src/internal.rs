@@ -166,6 +166,13 @@ pub struct LoopFilterState {
     pub ns_subclass_class_idx: Option<usize>,
     pub lr_db_line: [Vec<u8>; 3],
     pub lr_cdef_line: [Vec<u8>; 3],
+    /// CDEF pre-filter top-row backup, double-buffered (2 banks x 3 planes).
+    /// Each plane bank holds 2 rows of the (positive-stride) plane width; the
+    /// `cdef_line_toggle` selects which bank holds the previous band's backup.
+    /// This is the single-thread (`have_tt == 0`) analogue of dav2d's
+    /// `f->lf.cdef_line[2][3]`.
+    pub cdef_line: [[Vec<u8>; 3]; 2],
+    pub cdef_line_toggle: usize,
     pub p: [Vec<u8>; 3],
     pub ns_subclass_lut: Vec<u8>,
     pub pc_subclass_lut: Vec<u8>,
