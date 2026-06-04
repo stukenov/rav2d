@@ -3493,13 +3493,13 @@ mod tests {
         assert_eq!(seq.max_height, 288);
     }
 
-    // Runs the full single-threaded decode pipeline (submit_frame -> decode_frame
-    // -> decode_tile_sbrow -> decode_sb/decode_b) on a real keyframe stream with
-    // `run_decode` enabled. The leading keyframe entropy-decodes cleanly (verified:
-    // submit_frame returns Ok, no symbol-decoder overread). This test guards the
-    // decode path against panics/OOB on real data. (Inter frames in the clip are
-    // not yet supported and degrade gracefully; reconstruction is a later
-    // milestone.)
+    // Runs the single-threaded decode pipeline (submit_frame -> decode_frame ->
+    // decode_tile_sbrow -> decode_sb/decode_b) on a real keyframe stream with
+    // `run_decode` enabled. The leading keyframe's block SYNTAX (partition tree,
+    // modes, MVs, tx-part) parses without panic or symbol-decoder overread. NOTE:
+    // residual coefficient reading is not yet wired (decode_b calls no coefficient
+    // decoder), so this guards the block-syntax parse + decode path, not a complete
+    // entropy decode. Reconstruction/coefficients are a later milestone.
     #[test]
     fn test_decode_keyframe_entropy() {
         let path = concat!(
