@@ -6154,9 +6154,28 @@ fn recon_b_intra_chroma_phase(
     let mut tu_txtp = [[0u16; 2]; 256];
     let mut tu_eob = [[-1i16; 2]; 256];
 
+    // IntraBC blocks with skip_txfm code no chroma coefficients: fill the ccoef
+    // contexts with 0x40 and leave all TU eobs at -1 (recon_tmpl.c:3536-3540).
+    // (For non-IntraBC intra blocks skip_txfm is always 0; the chroma-only SDP
+    // tree is sdp_active so skip_txfm does not apply.)
+    let chroma_skip_txfm = is_intrabc && b.skip_txfm != 0;
+
     // ---- decode coefficients for both planes (recon_tmpl.c:3543-3580) -------
     let mut u_has_cf = 0i32;
-    if phase != ChromaPhase::ReconOnly {
+    if chroma_skip_txfm {
+        if phase != ChromaPhase::ReconOnly {
+            for pl in 0..2 {
+                let aw = imin(cw4ss, 64 - cbx4 as i32).max(0) as usize;
+                let lh = imin(ch4ss, 64 - cby4 as i32).max(0) as usize;
+                if aw > 0 {
+                    a.ccoef[pl][cbx4..cbx4 + aw].fill(0x40);
+                }
+                if lh > 0 {
+                    l.ccoef[pl][cby4..cby4 + lh].fill(0x40);
+                }
+            }
+        }
+    } else if phase != ChromaPhase::ReconOnly {
     for pl in 0..2 {
         let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
         let mut y = 0;
