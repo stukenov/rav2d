@@ -391,3 +391,77 @@ fn bit_exact_keyframe_clip() {
     let got = rav2d_decode(&path);
     assert_bit_exact(&reference, &got, "bus.64x64.l5");
 }
+
+/// Informational frame-0 (keyframe, all-intra) sweep across the media clips:
+/// for each, compare rav2d's first frame's planes to dav2d (filters/grain off).
+/// Catches panics per clip so one failure doesn't mask the rest. Prints a table;
+/// run with `--ignored --nocapture`. Flushes the intra bug surface across
+/// sdp/lossless/deltaq/seg/partial-lossless features.
+#[test]
+#[ignore = "intra frame-0 conformance sweep (run with --ignored --nocapture)"]
+fn intra_frame0_sweep() {
+    let clips = [
+        "avm-v14.1.0-bus.64x64.l5.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp0.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp1.obu",
+        "avm-v14.1.0-bus.64x64.l5.lossless.obu",
+        "avm-v14.1.0-bus.64x64.l5.opfl0-refinemv0.obu",
+        "avm-v14.1.0-bus.352x288.l1.partial_lossless.obu",
+        "avm-v14.1.0-bus.352x288.l10.deltaq1.obu",
+        "avm-v14.1.0-bus.352x288.l5.seg1.obu",
+        "avm-v14.1.0-hm.64x64.l5.filmgrain.obu",
+    ];
+    let mut summary = Vec::new();
+    for clip in clips {
+        let path = media(clip);
+        if !path.exists() {
+            summary.push(format!("{clip}: MISSING"));
+            continue;
+        }
+        let reference = dav2d_decode(&path);
+        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rav2d_decode(&path)));
+        let got = match got {
+            Ok(g) => g,
+            Err(_) => {
+                summary.push(format!("{clip}: rav2d PANIC"));
+                continue;
+            }
+        };
+        if reference.is_empty() {
+            summary.push(format!("{clip}: dav2d no frames"));
+            continue;
+        }
+        if got.is_empty() {
+            summary.push(format!("{clip}: rav2d NO FRAMES"));
+            continue;
+        }
+        let r = &reference[0];
+        let g = &got[0];
+        if (r.w, r.h) != (g.w, g.h) {
+            summary.push(format!(
+                "{clip}: dims differ ref={}x{} got={}x{}",
+                r.w, r.h, g.w, g.h
+            ));
+            continue;
+        }
+        let mut diffs = [0usize; 3];
+        let mut total = [0usize; 3];
+        for pl in 0..3 {
+            total[pl] = r.planes[pl].len();
+            diffs[pl] = r.planes[pl]
+                .iter()
+                .zip(g.planes[pl].iter())
+                .filter(|(a, b)| a != b)
+                .count();
+        }
+        if diffs == [0, 0, 0] {
+            summary.push(format!("{clip}: BIT-EXACT ({}x{})", r.w, r.h));
+        } else {
+            summary.push(format!(
+                "{clip}: DIFF Y={}/{} U={}/{} V={}/{}",
+                diffs[0], total[0], diffs[1], total[1], diffs[2], total[2]
+            ));
+        }
+    }
+    eprintln!("\n=== intra frame-0 sweep ===\n{}", summary.join("\n"));
+}
