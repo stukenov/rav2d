@@ -1,5 +1,5 @@
 use crate::cdf::{CdfModeContext, CdfMvContext};
-use crate::ctx::{memset_pow2, set_ctx};
+use crate::ctx::memset_pow2;
 use crate::dsp::N_SWITCHABLE_FILTERS;
 use crate::env::{BlockContext, get_partition_ctx, get_partition2_ctx, warp_type};
 use crate::headers::{
@@ -6219,6 +6219,11 @@ pub fn decode_sb(
                 } else {
                     msac.decode_bool_adapt(cdf_m.part_split(pl, ctx2))
                 };
+                if std::env::var("RAV2D_PART").is_ok() {
+                    eprintln!("PART y={} x={} bs={} pl={} ctx1={} ctx2={} is_split={} L0={:?} rng={}",
+                        *by, *bx, bs as i32, pl, ctx1, ctx2, is_split,
+                        &l.partition[0][0..8], msac.dbg_rng());
+                }
 
                 if is_split == 0 {
                     bp = BlockPartition::None;
@@ -6405,10 +6410,12 @@ pub fn decode_sb(
                 let bx4 = (*bx & 63) as usize;
                 let by4 = (*by & 63) as usize;
                 if (cbs as i8 | lbs as i8) != BlockSize::Invalid as i8 {
-                    set_ctx(&mut a.partition[0], bx4, !(b_dim[0] - 1), b_dim[2] as usize);
-                    set_ctx(&mut a.partition[1], bx4, !(b_dim[0] - 1), b_dim[2] as usize);
-                    set_ctx(&mut l.partition[0], by4, !(b_dim[1] - 1), b_dim[3] as usize);
-                    set_ctx(&mut l.partition[1], by4, !(b_dim[1] - 1), b_dim[3] as usize);
+                    // C: case_set(b_dim[2 + i]) writes 1<<b_dim[2+i] bytes (pow2 length),
+                    // for both partition[0] and partition[1].
+                    memset_pow2(&mut a.partition[0], bx4, !(b_dim[0] - 1), b_dim[2]);
+                    memset_pow2(&mut a.partition[1], bx4, !(b_dim[0] - 1), b_dim[2]);
+                    memset_pow2(&mut l.partition[0], by4, !(b_dim[1] - 1), b_dim[3]);
+                    memset_pow2(&mut l.partition[1], by4, !(b_dim[1] - 1), b_dim[3]);
                 } else {
                     memset_pow2(&mut a.partition[pl], bx4, !(b_dim[0] - 1), b_dim[2]);
                     memset_pow2(&mut l.partition[pl], by4, !(b_dim[1] - 1), b_dim[3]);
