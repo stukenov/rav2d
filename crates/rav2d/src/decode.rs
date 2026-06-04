@@ -3035,7 +3035,7 @@ fn decode_b(
     // These are used by intrabc, FSC, MRL, multi_mrl, DIP, morph_pred.
     // boff[i] = -1 means unavailable.
     let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
-    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_morph, nb_boff) =
+    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_morph, nb_dip, nb_boff) =
         if has_luma {
             let mut fsc = [0u8; 2];
             let mut mrl = [0u8; 2];
@@ -3045,6 +3045,7 @@ fn decode_b(
             let mut mvp = [0u8; 2];
             let mut mm = [0u8; 2];
             let mut mp = [0u8; 2];
+            let mut dp = [0u8; 2];
             let mut boff = [-1i32; 2];
             let mut idx = 0usize;
 
@@ -3058,6 +3059,7 @@ fn decode_b(
                 mvp[0] = l.mvprec[off];
                 mm[0] = l.motion_mode[off];
                 mp[0] = l.morph_pred[off];
+                dp[0] = l.dip[off];
                 boff[0] = off as i32;
                 idx += 1;
             }
@@ -3071,6 +3073,7 @@ fn decode_b(
                 mvp[idx] = a.mvprec[off];
                 mm[idx] = a.motion_mode[off];
                 mp[idx] = a.morph_pred[off];
+                dp[idx] = a.dip[off];
                 boff[idx] = off as i32;
                 idx += 1;
             }
@@ -3083,6 +3086,7 @@ fn decode_b(
                 mvp[idx] = l.mvprec[by4];
                 mm[idx] = l.motion_mode[by4];
                 mp[idx] = l.morph_pred[by4];
+                dp[idx] = l.dip[by4];
                 boff[idx] = by4 as i32;
                 idx += 1;
             }
@@ -3095,6 +3099,7 @@ fn decode_b(
                 mvp[idx] = a.mvprec[bx4];
                 mm[idx] = a.motion_mode[bx4];
                 mp[idx] = a.morph_pred[bx4];
+                dp[idx] = a.dip[bx4];
                 boff[idx] = bx4 as i32;
                 if idx == 0 {
                     fsc[1] = fsc[0];
@@ -3105,9 +3110,10 @@ fn decode_b(
                     mvp[1] = mvp[0];
                     mm[1] = mm[0];
                     mp[1] = mp[0];
+                    dp[1] = dp[0];
                 }
             }
-            (fsc, mrl, mmrl, ibc, mid, mvp, mm, mp, boff)
+            (fsc, mrl, mmrl, ibc, mid, mvp, mm, mp, dp, boff)
         } else {
             (
                 [0u8; 2],
@@ -3115,6 +3121,7 @@ fn decode_b(
                 [0u8; 2],
                 [0u8; 2],
                 [0xffu8; 2],
+                [0u8; 2],
                 [0u8; 2],
                 [0u8; 2],
                 [0u8; 2],
@@ -3386,8 +3393,10 @@ fn decode_b(
             7, 13, 21, 27, 28, 34, 35, 41, 49, 55,
         ];
 
-        // DPCM (lossless mode)
-        let dpcm = fi.any_lossless && msac.decode_bool_adapt(cdf_m.dpcm(0)) != 0;
+        // DPCM (lossless mode) — gated on THIS segment's lossless flag
+        // (decode.c:1977: frame_hdr->segmentation.lossless[b->seg_id]).
+        let seg_lossless = fi.seg_lossless[b.seg_id as usize] != 0;
+        let dpcm = seg_lossless && msac.decode_bool_adapt(cdf_m.dpcm(0)) != 0;
         let (y_mode, y_angle, midx);
 
         if dpcm {
@@ -3580,10 +3589,12 @@ fn decode_b(
             luma_midx
         };
 
-        // DPCM for chroma
+        // DPCM for chroma — gated on THIS segment's lossless flag
+        // (decode.c:2152: frame_hdr->segmentation.lossless[b->seg_id]).
+        let seg_lossless_c = fi.seg_lossless[b.seg_id as usize] != 0;
         unsafe {
             b.data.intra.dpcm[1] =
-                (fi.any_lossless && msac.decode_bool_adapt(cdf_m.dpcm(1)) != 0) as u8;
+                (seg_lossless_c && msac.decode_bool_adapt(cdf_m.dpcm(1)) != 0) as u8;
         }
         let chroma_dpcm = unsafe { b.data.intra.dpcm[1] } != 0;
 
@@ -3751,17 +3762,9 @@ fn decode_b(
             && imin(bw4, bh4) >= 2
             && bw4 * bh4 >= 8
         {
-            let nb_dip_0 = if have_left {
-                l.dip[(by4 + bh4 as usize).saturating_sub(1)]
-            } else {
-                0
-            };
-            let nb_dip_1 = if have_top {
-                a.dip[(bx4 + bw4 as usize).saturating_sub(1)]
-            } else {
-                0
-            };
-            let ctx = (nb_dip_0 != 0) as usize + (nb_dip_1 != 0) as usize;
+            let nb_dip_0 = if nb_boff[0] != -1 { nb_dip[0] } else { 0 };
+            let nb_dip_1 = if nb_boff[1] != -1 { nb_dip[1] } else { 0 };
+            let ctx = nb_dip_0 as usize + nb_dip_1 as usize;
             let dip_flag = msac.decode_bool_adapt(cdf_m.dip(ctx)) != 0;
             if dip_flag {
                 let tp = msac.decode_bools_bypass(1) as u8;
@@ -3779,7 +3782,8 @@ fn decode_b(
 
     // TX partition (intra path)
     if b.is_intra != 0 && !intrabc && has_luma {
-        read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
+        let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
+        read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
     }
     if trace_blk {
         eprintln!("  CK txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
@@ -3950,7 +3954,8 @@ fn decode_b(
         }
 
         // TX partition for IntraBC
-        read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
+        let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
+        read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
         if trace_blk {
             eprintln!("  CK ibc_txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
         }
@@ -4950,7 +4955,8 @@ fn decode_b(
 
         // TX partition for inter
         if has_luma {
-            read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
+            let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
+        read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
         }
 
         // Inter context write-back
