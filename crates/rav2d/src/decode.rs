@@ -1853,6 +1853,8 @@ pub struct ReconFrameCtx<'a> {
     pub seq_intra_edge_filter: bool,
     pub seq_ibp: bool,
     pub seq_inter_ddt: bool,
+    /// `seq_hdr->cfl_ds_filter_index` — chroma-from-luma downsampling filter.
+    pub cfl_ds_filter_index: i32,
     /// Per-mode IBP weights (`dav2d_ibp_weights[7][16][16]`), used by z1/z3.
     pub ibp_weights: [[[u8; 16]; 16]; 7],
 }
@@ -1862,12 +1864,20 @@ pub struct ReconFrameCtx<'a> {
 /// 64x64 grid of decoded luma tx blocks for top-right / bottom-left availability.
 pub struct ReconScratch {
     pub is_coded: [[u64; 64]; 2],
+    /// SDP semi-decoupled partitioning: when the luma-only tree decodes a block
+    /// it records its intra direction mode (and FSC flag) into this 16x16 map
+    /// (indexed `(by & 15) * 16 + (bx & 15)`), which the chroma-only tree reads
+    /// back to derive `midx` for UV mode decoding (decode.c:3425-3441).
+    pub luma_intra_dir_mode_map: [u8; 256],
+    pub luma_fsc_map: [u8; 256],
 }
 
 impl Default for ReconScratch {
     fn default() -> Self {
         Self {
             is_coded: [[0u64; 64]; 2],
+            luma_intra_dir_mode_map: [0u8; 256],
+            luma_fsc_map: [0u8; 256],
         }
     }
 }
@@ -2182,6 +2192,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         seq_intra_edge_filter: seq_hdr.intra_edge_filter,
         seq_ibp: seq_hdr.ibp,
         seq_inter_ddt: seq_hdr.inter_ddt,
+        cfl_ds_filter_index: seq_hdr.cfl_ds_filter_index as i32,
         ibp_weights: crate::ibp::init_ibp_weights(),
     };
     let mut cf = vec![0i32; 64 * 64];
@@ -2976,10 +2987,18 @@ fn decode_b(
         let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
         let cbx4 = (cbx & 63) as usize;
         let cby4 = (cby & 63) as usize;
-        let cbw4 = cb_dim[0] as i32;
-        let cbh4 = cb_dim[1] as i32;
+        // Chroma block dims used by the cfl/mhccp allow conditions are
+        // subsampled (decode.c:1556-1558: `cbw4 = cb_dim[0] >> ss_hor`).
+        let cbw4 = (cb_dim[0] as i32) >> fi.ss_hor;
+        let cbh4 = (cb_dim[1] as i32) >> fi.ss_ver;
 
-        let mut midx = luma_midx;
+        // For the chroma-only SDP tree (no luma), read the luma block's intra
+        // direction mode from the per-SB map (decode.c:2170-2172).
+        let mut midx = if !has_luma {
+            recon.scratch.luma_intra_dir_mode_map[((cby & 15) * 16 + (cbx & 15)) as usize]
+        } else {
+            luma_midx
+        };
 
         // DPCM for chroma
         unsafe {
@@ -3092,10 +3111,11 @@ fn decode_b(
                         b.data.intra.uv_angle = 0;
                     }
                 } else {
-                    // Directional mode from default UV list
-                    const DEFAULT_MODE_LIST_UV: [u8; 8] = [
-                        1, 2, 3, 4, 5, 6, 7, 8, // VERT, HOR, D45, D135, D113, D157, D203, D67
-                    ];
+                    // Directional mode from default UV list (decode.c:2188-2192).
+                    // Order: VERT, HOR, DIAG_DOWN_LEFT, DIAG_DOWN_RIGHT, VERT_LEFT,
+                    // VERT_RIGHT, HOR_DOWN, HOR_UP. With the AV2 mode enum
+                    // (VERT_RIGHT=5, HOR_DOWN=6, HOR_UP=7, VERT_LEFT=8) this is:
+                    const DEFAULT_MODE_LIST_UV: [u8; 8] = [1, 2, 3, 4, 8, 5, 6, 7];
                     const INTRA_DIR_MODE_Y_TO_UV_IDX: [u8; 8] = [2, 4, 0, 5, 3, 6, 1, 7];
 
                     let mut idx = (uv_mode_idx - 5 - uv_mode_ctx) as i32;
@@ -4394,12 +4414,30 @@ fn decode_b(
         }
     }
 
-    // ---- Reconstruction leaf (M1a: intra luma 8bpc only) -------------------
+    // ---- Reconstruction leaf (intra 8bpc) ----------------------------------
     // Mirrors the luma path of `dav2d_recon_b` (recon_tmpl.c:3292-3478) plus
-    // `recon_b_luma_tx` (recon_tmpl.c:2443-2675). Chroma (U/V), inter, IntraBC
-    // and palette are NOT handled here yet.
-    if pass & (Pass::Recon as u8) != 0 && has_luma && b.is_intra != 0 && b.intrabc == 0 {
-        recon_b_intra_luma(recon, msac, cdf_m, a, l, &b, bx, by, bx4, by4, fi)?;
+    // `recon_b_luma_tx` (recon_tmpl.c:2443-2675), followed by the chroma path
+    // (recon_tmpl.c:3482-3942). Inter, IntraBC and palette are NOT handled here.
+    if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 && b.intrabc == 0 {
+        if has_luma {
+            recon_b_intra_luma(recon, msac, cdf_m, a, l, &b, bx, by, bx4, by4, fi)?;
+        }
+        if has_chroma {
+            recon_b_intra_chroma(recon, msac, cdf_m, a, l, &b, cbx, cby, cbs, fi)?;
+        }
+    }
+
+    // SDP: record the luma-only block's intra direction mode + FSC flag into the
+    // per-SB map so the chroma-only tree can derive `midx` (decode.c:3425-3441).
+    if fi.sdp && fi.has_chroma_layout && !has_chroma {
+        let off = ((by & 15) * 16 + (bx & 15)) as usize;
+        let bh4_max16 = imin(bh4, 16) as usize;
+        let aw = (1usize << b_dim[2]).min(16);
+        for y in 0..bh4_max16 {
+            let row = off + y * 16;
+            recon.scratch.luma_intra_dir_mode_map[row..row + aw].fill(luma_midx);
+            recon.scratch.luma_fsc_map[row..row + aw].fill(b.fsc);
+        }
     }
 
     Ok(b)
@@ -4888,6 +4926,640 @@ fn recon_b_intra_luma(
         }
     }
 
+    Ok(())
+}
+
+/// Reconstruct the chroma planes (U=1, V=2) of an intra (non-IntraBC) block,
+/// 8bpc. Port of the chroma section of `dav2d_recon_b` (recon_tmpl.c:3482-3942).
+///
+/// AV2 decodes ALL chroma coefficients (both planes, all transform units) first,
+/// then runs prediction + inverse transform in a second pass; CfL prediction is
+/// applied once for the whole block between the two passes. We mirror that order.
+#[allow(clippy::too_many_arguments)]
+fn recon_b_intra_chroma(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    cbx: i32,
+    cby: i32,
+    cbs: BlockSize,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    use crate::levels::{CFL_PRED, IntraPredMode};
+
+    let ss_hor = recon.frame.ss_hor;
+    let ss_ver = recon.frame.ss_ver;
+    let seg_id = b.seg_id as usize;
+    let lossless = recon.frame.seg_lossless[seg_id] != 0;
+
+    let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
+    let cbw4 = cb_dim[0] as i32;
+    let cbh4 = cb_dim[1] as i32;
+    let cw4 = imin(fi.bw - cbx, cbw4);
+    let ch4 = imin(fi.bh - cby, cbh4);
+    let cbw4ss = ((cbw4 + ss_hor) >> ss_hor) as usize;
+    let cw4ss = (cw4 + ss_hor) >> ss_hor;
+    let ch4ss = (ch4 + ss_ver) >> ss_ver;
+    let cbh4ss = ((cbh4 + ss_ver) >> ss_ver) as usize;
+
+    // uvtx = chroma transform size (recon_tmpl.c:3489-3491).
+    let uvtx = if lossless {
+        0usize // TX_4X4
+    } else {
+        // dav2d_max_txfm_size_for_bs[cbs][I444 - layout]; I444=3, layout in {1,2,3}.
+        let layout_idx =
+            (crate::headers::PixelLayout::I444 as i32 - recon.frame.layout as i32) as usize;
+        crate::tables::MAX_TXFM_SIZE_FOR_BS[cbs as u8 as usize][layout_idx] as usize
+    };
+    let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
+    let ctw4 = imin(uv_t_dim.w as i32, (fi.bw - cbx + ss_hor) >> ss_hor);
+    let cth4 = imin(uv_t_dim.h as i32, (fi.bh - cby + ss_ver) >> ss_ver);
+    let ctw = uv_t_dim.w as usize * 4;
+    let cth = uv_t_dim.h as usize * 4;
+    let txw = uv_t_dim.w as i32;
+    let txh = uv_t_dim.h as i32;
+
+    let bx4 = (cbx & 63) as usize;
+    let by4 = (cby & 63) as usize;
+    let cbx4 = bx4 >> ss_hor;
+    let cby4 = by4 >> ss_ver;
+    let ssbx = (cbx >> ss_hor) as usize;
+    let ssby = (cby >> ss_ver) as usize;
+    let cstride = recon.frame.uv_stride_px;
+    let ystride = recon.frame.y_stride_px;
+    let sbsz = fi.sb_step;
+
+    let orig_uv_mode = unsafe { b.data.intra.uv_mode };
+    let mut angle = unsafe { b.data.intra.uv_angle } as i32;
+    let uv_mode_remapped = {
+        let m_in: IntraPredMode = unsafe { std::mem::transmute(orig_uv_mode.min(12)) };
+        crate::recon::wide_angle_remap(uv_t_dim, m_in, &mut angle, 0) as u8
+    };
+    let uv_mode = if orig_uv_mode <= 12 {
+        uv_mode_remapped
+    } else {
+        orig_uv_mode
+    };
+
+    // Per-TU coefficient storage for both chroma planes (recon_tmpl.c t->cf_uv).
+    let n_tu = cbw4ss * cbh4ss;
+    let mut cf_uv: Vec<i32> = vec![0i32; n_tu * 16 * 2];
+    let (cf_u, cf_v) = cf_uv.split_at_mut(n_tu * 16);
+    // Per-TU txtp / eob, indexed [pl][i] where i = y*cbw4ss + x (recon_tmpl.c).
+    let mut tu_txtp = [[0u16; 2]; 256];
+    let mut tu_eob = [[-1i16; 2]; 256];
+
+    // ---- decode coefficients for both planes (recon_tmpl.c:3543-3580) -------
+    let mut u_has_cf = 0i32;
+    for pl in 0..2 {
+        let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
+        let mut y = 0;
+        while y < ch4ss {
+            let mut x = 0;
+            while x < cw4ss {
+                let i = (y * cbw4ss as i32 + x) as usize;
+                let mut txtp: u16 = 0;
+                let mut res_ctx: u8 = 0;
+                // TU coefficient region is txw*txh*16 coefs (= ctw*cth), placed at
+                // i*16 within the per-plane block buffer (recon_tmpl.c cf[pl][i*16]).
+                let cf_slot = &mut cf[i * 16..];
+                let tu_n = (uv_t_dim.w as usize * 4) * (uv_t_dim.h as usize * 4);
+                cf_slot[..tu_n].fill(0);
+
+                let dq_tbl = recon.frame.dq[seg_id][1 + pl];
+                let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
+
+                let acoef = &a.ccoef[pl][(cbx4 + x as usize)..];
+                let lcoef = &l.ccoef[pl][(cby4 + y as usize)..];
+
+                let params = crate::recon::DecodeCoefParams {
+                    tx: uvtx,
+                    bs: cbs as u8 as usize,
+                    plane: (pl + 1) as i32,
+                    intra: true,
+                    fsc: false,
+                    lossless,
+                    sdp_active: false,
+                    y_mode: 0,
+                    uv_mode: uv_mode as usize,
+                    seg_id,
+                    seq_fsc: recon.frame.seq_fsc,
+                    seq_ist: recon.frame.seq_ist,
+                    seq_cctx: recon.frame.seq_cctx,
+                    chroma_dctonly: false,
+                    reduced_txtp_set: recon.frame.reduced_txtp_set,
+                    tcq_enabled: recon.frame.tcq,
+                    layout: recon.frame.layout,
+                    u_has_cf,
+                    cbx,
+                    cby,
+                    luma_fsc_map: &[],
+                    dq_tbl,
+                    bitdepth: recon.frame.bitdepth,
+                    qm: qm_ref,
+                    ss_hor: ss_hor != 0,
+                    ss_ver: ss_ver != 0,
+                };
+
+                let eob = crate::recon::decode_coefs(
+                    msac,
+                    recon.cdf_coef,
+                    cdf_m,
+                    acoef,
+                    lcoef,
+                    &params,
+                    cf_slot,
+                    &mut txtp,
+                    &mut res_ctx,
+                );
+                if eob == i32::MIN {
+                    return Err(());
+                }
+                if pl == 0 {
+                    u_has_cf = (eob >= 0) as i32;
+                }
+                tu_txtp[i][pl] = txtp;
+                tu_eob[i][pl] = eob as i16;
+
+                let aw = imin(ctw4, 64 - (cbx4 + x as usize) as i32).max(0) as usize;
+                let lh = imin(cth4, 64 - (cby4 + y as usize) as i32).max(0) as usize;
+                if aw > 0 {
+                    a.ccoef[pl][cbx4 + x as usize..cbx4 + x as usize + aw].fill(res_ctx);
+                }
+                if lh > 0 {
+                    l.ccoef[pl][cby4 + y as usize..cby4 + y as usize + lh].fill(res_ctx);
+                }
+                x += txw;
+            }
+            y += txh;
+        }
+    }
+
+    // ---- CfL prediction (recon_tmpl.c:3588-3590, cfl()) ---------------------
+    if uv_mode == CFL_PRED {
+        cfl_predict_8bpc(recon, b, cbs, uvtx, cbx, cby, fi)?;
+    }
+
+    // ---- prediction + inverse transform per TU (recon_tmpl.c:3791-3938) -----
+    let col_end_ss = fi.tile_col_end >> ss_hor;
+    let row_end_ss = fi.tile_row_end >> ss_ver;
+    let mut y = 0;
+    while y < ch4ss {
+        let mut x = 0;
+        while x < cw4ss {
+            let i = (y * cbw4ss as i32 + x) as usize;
+            let dst_off = 4 * ((ssby + y as usize) * cstride + ssbx + x as usize);
+
+            // Intra prediction for both planes (skipped for CfL).
+            if uv_mode != CFL_PRED {
+                for pl in 0..2 {
+                    // n_tr: top-right availability (recon_tmpl.c:3809-3828).
+                    let mut n_tr = 0i32;
+                    if cby + (y << ss_ver) > fi.tile_row_start && (ctw as i32) < 64 {
+                        let csbsz = sbsz >> ss_hor;
+                        let tile_end = col_end_ss;
+                        let w = imin(ctw4, tile_end - (ssbx as i32 + x) - ctw4);
+                        if (cby + y) & (sbsz - 1) == 0 {
+                            n_tr = w;
+                        } else {
+                            let end = imin((ssbx as i32 + x + csbsz) & !(csbsz - 1), tile_end);
+                            let w2 = imin(ctw4, end - (ssbx as i32 + x) - ctw4);
+                            if w2 == 0 {
+                                n_tr = 0;
+                            } else {
+                                let shift = (cbx4 as i32 + x + ctw4) as u32;
+                                let bits = recon.scratch.is_coded[1]
+                                    [(cby4 as i32 + y - 1) as usize]
+                                    >> shift;
+                                let inv = 0x10000u64 | !bits;
+                                n_tr = imin(inv.trailing_zeros() as i32, w2);
+                            }
+                        }
+                    }
+                    // n_bl: bottom-left availability (recon_tmpl.c:3829-3843).
+                    let mut n_bl = 0i32;
+                    if cbx + (x << ss_hor) > fi.tile_col_start && (cth as i32) < 64 {
+                        let csbsz = sbsz >> ss_ver;
+                        let end = imin((ssby as i32 + y + csbsz) & !(csbsz - 1), row_end_ss);
+                        let h = imin(cth4, end - (ssby as i32 + y) - cth4);
+                        if (cbx + x) & (sbsz - 1) == 0 || h <= 0 {
+                            n_bl = h;
+                        } else {
+                            let mask = 1u64 << ((cbx4 as i32 + x - 1) as u32);
+                            let mut nb = 0;
+                            while nb < h {
+                                let row = (cby4 as i32 + y + nb + cth4) as usize;
+                                if row >= 64 || (recon.scratch.is_coded[1][row] & mask) == 0 {
+                                    break;
+                                }
+                                nb += 1;
+                            }
+                            n_bl = nb;
+                        }
+                    }
+
+                    let mut apply_ibp = recon.frame.seq_ibp && uvtx != 0;
+                    let sm_top = unsafe { b.data.intra.is_sm[1] }.a;
+                    let sm_left = unsafe { b.data.intra.is_sm[1] }.l;
+                    let is_sm_flag = if apply_ibp {
+                        (sm_top * crate::levels::ANGLE_SMOOTH_TOP_EDGE_FLAG)
+                            | (sm_left * crate::levels::ANGLE_SMOOTH_LEFT_EDGE_FLAG)
+                    } else {
+                        (sm_top | sm_left)
+                            * (crate::levels::ANGLE_SMOOTH_TOP_EDGE_FLAG
+                                | crate::levels::ANGLE_SMOOTH_LEFT_EDGE_FLAG)
+                    };
+                    apply_ibp &= uv_mode == 0; // DC_PRED
+                    let have_left = cbx + (x << ss_hor) > fi.tile_col_start;
+                    let have_top = cby + (y << ss_ver) > fi.tile_row_start;
+                    let intra_flags = is_sm_flag
+                        | if apply_ibp {
+                            crate::levels::ANGLE_IBP_FLAG
+                        } else {
+                            0
+                        }
+                        | if recon.frame.seq_intra_edge_filter {
+                            crate::levels::ANGLE_USE_EDGE_FILTER_FLAG
+                        } else {
+                            0
+                        }
+                        | if have_left {
+                            crate::levels::ANGLE_HAS_LEFT_FLAG
+                        } else {
+                            0
+                        }
+                        | if have_top {
+                            crate::levels::ANGLE_HAS_TOP_FLAG
+                        } else {
+                            0
+                        };
+                    let pred_mode = if uv_mode == CFL_PRED { 0 } else { uv_mode };
+
+                    let dst_plane: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
+                    let edge_o: usize = 768;
+                    let m = crate::ipred_prepare::prepare_intra_edges_8bpc(
+                        ssbx as i32 + x,
+                        ssby as i32 + y,
+                        col_end_ss,
+                        row_end_ss,
+                        n_tr,
+                        n_bl,
+                        dst_plane,
+                        dst_off,
+                        cstride,
+                        None,
+                        pred_mode,
+                        txw,
+                        txh,
+                        angle | intra_flags,
+                        recon.edge,
+                        edge_o,
+                    );
+                    let pred_angle = angle | intra_flags;
+                    let max_w = 4 * fi.bw - 4 * (cbx + x);
+                    let max_h = 4 * fi.bh - 4 * (cby + y);
+                    dispatch_ipred(
+                        m,
+                        dst_plane,
+                        dst_off,
+                        cstride,
+                        recon.edge,
+                        edge_o,
+                        ctw,
+                        cth,
+                        pred_angle,
+                        max_w,
+                        max_h,
+                        &recon.frame.ibp_weights,
+                    );
+                }
+            }
+
+            // CCTX cross-component transform (recon_tmpl.c:3882-3905).
+            let cctx_enabled = recon.frame.seq_cctx
+                && (recon.frame.layout == crate::headers::PixelLayout::I420 || uv_t_dim.max < 8);
+            let cctx_type = if cctx_enabled && tu_eob[i][0] >= 1 {
+                (tu_txtp[i][0] >> 8) as i32
+            } else {
+                0
+            };
+            if cctx_type != 0 {
+                let sz = imin(ctw as i32, 32) as usize * imin(cth as i32, 32) as usize;
+                crate::itx::cctx_8bpc(
+                    &mut cf_u[i * 16..],
+                    &mut cf_v[i * 16..],
+                    &crate::tables::CCTX_ANGLE[(cctx_type - 1) as usize],
+                    sz,
+                );
+                let gt = (tu_eob[i][1] > tu_eob[i][0]) as usize;
+                tu_eob[i][1 - gt] = tu_eob[i][gt];
+                let t0 = tu_txtp[i][0] & 0xff;
+                tu_txtp[i][0] = t0;
+                tu_txtp[i][1] = t0;
+            }
+
+            // Inverse transform add (recon_tmpl.c:3906-3925).
+            for pl in 0..2 {
+                if tu_eob[i][pl] != -1 {
+                    let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
+                    let mut txtp = tu_txtp[i][pl] as u32;
+                    if lossless && unsafe { b.data.intra }.dpcm[1] != 0 {
+                        txtp +=
+                            ((1 + (uv_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
+                    }
+                    let dst_plane: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
+                    crate::itx::inv_txfm_add_8bpc(
+                        dst_plane,
+                        dst_off,
+                        cstride,
+                        &mut cf[i * 16..],
+                        txtp,
+                        tu_eob[i][pl] as i32,
+                        uvtx,
+                    );
+                }
+            }
+
+            // mark is_coded[1] (recon_tmpl.c:3934-3936).
+            let coded_w = imin(ctw4, 64 - (cbx4 as i32 + x)).max(0) as u32;
+            if coded_w > 0 {
+                let mask: u64 = (((1u128 << coded_w) - 1) as u64) << ((cbx4 as i32 + x) as u32);
+                for yy in 0..cth4 {
+                    let row = (cby4 as i32 + y + yy) as usize;
+                    if row < 64 {
+                        recon.scratch.is_coded[1][row] |= mask;
+                    }
+                }
+            }
+            x += txw;
+        }
+        y += txh;
+    }
+
+    let _ = (orig_uv_mode, ystride);
+    Ok(())
+}
+
+/// Chroma-from-luma prediction for an intra block (recon_tmpl.c:2910-3062 `cfl`).
+/// Handles CFL_EXPLICIT / CFL_IMPLICIT (cfl_type < 2) and CFL_MHCCP (cfl_type==2).
+#[allow(clippy::too_many_arguments)]
+fn cfl_predict_8bpc(
+    recon: &mut ReconCtx,
+    b: &Av2Block,
+    bs: BlockSize,
+    uvtx: usize,
+    cbx: i32,
+    cby: i32,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    use crate::ipred::{
+        CFL_HAS_LEFT, CFL_HAS_TOP, CFL_IS_TOP_SB_EDGE, CFL_MHCCP_MAX_EDGE_SAMPLES,
+        cfl_calc_alphas_8bpc, cfl_gen_mat_8bpc, cfl_gen_y_420_8bpc, cfl_mhccp_pred_8bpc,
+        cfl_pred_8bpc,
+    };
+    use crate::levels::CflMhDir;
+
+    let ss_hor = recon.frame.ss_hor as usize;
+    let ss_ver = recon.frame.ss_ver as usize;
+    let ystride = recon.frame.y_stride_px;
+    let cstride = recon.frame.uv_stride_px;
+    let sbsz = fi.sb_step;
+    let ssbx = (cbx >> ss_hor) as usize;
+    let ssby = (cby >> ss_ver) as usize;
+    let has_top = cby > fi.tile_row_start;
+    let has_left = cbx > fi.tile_col_start;
+    let is_top_sb_edge = (cby & (sbsz - 1)) == 0;
+    let t_dim = &TXFM_DIMENSIONS[uvtx];
+    let ctw4 = imin(t_dim.w as i32, (fi.bw - cbx + ss_hor as i32) >> ss_hor) as usize;
+    let cth4 = imin(t_dim.h as i32, (fi.bh - cby + ss_ver as i32) >> ss_ver) as usize;
+    let ctw = t_dim.w as usize * 4;
+    let cth = t_dim.h as usize * 4;
+    let filter_type = recon.frame.cfl_ds_filter_index;
+    let cfl_type = unsafe { b.data.intra.cfl_type } as i32;
+    let cfl_mh_dir_raw = unsafe { b.data.intra.cfl.cfl_mh_dir };
+    // Raw symbol (0/1) maps directly to the dispatch index (CENTER=0, TOP=1).
+    let dir: CflMhDir = unsafe { std::mem::transmute(cfl_mh_dir_raw.min(3)) };
+
+    let ysrc_off = (cby as usize * ystride + cbx as usize) * 4;
+
+    if cfl_type < 2 {
+        // ---- CFL EXPLICIT / IMPLICIT (recon_tmpl.c:2936-2970) --------------
+        let implicit = cfl_type == 1; // CFL_IMPLICIT
+        let coff = (ssby * cstride + ssbx) * 4;
+        // ytop / utop / vtop: row above current src (top-SB-edge prefilter not
+        // wired; only reachable at frame top where has_top is false → unused).
+        let ytop_off = (ysrc_off as isize - ((1 + ss_ver) as isize) * ystride as isize) as usize;
+        let utop_off = (coff as isize - cstride as isize) as usize;
+        let vtop_off = utop_off;
+
+        let cbw4 = (BLOCK_DIMENSIONS[bs as u8 as usize][0] as usize + ss_hor) >> ss_hor;
+        let cbh4 = (BLOCK_DIMENSIONS[bs as u8 as usize][1] as usize + ss_ver) >> ss_ver;
+        let wpad = cbw4 - ctw4;
+        let hpad = cbh4 - cth4;
+
+        let alpha = unsafe { b.data.intra.cfl.cfl_alpha };
+        let flags = (filter_type as u32)
+            | if has_top { CFL_HAS_TOP as u32 } else { 0 }
+            | if has_left { CFL_HAS_LEFT as u32 } else { 0 }
+            | if is_top_sb_edge {
+                CFL_IS_TOP_SB_EDGE
+            } else {
+                0
+            }
+            | (((alpha[0] as u32) << crate::ipred::CFL_ALPHA_U_SHIFT)
+                & crate::ipred::CFL_ALPHA_U_MASK)
+            | (((alpha[1] as u32) << crate::ipred::CFL_ALPHA_V_SHIFT)
+                & crate::ipred::CFL_ALPHA_V_MASK);
+
+        // C uses ptrs[6] = { ytop, utop, vtop, ysrc, usrc, vsrc }. ytop/utop/vtop
+        // are the rows above the destination, which alias the luma / U / V planes
+        // (no top-SB prefilter buffer is wired; reachable only at frame top where
+        // has_top is false → those reads are unused). The predictor only reads the
+        // top rows and writes the block region, so the alias is non-overlapping.
+        // SAFETY: the three planes are disjoint allocations; the immutable top-row
+        // views never overlap the mutable write region of their own plane.
+        let dst_y: &[u8] =
+            unsafe { std::slice::from_raw_parts(recon.dst_y.as_ptr(), recon.dst_y.len()) };
+        let utop: &[u8] =
+            unsafe { std::slice::from_raw_parts(recon.dst_u.as_ptr(), recon.dst_u.len()) };
+        let vtop: &[u8] =
+            unsafe { std::slice::from_raw_parts(recon.dst_v.as_ptr(), recon.dst_v.len()) };
+        let (u_buf, v_buf) = (&mut *recon.dst_u, &mut *recon.dst_v);
+        cfl_pred_8bpc(
+            dst_y,
+            ytop_off,
+            utop,
+            utop_off,
+            vtop,
+            vtop_off,
+            dst_y,
+            ysrc_off,
+            u_buf,
+            coff,
+            v_buf,
+            coff,
+            ystride as isize,
+            cstride as isize,
+            wpad,
+            hpad,
+            ctw,
+            cth,
+            flags,
+            implicit,
+            ss_hor,
+            ss_ver,
+        );
+        return Ok(());
+    }
+
+    // ---- CFL MHCCP (recon_tmpl.c:2972-3060) --------------------------------
+    let mut refw = (ctw4 * 4) as i32;
+    let mut refh = (cth4 * 4) as i32;
+    let cbx4 = ((cbx & 63) >> ss_hor) as i32;
+    let cby4 = ((cby & 63) >> ss_ver) as i32;
+    if has_top {
+        let csbsz = sbsz >> ss_hor as i32;
+        let tile_end = fi.tile_col_end >> ss_hor as i32;
+        let mut w = imax(0, imin(ctw4 as i32, tile_end - ssbx as i32 - ctw4 as i32));
+        let n_tr = if is_top_sb_edge {
+            w
+        } else {
+            let end = imin((ssbx as i32 + csbsz) & !(csbsz - 1), tile_end);
+            w = imin(ctw4 as i32, end - ssbx as i32 - ctw4 as i32);
+            if w == 0 {
+                0
+            } else {
+                let bits =
+                    recon.scratch.is_coded[1][(cby4 - 1) as usize] >> ((cbx4 + ctw4 as i32) as u32);
+                imin((0x10000u64 | !bits).trailing_zeros() as i32, w)
+            }
+        };
+        refw += n_tr * 4;
+    }
+    let mut subleft = 0;
+    if has_left {
+        let csbsz = sbsz >> ss_ver as i32;
+        let end = imax(
+            0,
+            imin(
+                (ssby as i32 + csbsz) & !(csbsz - 1),
+                fi.tile_row_end >> ss_ver as i32,
+            ),
+        );
+        let h = imin(cth4 as i32, end - ssby as i32 - cth4 as i32);
+        let n_bl = if (cbx & (sbsz - 1)) == 0 || h <= 0 {
+            h
+        } else {
+            let mask = 1u64 << ((cbx4 - 1) as u32);
+            let mut nb = 0;
+            while nb < h {
+                if (recon.scratch.is_coded[1][(cby4 + nb + cth4 as i32) as usize] & mask) == 0 {
+                    break;
+                }
+                nb += 1;
+            }
+            nb
+        };
+        refh += n_bl * 4;
+        refw += 2;
+        subleft = (dir != CflMhDir::Left) as i32;
+    }
+    if refw > (128 >> ss_hor) {
+        refw = 128 >> ss_hor;
+        subleft = 0;
+    }
+    refh = imin(refh, (128 >> ss_ver) - 2 * has_top as i32);
+
+    let luma_top_stride = ((refw as usize) + 63) & !63;
+    let edge_flags = if has_top { CFL_HAS_TOP } else { 0 }
+        | if has_left { CFL_HAS_LEFT } else { 0 }
+        | if is_top_sb_edge {
+            CFL_IS_TOP_SB_EDGE as i32
+        } else {
+            0
+        };
+
+    let mut luma = vec![0u8; crate::ipred::CFL_MHCCP_MAX_LUMA_SIZE];
+    // SAFETY: luma plane is a disjoint allocation from chroma planes.
+    let ysrc: &[u8] =
+        unsafe { std::slice::from_raw_parts(recon.dst_y.as_ptr(), recon.dst_y.len()) };
+    cfl_gen_y_420_8bpc(
+        &mut luma,
+        luma_top_stride,
+        ysrc,
+        ysrc_off,
+        None, // ytop_sb_edge (top-SB-edge prefilter not wired; frame-top only)
+        ystride,
+        (refw - subleft) as usize,
+        refh as usize,
+        ctw,
+        cth,
+        edge_flags | dir as i32,
+        filter_type,
+    );
+    refh += has_top as i32;
+
+    let mut mat = [[0i32; 3]; 3];
+    let mut imat = [[0u16; CFL_MHCCP_MAX_EDGE_SAMPLES]; 2];
+    if has_top || has_left {
+        cfl_gen_mat_8bpc(
+            &mut mat,
+            &mut imat,
+            &luma,
+            0,
+            luma_top_stride,
+            refw as usize,
+            refh as usize,
+            edge_flags,
+            dir,
+        );
+    }
+
+    for pl in 0..2 {
+        let mut alpha = [0i32; 3];
+        let chroma_off = 4 * (ssby * cstride + ssbx);
+        let chroma: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
+        if has_top || has_left {
+            cfl_calc_alphas_8bpc(
+                &mut alpha,
+                chroma,
+                chroma_off,
+                None, // ctop_sb_edge (frame-top only)
+                cstride,
+                refw as usize,
+                refh as usize,
+                &mut mat,
+                &imat,
+                edge_flags,
+            );
+        } else {
+            alpha[2] = 0x10000;
+        }
+        let n_top = if has_top {
+            has_top as usize + (dir == CflMhDir::Top) as usize
+        } else {
+            0
+        };
+        let src_off = n_top * luma_top_stride;
+        // The predictor writes from a `dp` base of 0 (recon_tmpl.c:3038 offsets
+        // the `chroma` pointer to the block), so slice the destination plane at
+        // the block offset rather than the plane origin.
+        cfl_mhccp_pred_8bpc(
+            &mut chroma[chroma_off..],
+            cstride,
+            &luma,
+            src_off,
+            luma_top_stride,
+            ctw,
+            cth,
+            &alpha,
+            edge_flags,
+            dir,
+        );
+    }
     Ok(())
 }
 
@@ -6443,6 +7115,7 @@ mod tests {
                 seq_intra_edge_filter: false,
                 seq_ibp: false,
                 seq_inter_ddt: false,
+                cfl_ds_filter_index: 0,
                 ibp_weights: [[[0u8; 16]; 16]; 7],
             };
             let mut __scratch = ReconScratch::default();

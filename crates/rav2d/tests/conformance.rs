@@ -324,6 +324,63 @@ fn bit_exact_keyframe_luma() {
     }
 }
 
+/// M1b gate: frame-0 ALL PLANES (Y+U+V) must match the dav2d reference
+/// (in-loop filters off, film grain off), validating intra chroma reconstruction
+/// including CfL (explicit/implicit/MHCCP) and CCTX.
+#[test]
+fn bit_exact_keyframe_allplanes() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode(&path);
+    let got = rav2d_decode(&path);
+    assert!(!got.is_empty(), "rav2d produced no frames");
+    assert!(!reference.is_empty(), "dav2d produced no frames");
+    assert_eq!(
+        (reference[0].w, reference[0].h),
+        (got[0].w, got[0].h),
+        "frame 0 dims differ"
+    );
+
+    let (ssh, ssv) = ss(reference[0].layout);
+    let plane_names = ["luma", "U", "V"];
+    let mut failures = Vec::new();
+    for pl in 0..3 {
+        let r = &reference[0].planes[pl];
+        let g = &got[0].planes[pl];
+        assert_eq!(
+            r.len(),
+            g.len(),
+            "frame 0 plane {} size differs",
+            plane_names[pl]
+        );
+        let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
+        if diff != 0 {
+            let first = r.iter().zip(g.iter()).position(|(a, b)| a != b).unwrap();
+            let stride = if pl == 0 {
+                reference[0].w as usize
+            } else {
+                ((reference[0].w + ssh) >> ssh) as usize
+            };
+            let _ = ssv;
+            failures.push(format!(
+                "plane {} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
+                plane_names[pl],
+                r.len(),
+                first % stride,
+                first / stride,
+                r[first],
+                g[first]
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("frame 0 not bit-exact:\n  {}", failures.join("\n  "));
+    }
+}
+
 /// Full bit-exact comparison rav2d vs dav2d (all planes, all frames, filters on).
 /// Enabled once chroma recon + post-filters + inter support land.
 #[test]

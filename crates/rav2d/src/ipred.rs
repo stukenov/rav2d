@@ -1539,6 +1539,7 @@ pub fn cfl_gen_y_420_8bpc(
 }
 
 pub const CFL_MHCCP_MAX_EDGE_SAMPLES: usize = 386;
+pub const CFL_MHCCP_MAX_LUMA_SIZE: usize = 4736;
 
 #[inline(always)]
 fn sqrnd_8bpc(v: i32) -> i32 {
@@ -1687,7 +1688,8 @@ pub fn cfl_calc_alphas_8bpc(
         }
     }
     if has_l {
-        let start = if !has_t { 0 } else { 1 };
+        // C: `for (i = !has_t; i < refh - 1 - has_t; ...)` (ipred_tmpl.c).
+        let start = if has_t { 0 } else { 1 }; // = !has_t
         let end = if has_t { refh - 2 } else { refh - 1 };
         for i in start..end {
             let v = c[c_off + i * stride - 1] as i32;
