@@ -3875,6 +3875,9 @@ fn decode_b(
         nb_morph,
         nb_dip,
         nb_boff,
+        nb_ref0,
+        nb_ref1,
+        nb_filter,
     ) = if has_luma {
         let mut fsc = [0u8; 2];
         let mut mrl = [0u8; 2];
@@ -3886,6 +3889,12 @@ fn decode_b(
         let mut mp = [0u8; 2];
         let mut dp = [0u8; 2];
         let mut boff = [-1i32; 2];
+        // Inter subpel-filter context inputs (decode.c env.h:120 get_filter_ctx):
+        // the neighbour's ref pair and filter at boff, captured here so the a/l
+        // identity is preserved (boff alone loses it).
+        let mut nref0 = [-1i8; 2];
+        let mut nref1 = [-1i8; 2];
+        let mut nflt = [0u8; 2];
         let mut idx = 0usize;
 
         if have_left && bh4 == h4 {
@@ -3900,6 +3909,9 @@ fn decode_b(
             mp[0] = l.morph_pred[off];
             dp[0] = l.dip[off];
             boff[0] = off as i32;
+            nref0[0] = l.r#ref[0][off];
+            nref1[0] = l.r#ref[1][off];
+            nflt[0] = l.filter[off];
             idx += 1;
         }
         if have_top_in_sb && bw4 == w4 {
@@ -3914,6 +3926,9 @@ fn decode_b(
             mp[idx] = a.morph_pred[off];
             dp[idx] = a.dip[off];
             boff[idx] = off as i32;
+            nref0[idx] = a.r#ref[0][off];
+            nref1[idx] = a.r#ref[1][off];
+            nflt[idx] = a.filter[off];
             idx += 1;
         }
         if have_left && idx < 2 {
@@ -3927,6 +3942,9 @@ fn decode_b(
             mp[idx] = l.morph_pred[by4];
             dp[idx] = l.dip[by4];
             boff[idx] = by4 as i32;
+            nref0[idx] = l.r#ref[0][by4];
+            nref1[idx] = l.r#ref[1][by4];
+            nflt[idx] = l.filter[by4];
             idx += 1;
         }
         if have_top_in_sb && idx < 2 {
@@ -3940,6 +3958,9 @@ fn decode_b(
             mp[idx] = a.morph_pred[bx4];
             dp[idx] = a.dip[bx4];
             boff[idx] = bx4 as i32;
+            nref0[idx] = a.r#ref[0][bx4];
+            nref1[idx] = a.r#ref[1][bx4];
+            nflt[idx] = a.filter[bx4];
             if idx == 0 {
                 fsc[1] = fsc[0];
                 mrl[1] = mrl[0];
@@ -3952,7 +3973,7 @@ fn decode_b(
                 dp[1] = dp[0];
             }
         }
-        (fsc, mrl, mmrl, ibc, mid, mvp, mm, mp, dp, boff)
+        (fsc, mrl, mmrl, ibc, mid, mvp, mm, mp, dp, boff, nref0, nref1, nflt)
     } else {
         (
             [0u8; 2],
@@ -3965,6 +3986,9 @@ fn decode_b(
             [0u8; 2],
             [0u8; 2],
             [-1i32; 2],
+            [-1i8; 2],
+            [-1i8; 2],
+            [0u8; 2],
         )
     };
 
@@ -5857,8 +5881,28 @@ fn decode_b(
             } else if fi.subpel_filter_mode == 4 {
                 // SWITCHABLE
                 if has_subpel_filter {
-                    // simplified filter context
-                    let fctx = 0usize;
+                    // get_filter_ctx (env.h:120): neighbour filter agreement,
+                    // matched on the block's first reference; comp adds 4.
+                    const N_SW: u8 = N_SWITCHABLE_FILTERS as u8;
+                    let bref0 = ref0;
+                    let comp = unsafe { b.ref_pair.r[1] } != -1;
+                    let flt = |i: usize| -> u8 {
+                        if nb_boff[i] != -1 && (nb_ref0[i] == bref0 || nb_ref1[i] == bref0) {
+                            nb_filter[i]
+                        } else {
+                            N_SW
+                        }
+                    };
+                    let flt0 = flt(0);
+                    let flt1 = flt(1);
+                    let fctx = (comp as usize) * 4
+                        + if flt0 == flt1 || flt1 == N_SW {
+                            flt0 as usize
+                        } else if flt0 == N_SW {
+                            flt1 as usize
+                        } else {
+                            N_SW as usize
+                        };
                     unsafe {
                         b.data.inter.filter = msac.decode_symbol_adapt(cdf_m.filter(fctx), 2) as u8;
                     }
