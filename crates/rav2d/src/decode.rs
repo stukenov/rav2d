@@ -2205,10 +2205,21 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     fc.tile = std::mem::take(&mut c.tile);
     fc.n_tile_data = c.n_tile_data;
 
-    // NOTE: reconstruction (M1) needs an output picture buffer here, but
-    // FrameContext.cur is an internal::ThreadPicture metadata stub with no pixel
-    // planes. Wiring recon first requires FrameContext to carry a real Picture
-    // (data planes + strides) so recon_b_8bpc can write into it.
+    // Allocate the output picture that reconstruction writes into. During
+    // bring-up we use the default allocator; the decoder's configured allocator
+    // is threaded through when output queueing is wired.
+    let allocator: std::sync::Arc<dyn crate::picture::PicAllocator> =
+        std::sync::Arc::new(crate::picture::DefaultPicAllocator::new());
+    fc.cur_pic = crate::picture::Picture::alloc(
+        frame_hdr.width,
+        frame_hdr.height,
+        layout,
+        bpc,
+        Some(seq_hdr.clone()),
+        Some(frame_hdr.clone()),
+        allocator,
+    )
+    .ok_or(())?;
 
     let qcat = crate::cdf::cdf_thread_init_static_qcat(frame_hdr.quant.yac as u32) as usize;
 

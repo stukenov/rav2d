@@ -232,6 +232,10 @@ pub struct FrameContext {
 
     pub frame_thread: FrameThread,
     pub lf: LoopFilterState,
+
+    /// Output picture buffer that reconstruction writes into (the pixel planes
+    /// that `cur` only describes as metadata).
+    pub cur_pic: crate::picture::Picture,
 }
 
 #[derive(Clone, Default)]
