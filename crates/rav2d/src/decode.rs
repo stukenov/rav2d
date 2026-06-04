@@ -1893,7 +1893,11 @@ pub fn decode_tile_sbrow_entropy(
         // Per-plane loop-restoration unit info.
         let sbsz = sb_step * 4;
         for p in 0..3 {
-            let (ss_ver, ss_hor) = if p == 0 { (0, 0) } else { (fi.ss_ver, fi.ss_hor) };
+            let (ss_ver, ss_hor) = if p == 0 {
+                (0, 0)
+            } else {
+                (fi.ss_ver, fi.ss_hor)
+            };
             let rtype_u8 = frame_hdr.restoration.p[p].restoration_type;
             if rtype_u8 == RestorationType::None as u8 {
                 continue;
@@ -2200,6 +2204,9 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     fc.b4_stride = ((fc.bw + 63) & !63) as isize;
     let bpc = 8 + seq_hdr.hbd as i32 * 2;
     fc.bitdepth_max = (1 << bpc) - 1;
+    // Intra neighbours have no reference direction; -1 sentinel (mirrors C
+    // lib.c init) so compound/ref context lookups treat them correctly.
+    fc.refdir_intra = -1;
 
     fc.dsp = c.dsp.clone();
     fc.tile = std::mem::take(&mut c.tile);

@@ -148,13 +148,13 @@ pub enum IntraPredMode {
 pub const N_INTRA_PRED_MODES: usize = 13;
 pub const CFL_PRED: u8 = 13;
 pub const N_UV_INTRA_PRED_MODES: usize = 14;
-pub const LEFT_DC_PRED: u8 = 3;
-pub const TOP_DC_PRED: u8 = 14;
-pub const DC_128_PRED: u8 = 15;
-pub const Z1_PRED: u8 = 16;
-pub const Z2_PRED: u8 = 17;
-pub const Z3_PRED: u8 = 18;
-pub const DIP_PRED: u8 = 13;
+pub const LEFT_DC_PRED: u8 = 3; // = DIAG_DOWN_LEFT_PRED
+pub const TOP_DC_PRED: u8 = 4;
+pub const DC_128_PRED: u8 = 5;
+pub const Z1_PRED: u8 = 6;
+pub const Z2_PRED: u8 = 7;
+pub const Z3_PRED: u8 = 8;
+pub const DIP_PRED: u8 = 13; // = N_INTRA_PRED_MODES
 
 pub const ANGLE_SMOOTH_LEFT_EDGE_FLAG: i32 = 1 << 9;
 pub const ANGLE_SMOOTH_TOP_EDGE_FLAG: i32 = 1 << 10;
@@ -490,6 +490,7 @@ pub struct Av2Block {
 #[cfg(test)]
 mod tests {
     use super::txtp;
+    use super::*;
 
     #[test]
     fn test_txtp_encoding() {
@@ -504,5 +505,35 @@ mod tests {
         assert_eq!(txtp::class(txtp::H_DCT), 2); // ClassH
         assert_eq!(txtp::class(txtp::IDTX), 0); // Class2D
         assert_eq!(txtp::class(txtp::IDTX_INV), 1); // Class2DInv
+    }
+
+    #[test]
+    fn test_intra_pred_mode_constants_match_c() {
+        // C dav2d levels.h: LEFT_DC_PRED = DIAG_DOWN_LEFT_PRED (3); TOP_DC_PRED,
+        // DC_128_PRED, Z1_PRED, Z2_PRED, Z3_PRED follow (4..8); DIP_PRED =
+        // N_INTRA_PRED_MODES (13); CFL_PRED = 13; N_UV_INTRA_PRED_MODES = 14.
+        assert_eq!(IntraPredMode::PaethPred as u8, 12);
+        assert_eq!(N_INTRA_PRED_MODES, 13);
+        assert_eq!(CFL_PRED, 13);
+        assert_eq!(N_UV_INTRA_PRED_MODES, 14);
+        assert_eq!(LEFT_DC_PRED, 3);
+        assert_eq!(TOP_DC_PRED, 4);
+        assert_eq!(DC_128_PRED, 5);
+        assert_eq!(Z1_PRED, 6);
+        assert_eq!(Z2_PRED, 7);
+        assert_eq!(Z3_PRED, 8);
+        assert_eq!(DIP_PRED, 13);
+        // All DC-variant/angular implicit modes must index within the 14-entry
+        // intra-pred dispatch table (N_UV_INTRA_PRED_MODES).
+        for m in [
+            LEFT_DC_PRED,
+            TOP_DC_PRED,
+            DC_128_PRED,
+            Z1_PRED,
+            Z2_PRED,
+            Z3_PRED,
+        ] {
+            assert!((m as usize) < N_UV_INTRA_PRED_MODES);
+        }
     }
 }
