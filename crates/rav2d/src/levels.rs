@@ -226,9 +226,10 @@ impl TxPartition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(i8)]
 pub enum BlockSize {
+    #[default]
     Invalid = -1,
     Bs256x256 = 0,
     Bs256x128 = 1,

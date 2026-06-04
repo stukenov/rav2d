@@ -236,13 +236,14 @@ pub struct Block {
     pub m: [i32; 6],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct MfmvRef {
     pub r#ref: u8,
     pub tgt: i8,
     pub dir: u8,
 }
 
+#[derive(Default)]
 pub struct Frame {
     pub iw4: i32,
     pub ih4: i32,
@@ -277,6 +278,7 @@ pub struct Frame {
     pub have_frame_threading: bool,
 }
 
+#[derive(Default)]
 pub struct FrameTip {
     pub sf: [i32; 2],
     pub r#ref: RefPair,

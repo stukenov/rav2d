@@ -172,6 +172,7 @@ pub struct LoopFilterState {
     pub pc_filters: Vec<[i16; 13]>,
 }
 
+#[derive(Default)]
 pub struct FrameContext {
     pub seq_hdr: Arc<SequenceHeader>,
     pub frame_hdr: Arc<FrameHeader>,
