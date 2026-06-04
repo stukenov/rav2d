@@ -2104,6 +2104,67 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     Ok(())
 }
 
+/// Orchestrate a single-threaded frame decode: init -> CDF init -> main loop.
+///
+/// Port of `dav2d_decode_frame` (decode.c:5223) for the n_tc == 1 path. The
+/// post-main CDF output merge (used as the entropy reference for later frames)
+/// and the explicit frame-exit unref cleanup are handled by Rust ownership /
+/// the caller; the inter-frame CDF-reference selection lands with M3.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_frame(
+    fc: &mut crate::internal::FrameContext,
+    n_tc: i32,
+    n_passes: i32,
+    in_cdf: Option<&crate::cdf::CdfContext>,
+    qcat: usize,
+) -> Result<(), ()> {
+    let frame_hdr = fc.frame_hdr.clone();
+    let seq_hdr = fc.seq_hdr.clone();
+
+    decode_frame_init(
+        &frame_hdr,
+        &seq_hdr,
+        &mut fc.lf,
+        &mut fc.frame_thread,
+        &mut fc.ts,
+        &mut fc.n_ts,
+        &mut fc.a,
+        &mut fc.a_sz,
+        &mut fc.dq,
+        &mut fc.qm,
+        &fc.absrefdist,
+        fc.sbh,
+        fc.sb256w,
+        fc.sb256h,
+        fc.bw,
+        fc.bh,
+        n_tc,
+        n_passes,
+    );
+
+    if frame_hdr.tip.frame_mode != 2 {
+        decode_frame_init_cdf(
+            &mut fc.ts,
+            &fc.tile,
+            &frame_hdr,
+            in_cdf,
+            qcat,
+            fc.sb_shift,
+            fc.bw,
+            fc.bh,
+            n_tc,
+            n_passes,
+            &mut fc.frame_thread.tile_start_off,
+        )?;
+    } else {
+        decode_tip_frame_init(&mut fc.ts, &frame_hdr, fc.sb_shift, fc.bw, fc.bh, n_tc);
+    }
+
+    decode_frame_main(fc, n_passes)?;
+
+    Ok(())
+}
+
 fn get_snglref_ctx(
     a: &BlockContext,
     l: &BlockContext,
