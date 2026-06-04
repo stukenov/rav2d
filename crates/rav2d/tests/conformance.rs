@@ -1,0 +1,269 @@
+//! Bit-exact conformance harness: decode a clip with the dav2d C reference (via
+//! the rav2d-sys FFI bindings) and with rav2d, and compare the output planes
+//! frame-by-frame.
+//!
+//! This is the acceptance gate reused by every reconstruction milestone. Run
+//! under the dav2d shared library, per CLAUDE.md:
+//!
+//!   DYLD_LIBRARY_PATH=$PWD/dav2d/build/src cargo test -p rav2d --test conformance
+//!
+//! The full bit-exact comparison (`bit_exact_*`) is `#[ignore]`d until rav2d
+//! reconstruction produces pixels; the un-ignored test validates the reference
+//! decode path and the harness itself.
+
+use std::path::PathBuf;
+
+/// One decoded frame's planes, with stride padding stripped (tightly packed
+/// rows), so two decoders' outputs are directly comparable regardless of stride.
+#[derive(Clone)]
+pub struct FramePlanes {
+    pub w: i32,
+    pub h: i32,
+    pub bpc: i32,
+    pub layout: i32,
+    /// Y, U, V (U/V empty for monochrome). Bytes, row-packed.
+    pub planes: [Vec<u8>; 3],
+}
+
+fn media(name: &str) -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media")).join(name)
+}
+
+/// Chroma subsampling (ss_hor, ss_ver) for a dav2d pixel layout.
+/// I400=0, I420=1, I422=2, I444=3.
+fn ss(layout: i32) -> (i32, i32) {
+    match layout {
+        1 => (1, 1), // I420
+        2 => (1, 0), // I422
+        3 => (0, 0), // I444
+        _ => (0, 0), // I400 (no chroma)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// dav2d C reference decode (in-process via rav2d-sys)
+// ---------------------------------------------------------------------------
+
+// EAGAIN on Darwin is 35; dav2d returns DAV2D_ERR(e) = -e. (Linux would be -11.)
+#[cfg(target_os = "macos")]
+const EAGAIN: i32 = -35;
+#[cfg(not(target_os = "macos"))]
+const EAGAIN: i32 = -11;
+
+unsafe fn extract_planes(pic: &rav2d::sys::Dav2dPicture) -> FramePlanes {
+    let w = pic.p.w;
+    let h = pic.p.h;
+    let bpc = pic.p.bpc;
+    let layout = pic.p.layout as i32;
+    let bytes_per_sample = if bpc > 8 { 2usize } else { 1usize };
+    let (ssh, ssv) = ss(layout);
+
+    let mut planes: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for pl in 0..3 {
+        if pl > 0 && layout == 0 {
+            break; // monochrome: no chroma
+        }
+        let pw = if pl == 0 { w } else { (w + ssh) >> ssh };
+        let ph = if pl == 0 { h } else { (h + ssv) >> ssv };
+        let stride = pic.stride[if pl == 0 { 0 } else { 1 }];
+        let base = pic.data[pl] as *const u8;
+        if base.is_null() {
+            continue;
+        }
+        let row_bytes = pw as usize * bytes_per_sample;
+        let mut buf = Vec::with_capacity(row_bytes * ph as usize);
+        for y in 0..ph as isize {
+            let row = unsafe { base.offset(y * stride) };
+            let slice = unsafe { std::slice::from_raw_parts(row, row_bytes) };
+            buf.extend_from_slice(slice);
+        }
+        planes[pl] = buf;
+    }
+
+    FramePlanes {
+        w,
+        h,
+        bpc,
+        layout,
+        planes,
+    }
+}
+
+/// Decode a clip with the dav2d C reference library. Returns one `FramePlanes`
+/// per output frame.
+pub fn dav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
+    use rav2d::sys;
+    let data = std::fs::read(path).expect("read clip");
+    let mut frames = Vec::new();
+
+    unsafe {
+        let mut settings: sys::Dav2dSettings = std::mem::zeroed();
+        sys::dav2d_default_settings(&mut settings);
+        // Deterministic single-threaded reference; emit invisible frames too so
+        // the frame sequence matches rav2d's gated decode path.
+        settings.n_threads = 1;
+
+        let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
+        let r = sys::dav2d_open(&mut ctx, &settings);
+        assert_eq!(r, 0, "dav2d_open failed: {r}");
+
+        // dav2d-owned data buffer.
+        let mut d: sys::Dav2dData = std::mem::zeroed();
+        let buf = sys::dav2d_data_create(&mut d, data.len());
+        assert!(!buf.is_null(), "dav2d_data_create failed");
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+
+        let mut drained = false;
+        loop {
+            // Drain all currently-available pictures.
+            loop {
+                let mut pic: sys::Dav2dPicture = std::mem::zeroed();
+                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                if pr == EAGAIN {
+                    break;
+                }
+                if pr < 0 {
+                    break;
+                }
+                frames.push(extract_planes(&pic));
+                sys::dav2d_picture_unref(&mut pic);
+            }
+
+            if d.sz > 0 {
+                let sr = sys::dav2d_send_data(ctx, &mut d);
+                if sr < 0 && sr != EAGAIN {
+                    panic!("dav2d_send_data failed: {sr}");
+                }
+            } else if !drained {
+                drained = true;
+                // signal end-of-stream
+                sys::dav2d_send_data(ctx, std::ptr::null_mut());
+            } else {
+                // final drain pass already done above with no new pictures
+                let mut pic: sys::Dav2dPicture = std::mem::zeroed();
+                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                if pr == 0 {
+                    frames.push(extract_planes(&pic));
+                    sys::dav2d_picture_unref(&mut pic);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        sys::dav2d_close(&mut ctx);
+    }
+
+    frames
+}
+
+// ---------------------------------------------------------------------------
+// rav2d decode
+// ---------------------------------------------------------------------------
+
+/// Decode a clip with rav2d. Returns one `FramePlanes` per output frame.
+/// (Until reconstruction + output queueing land, this yields no frames.)
+pub fn rav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
+    use rav2d::{Data, Decoder, Settings};
+    let bytes = std::fs::read(path).expect("read clip");
+    let mut s = Settings::default();
+    s.n_threads = 1;
+    s.apply_grain = false;
+    let mut dec = Decoder::open(&s).expect("open");
+
+    let mut frames = Vec::new();
+    let mut sent = false;
+    loop {
+        if !sent {
+            match dec.send_data(Some(Data::wrap(bytes.clone()))) {
+                Ok(()) => sent = true,
+                Err(rav2d::Rav2dError::Again) => {}
+                Err(_) => break,
+            }
+        }
+        match dec.get_picture() {
+            Ok(pic) => frames.push(rav2d_picture_planes(&pic)),
+            Err(rav2d::Rav2dError::Again) => {
+                if sent {
+                    let _ = dec.send_data(None);
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+        if frames.len() > 4096 {
+            break; // safety
+        }
+    }
+    frames
+}
+
+fn rav2d_picture_planes(pic: &rav2d::Picture) -> FramePlanes {
+    // Mirror the dav2d extraction once rav2d exposes plane data; placeholder for
+    // now so the harness compiles ahead of reconstruction.
+    let _ = pic;
+    FramePlanes {
+        w: 0,
+        h: 0,
+        bpc: 0,
+        layout: 0,
+        planes: [Vec::new(), Vec::new(), Vec::new()],
+    }
+}
+
+/// Assert two decode results are byte-identical, plane by plane.
+pub fn assert_bit_exact(reference: &[FramePlanes], got: &[FramePlanes], clip: &str) {
+    assert_eq!(
+        reference.len(),
+        got.len(),
+        "{clip}: frame count mismatch (dav2d={}, rav2d={})",
+        reference.len(),
+        got.len()
+    );
+    for (i, (r, g)) in reference.iter().zip(got.iter()).enumerate() {
+        assert_eq!(
+            (r.w, r.h, r.bpc, r.layout),
+            (g.w, g.h, g.bpc, g.layout),
+            "{clip}: frame {i} params differ"
+        );
+        for pl in 0..3 {
+            assert_eq!(
+                r.planes[pl], g.planes[pl],
+                "{clip}: frame {i} plane {pl} bytes differ"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+
+/// Validates the dav2d C reference decode path and the harness extraction.
+/// (Does not exercise rav2d reconstruction yet.)
+#[test]
+fn dav2d_reference_decodes_keyframe_clip() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let frames = dav2d_decode(&path);
+    assert!(!frames.is_empty(), "dav2d reference produced no frames");
+    let f0 = &frames[0];
+    assert_eq!((f0.w, f0.h), (64, 64), "unexpected dims");
+    assert!(f0.bpc == 8 || f0.bpc == 10, "unexpected bpc {}", f0.bpc);
+    assert!(!f0.planes[0].is_empty(), "empty luma plane");
+}
+
+/// Full bit-exact comparison rav2d vs dav2d. Enabled once intra reconstruction
+/// produces pixels (M1) and output queueing emits frames (M2-out).
+#[test]
+#[ignore = "enabled at M1: requires rav2d reconstruction + output queueing"]
+fn bit_exact_keyframe_clip() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    let reference = dav2d_decode(&path);
+    let got = rav2d_decode(&path);
+    assert_bit_exact(&reference, &got, "bus.64x64.l5");
+}
