@@ -6315,19 +6315,6 @@ fn recon_b_intra_chroma_phase(
     // CfL is intra-only (`if (intra) cfl()`); IntraBC used the mc copy instead.
     if is_intra && uv_mode == CFL_PRED {
         cfl_predict_8bpc(recon, b, cbs, uvtx, cbx, cby, fi)?;
-        if std::env::var("RAV2D_CFLPX").is_ok() && cby < 8 {
-            let ss_hor = recon.frame.ss_hor as usize;
-            let ss_ver = recon.frame.ss_ver as usize;
-            let cstride = recon.frame.uv_stride_px;
-            let ssbx = (cbx >> ss_hor) as usize;
-            let ssby = (cby >> ss_ver) as usize;
-            let off = 4 * (ssby * cstride + ssbx);
-            let mut u = Vec::new();
-            let mut v = Vec::new();
-            for r in 0..4 { for c in 0..4 { u.push(recon.dst_u[off + r*cstride + c]); v.push(recon.dst_v[off + r*cstride + c]); } }
-            eprintln!("CFLOUT cbx={} cby={} type={} u={:?} v={:?}",
-                cbx, cby, unsafe { b.data.intra.cfl_type }, u, v);
-        }
     }
 
     // ---- prediction + inverse transform per TU (recon_tmpl.c:3791-3938) -----
@@ -6501,11 +6488,6 @@ fn recon_b_intra_chroma_phase(
                             ((1 + (uv_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
                     } else if recon.frame.seq_inter_ddt && is_intrabc {
                         txtp += txtp & crate::tables::TX_DDT_MASK[uvtx] as u32;
-                    }
-                    if std::env::var("RAV2D_RESID").is_ok() && cby < 4 && pl == 0 {
-                        eprintln!("RESID cbx={} cby={} txtp={:x} eob={} dpcm={} uvmode={} segid={} lossless={}",
-                            cbx, cby, txtp, tu_eob[i][pl], unsafe { b.data.intra.dpcm[1] }, uv_mode,
-                            b.seg_id, lossless as i32);
                     }
                     let dst_plane: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
                     crate::itx::inv_txfm_add_8bpc(
@@ -6753,11 +6735,6 @@ fn cfl_predict_8bpc(
             edge_flags,
             dir,
         );
-        if std::env::var("RAV2D_MHCCP").is_ok() && cby < 8 {
-            eprintln!("MAT cbx={} cby={} dir={} mat00={} mat01={} mat02={} mat11={} mat12={} mat22={} imat0_3=[{}, {}, {}, {}]",
-                cbx, cby, dir as i32, mat[0][0], mat[0][1], mat[0][2], mat[1][1], mat[1][2], mat[2][2],
-                imat[0][0], imat[0][1], imat[0][2], imat[0][3]);
-        }
     }
 
     for pl in 0..2 {
@@ -6801,11 +6778,6 @@ fn cfl_predict_8bpc(
             edge_flags,
             dir,
         );
-        if std::env::var("RAV2D_MHCCP").is_ok() && pl == 0 && cby < 8 {
-            let c: Vec<u8> = (0..4).map(|i| chroma[chroma_off + i]).collect();
-            eprintln!("MHCCP cbx={} cby={} dir={} eflags={:x} alpha=[{}, {}, {}] refw={} refh={} u0_3={:?}",
-                cbx, cby, dir as i32, edge_flags, alpha[0], alpha[1], alpha[2], refw, refh, c);
-        }
     }
     Ok(())
 }
@@ -6883,13 +6855,6 @@ fn recon_b_luma_tx(
         let dq_seg = b.seg_id as usize;
         let dq_tbl = recon.dq_active[dq_seg][0]; // plane 0 (luma)
         let qm_ref: Option<&[u8]> = recon.frame.qm[tx][0].as_deref();
-        if std::env::var("RAV2D_DQ").is_ok() && by < 1 && bx < 20 {
-            eprintln!(
-                "DQ y bx={} by={} tx={} bs={} txpart={} seg={} dq=[{},{}] lastq={} qm={}",
-                bx, by, tx, b.bs, b.tx_part, dq_seg, dq_tbl[0], dq_tbl[1], recon.last_qidx,
-                qm_ref.is_some() as i32
-            );
-        }
 
         let params = crate::recon::DecodeCoefParams {
             tx,
@@ -7218,10 +7183,6 @@ fn recon_b_luma_tx(
             "LUMATX y={} x={} tx={} txtp={} eob={} ymode={} ang={} dip={} mrl={} fsc={} sum={} first={:?}",
             by, bx, tx, txtp & 0xff, eob, y_mode, intra.y_angle as i32, intra.dip as i32 - 1, intra.mrl_index, b.fsc, sum, first
         );
-        if bx == 0 && by == 0 && tw >= 64 {
-            let tail: Vec<u8> = (56..64).map(|i| recon.dst_y[dst_off + i]).collect();
-            eprintln!("LUMATAIL y=0 x=0 px56_63={:?}", tail);
-        }
     }
 
     let _ = orig_y_mode; // C restores b->y_mode; we never mutated b.
