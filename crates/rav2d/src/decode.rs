@@ -1735,6 +1735,101 @@ pub struct SbFrameInfo {
     pub sb_step: i32,
 }
 
+impl SbFrameInfo {
+    /// Build the per-superblock frame info bundle from the live sequence and
+    /// frame headers plus the frame-level geometry and reference state.
+    ///
+    /// `refdir`/`refdist`/`absrefdist`/`skip_mode_refs` are precomputed on the
+    /// `FrameContext` (see `refmvs::init_frame`); the 7-element refmvs arrays are
+    /// zero-padded into the 8-element layout this struct uses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_frame(
+        seq_hdr: &crate::headers::SequenceHeader,
+        frame_hdr: &FrameHeader,
+        bw: i32,
+        bh: i32,
+        root_bs: BlockSize,
+        sb_step: i32,
+        n_passes: i32,
+        refdir: [u8; 8],
+        refdist: &[i8; 7],
+        absrefdist: &[u8; 7],
+        skip_mode_refs: RefPair,
+        tile_col_start: i32,
+        tile_col_end: i32,
+        tile_row_start: i32,
+        tile_row_end: i32,
+    ) -> Self {
+        let mut refdist8 = [0i8; 8];
+        refdist8[..7].copy_from_slice(refdist);
+        let mut absrefdist8 = [0u8; 8];
+        absrefdist8[..7].copy_from_slice(absrefdist);
+
+        SbFrameInfo {
+            bw,
+            bh,
+            ss_ver: seq_hdr.ss_ver as i32,
+            ss_hor: seq_hdr.ss_hor as i32,
+            root_bs,
+            is_inter_or_switch: frame_hdr.is_inter_or_switch(),
+            sdp: seq_hdr.sdp,
+            ext_sdp: seq_hdr.ext_sdp,
+            ext_partitions: seq_hdr.ext_partitions,
+            uneven_4way: seq_hdr.uneven_4way_partitions,
+            max_pb_aspect_ratio_log2: seq_hdr.max_pb_aspect_ratio_log2,
+            n_passes,
+            seg_enabled: frame_hdr.segmentation.enabled != 0,
+            seg_update_map: frame_hdr.segmentation.update_map != 0,
+            seg_temporal: frame_hdr.segmentation.temporal != 0,
+            seg_preskip: frame_hdr.segmentation.preskip != 0,
+            seg_ext: seq_hdr.segmentation.ext,
+            seg_last_active_segid: frame_hdr.segmentation.last_active_segid as u8,
+            seg_globalmv_mask: frame_hdr.segmentation.d.globalmv_mask,
+            seg_skip_mask: frame_hdr.segmentation.d.skip_mask,
+            skip_mode_enabled: frame_hdr.skip_mode_enabled != 0,
+            allow_intrabc: frame_hdr.allow_intrabc != 0,
+            any_lossless: frame_hdr.any_lossless != 0,
+            has_chroma_layout: seq_hdr.layout != crate::headers::PixelLayout::I400,
+            idtx_intra: seq_hdr.idtx_intra,
+            mrls: seq_hdr.mrls,
+            mhccp: seq_hdr.mhccp,
+            cfl: seq_hdr.cfl,
+            allow_screen_content_tools: frame_hdr.allow_screen_content_tools != 0,
+            intra_dip: seq_hdr.intra_dip,
+            force_integer_mv: frame_hdr.force_integer_mv != 0,
+            max_bvp_drl_bits: frame_hdr.max_bvp_drl_bits,
+            max_drl_bits: frame_hdr.max_drl_bits,
+            bawp: frame_hdr.bawp != 0,
+            txfm_switchable: frame_hdr.txfm_mode == crate::headers::TxfmMode::Switchable,
+            skip_mode_refs,
+            n_ref_frames: frame_hdr.n_ref_frames,
+            warp_motion: frame_hdr.warp_motion != 0,
+            motion_modes: frame_hdr.motion_modes,
+            adaptive_mvd: seq_hdr.adaptive_mvd,
+            flex_mvres: seq_hdr.flex_mvres,
+            mv_precision: frame_hdr.mv_precision,
+            mvd_sign_derive: seq_hdr.mvd_sign_derive,
+            tip_frame_mode: frame_hdr.tip.frame_mode,
+            six_param_warp_delta: seq_hdr.six_param_warp_delta,
+            subpel_filter_mode: frame_hdr.subpel_filter_mode as u8,
+            switchable_comp_refs: frame_hdr.switchable_comp_refs != 0,
+            num_same_ref_comp: seq_hdr.num_same_ref_comp,
+            refdir,
+            refdist: refdist8,
+            opfl_refine_type: frame_hdr.opfl_refine_type,
+            masked_compound: seq_hdr.masked_compound,
+            cwp: seq_hdr.cwp,
+            refine_mv_enabled: seq_hdr.refine_mv,
+            absrefdist: absrefdist8,
+            tile_col_start,
+            tile_col_end,
+            tile_row_start,
+            tile_row_end,
+            sb_step,
+        }
+    }
+}
+
 fn get_snglref_ctx(
     a: &BlockContext,
     l: &BlockContext,
@@ -6163,6 +6258,52 @@ mod tests {
         assert!(
             wmp.wm_type == WarpedMotionType::Invalid || wmp.wm_type != WarpedMotionType::Invalid
         );
+    }
+
+    #[test]
+    fn test_sbframeinfo_from_frame() {
+        let seq = crate::headers::SequenceHeader {
+            ss_hor: 1,
+            ss_ver: 1,
+            sdp: true,
+            ..Default::default()
+        };
+        let mut fh = FrameHeader::default();
+        fh.frame_type = crate::headers::FrameType::Key;
+        fh.segmentation.enabled = 1;
+        fh.n_ref_frames = 7;
+        fh.txfm_mode = crate::headers::TxfmMode::Switchable;
+
+        let fi = SbFrameInfo::from_frame(
+            &seq,
+            &fh,
+            64,
+            64,
+            BlockSize::Bs64x64,
+            16,
+            1,
+            [0; 8],
+            &[0; 7],
+            &[0; 7],
+            RefPair { pair: 0 },
+            0,
+            64,
+            0,
+            64,
+        );
+
+        assert_eq!(fi.bw, 64);
+        assert_eq!(fi.bh, 64);
+        assert_eq!(fi.ss_hor, 1);
+        assert_eq!(fi.ss_ver, 1);
+        assert_eq!(fi.sb_step, 16);
+        assert!(!fi.is_inter_or_switch);
+        assert!(fi.sdp);
+        assert!(fi.seg_enabled);
+        assert!(fi.txfm_switchable);
+        assert_eq!(fi.n_ref_frames, 7);
+        assert_eq!(fi.tile_col_end, 64);
+        assert_eq!(fi.tile_row_end, 64);
     }
 
     #[test]
