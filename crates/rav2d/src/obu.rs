@@ -2702,7 +2702,10 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 if c.run_decode {
                     // Best-effort during bring-up: a frame that cannot be decoded
                     // yet (e.g. inter frames) must not abort header parsing.
-                    let _ = crate::decode::submit_frame(c, 1);
+                    let r = crate::decode::submit_frame(c, 1);
+                    if r.is_err() && std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+                        eprintln!("submit_frame returned Err");
+                    }
                 }
                 c.frame_hdr = None;
                 c.n_tiles = 0;

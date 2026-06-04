@@ -169,6 +169,36 @@ pub fn init_quant_tables(
     }
 }
 
+/// Recompute the per-segment dequant tables for a single qindex (used by the
+/// per-superblock delta-q path; mirrors `init_quant_tables` with state pulled
+/// from `SbFrameInfo` instead of `FrameHeader`).
+pub fn init_quant_tables_fi(
+    fi: &SbFrameInfo,
+    qidx: i32,
+    dq: &mut [[[u32; 2]; 3]; MAX_SEGMENTS],
+) {
+    let n = if fi.seg_enabled { 8 } else { 1 };
+    for i in 0..n {
+        let yac = if fi.seg_enabled {
+            qidx + fi.seg_delta_q[i] as i32
+        } else {
+            qidx
+        };
+        let ydc = yac + fi.q_ydc_delta;
+        let uac = yac + fi.q_uac_delta;
+        let udc = yac + fi.q_udc_delta;
+        let vac = yac + fi.q_vac_delta;
+        let vdc = yac + fi.q_vdc_delta;
+
+        dq[i][0][0] = dq_lookup(ydc) as u32;
+        dq[i][0][1] = dq_lookup(yac) as u32;
+        dq[i][1][0] = dq_lookup(udc) as u32;
+        dq[i][1][1] = dq_lookup(uac) as u32;
+        dq[i][2][0] = dq_lookup(vdc) as u32;
+        dq[i][2][1] = dq_lookup(vac) as u32;
+    }
+}
+
 pub fn reset_context(ctx: &mut BlockContext, keyframe: bool, is_tip_frame: bool) {
     ctx.tx_lpf_y.fill(3);
     ctx.tx_lpf_uv.fill(2);
@@ -615,6 +645,43 @@ pub fn get_prev_frame_segid(
         off = (off as isize + stride) as usize;
     }
     seg_id
+}
+
+/// Spatial-prediction of the current-frame segment id (`get_cur_frame_segid`,
+/// env.h:313). Returns the predicted seg_id and writes the neighbour context
+/// class into `seg_ctx`.
+pub fn get_cur_frame_segid(
+    by: i32,
+    bx: i32,
+    have_top: bool,
+    have_left: bool,
+    seg_ctx: &mut i32,
+    cur_seg_map: &[u8],
+    stride: isize,
+) -> u32 {
+    let base = (bx as isize + by as isize * stride) as usize;
+    if have_left && have_top {
+        let l = cur_seg_map[base - 1] as i32;
+        let a = cur_seg_map[(base as isize - stride) as usize] as i32;
+        let al = cur_seg_map[(base as isize - (stride + 1)) as usize] as i32;
+        if l == a && al == l {
+            *seg_ctx = 2;
+        } else if l == a || al == l || a == al {
+            *seg_ctx = 1;
+        } else {
+            *seg_ctx = 0;
+        }
+        (if a == al { a } else { l }) as u32
+    } else {
+        *seg_ctx = 0;
+        if have_left {
+            cur_seg_map[base - 1] as u32
+        } else if have_top {
+            cur_seg_map[(base as isize - stride) as usize] as u32
+        } else {
+            0
+        }
+    }
 }
 
 pub fn mc_lowest_px(
@@ -1690,6 +1757,32 @@ pub struct SbFrameInfo {
     pub seg_last_active_segid: u8,
     pub seg_globalmv_mask: u16,
     pub seg_skip_mask: u16,
+    pub seg_lossless: [u8; crate::headers::MAX_SEGMENTS],
+    pub has_prev_segmap: bool,
+    // Delta-q (per-superblock)
+    pub delta_q_present: bool,
+    pub delta_q_res_log2: u8,
+    pub quant_yac: i32,
+    pub sb128: i32,
+    pub b4_stride: isize,
+    // Quantizer deltas, needed to recompute per-SB dequant tables on delta-q.
+    pub q_ydc_delta: i32,
+    pub q_uac_delta: i32,
+    pub q_udc_delta: i32,
+    pub q_vac_delta: i32,
+    pub q_vdc_delta: i32,
+    pub seg_delta_q: [i16; crate::headers::MAX_SEGMENTS],
+    // GDF / CDEF-index / CCSO (read at SB / 64x64 boundaries, before delta-q)
+    pub gdf_enabled: crate::headers::AdaptiveBoolean,
+    pub gdf_is_key: bool,
+    pub cur_w: i32,
+    pub cur_h: i32,
+    pub cdef_enabled: bool,
+    pub cdef_on_skiptx: bool,
+    pub cdef_n_strengths: u8,
+    pub ccso_enabled: [bool; 3],
+    pub ccso_sb_reuse: [bool; 3],
+    pub sb256w: i32,
     // Frame flags
     pub skip_mode_enabled: bool,
     pub allow_intrabc: bool,
@@ -1786,6 +1879,37 @@ impl SbFrameInfo {
             seg_last_active_segid: frame_hdr.segmentation.last_active_segid as u8,
             seg_globalmv_mask: frame_hdr.segmentation.d.globalmv_mask,
             seg_skip_mask: frame_hdr.segmentation.d.skip_mask,
+            seg_lossless: frame_hdr.segmentation.lossless,
+            has_prev_segmap: frame_hdr.primary_ref_frame != crate::headers::PRIMARY_REF_NONE,
+            delta_q_present: frame_hdr.delta.q.present != 0,
+            delta_q_res_log2: frame_hdr.delta.q.res_log2,
+            quant_yac: frame_hdr.quant.yac as i32,
+            sb128: frame_hdr.sb128 as i32,
+            b4_stride: (((bw + 63) & !63) as isize),
+            q_ydc_delta: frame_hdr.quant.ydc_delta as i32,
+            q_uac_delta: frame_hdr.quant.uac_delta as i32,
+            q_udc_delta: frame_hdr.quant.udc_delta as i32,
+            q_vac_delta: frame_hdr.quant.vac_delta as i32,
+            q_vdc_delta: frame_hdr.quant.vdc_delta as i32,
+            seg_delta_q: frame_hdr.segmentation.d.delta_q,
+            gdf_enabled: frame_hdr.gdf.enabled,
+            gdf_is_key: frame_hdr.frame_type == crate::headers::FrameType::Key,
+            cur_w: frame_hdr.width,
+            cur_h: frame_hdr.height,
+            cdef_enabled: frame_hdr.cdef.enabled != 0,
+            cdef_on_skiptx: frame_hdr.cdef.on_skiptx != 0,
+            cdef_n_strengths: frame_hdr.cdef.n_strengths,
+            ccso_enabled: [
+                frame_hdr.ccso.p[0].enabled != 0,
+                frame_hdr.ccso.p[1].enabled != 0,
+                frame_hdr.ccso.p[2].enabled != 0,
+            ],
+            ccso_sb_reuse: [
+                frame_hdr.ccso.p[0].sb_reuse != 0,
+                frame_hdr.ccso.p[1].sb_reuse != 0,
+                frame_hdr.ccso.p[2].sb_reuse != 0,
+            ],
+            sb256w: (bw + 63) >> 6,
             skip_mode_enabled: frame_hdr.skip_mode_enabled != 0,
             allow_intrabc: frame_hdr.allow_intrabc != 0,
             any_lossless: frame_hdr.any_lossless != 0,
@@ -1897,6 +2021,36 @@ pub struct ReconCtx<'a, 'f> {
     /// Temporary edge buffer for `prepare_intra_edges` (`t->scratch.edge`,
     /// 257 entries wide; we use a generous fixed slab indexed from the middle).
     pub edge: &'a mut [u8],
+    /// Current-frame segment id map (`f->cur_segmap`), `b4_stride * bh` entries.
+    /// Written by decode_b over the block footprint when segmentation is enabled.
+    pub cur_segmap: &'a mut [u8],
+    /// Previous-frame segment map (`f->prev_segmap`), present only when the frame
+    /// has a primary reference; `None` for frame-0 / no-primary-ref keyframes.
+    pub prev_segmap: Option<&'a [u8]>,
+    /// `f->b4_stride` — row stride of the segment maps (in 4x4 units).
+    pub b4_stride: isize,
+    /// Running per-superblock quantizer index (`ts->last_qidx`). Updated by the
+    /// per-SB delta-q parse; seeded from `frame_hdr.quant.yac` at tile start.
+    pub last_qidx: i32,
+    /// Per-superblock recomputed dequant tables (`ts->dqmem`).
+    pub dqmem: [[[u32; 2]; 3]; crate::headers::MAX_SEGMENTS],
+    /// Currently active dequant tables (`ts->dq`): either the frame-wide
+    /// `recon.frame.dq` or `dqmem` when a per-SB delta-q shifts the qindex.
+    pub dq_active: [[[u32; 2]; 3]; crate::headers::MAX_SEGMENTS],
+    /// Set when a parsed seg_id is out of range (`seg_id >= 16`), mirroring the
+    /// C `return -1` that aborts the frame.
+    pub seg_id_err: bool,
+    /// Loop-filter mask array (`f->lf.mask` / per-SB `Av2Filter`) — the gdf,
+    /// cdef-index and ccso reads write into it and read neighbour SB values.
+    pub lf_mask: &'a mut [crate::lf_mask::Av2Filter],
+    /// Index of the current superblock's `Av2Filter` within `lf_mask`.
+    pub lf_idx: usize,
+    /// `f->sb256w` — superblock-row stride into `lf_mask` (for top neighbour).
+    pub sb256w: i32,
+    /// Current-frame CCSO map (`f->cur_ccsomap`), written per-SB; empty if unused.
+    pub cur_ccsomap: &'a mut [u8],
+    /// Previous-frame CCSO maps (`f->prev_ccsomap`); `None` per plane if absent.
+    pub prev_ccsomap: [Option<&'a [u8]>; 3],
 }
 
 /// Decode one superblock row of a tile (entropy/parse pass).
@@ -1923,6 +2077,10 @@ pub fn decode_tile_sbrow_entropy(
     dst_v: &mut [u8],
     cf: &mut [i32],
     recon_frame: &ReconFrameCtx,
+    cur_segmap: &mut [u8],
+    prev_segmap: Option<&[u8]>,
+    cur_ccsomap: &mut [u8],
+    prev_ccsomap: [Option<&[u8]>; 3],
     part_w: &mut Vec<u8>,
     part_r: &[u8],
     by: i32,
@@ -1943,6 +2101,15 @@ pub fn decode_tile_sbrow_entropy(
     // buffer for prepare_intra_edges (origin in the middle of the slab).
     let mut recon_scratch = ReconScratch::default();
     let mut recon_edge = vec![0u8; 2048];
+
+    // Running per-tile delta-q state (`ts->last_qidx`/`ts->dqmem`/`ts->dq`).
+    // Seeded by the caller from `frame_hdr.quant.yac` at tile entry; carried
+    // forward across superblocks within and across sbrows.
+    let mut sb_last_qidx = ts.last_qidx;
+    let mut sb_dqmem = ts.dqmem;
+    // Whether `dqmem` currently mirrors a non-frame-wide qindex; if so the
+    // active dq must be re-derived when the qindex changes.
+    let mut sb_seg_err = false;
 
     let mut bx = col_start;
     while bx < col_end {
@@ -2049,6 +2216,14 @@ pub fn decode_tile_sbrow_entropy(
         let mut part_w_idx = 0usize;
         let mut part_r_idx = 0usize;
 
+        // Active dequant tables for this superblock: frame-wide unless a prior
+        // delta-q has shifted the running qindex away from `quant.yac`.
+        let dq_active_init = if sb_last_qidx == fi.quant_yac {
+            *recon_frame.dq
+        } else {
+            sb_dqmem
+        };
+
         let mut recon = ReconCtx {
             dst_y: &mut *dst_y,
             dst_u: &mut *dst_u,
@@ -2058,6 +2233,22 @@ pub fn decode_tile_sbrow_entropy(
             frame: recon_frame,
             scratch: &mut recon_scratch,
             edge: &mut recon_edge,
+            cur_segmap: &mut *cur_segmap,
+            prev_segmap,
+            b4_stride: fi.b4_stride,
+            last_qidx: sb_last_qidx,
+            dqmem: sb_dqmem,
+            dq_active: dq_active_init,
+            seg_id_err: false,
+            lf_mask: &mut *lf_mask,
+            lf_idx,
+            sb256w,
+            cur_ccsomap: &mut cur_ccsomap[..],
+            prev_ccsomap: [
+                prev_ccsomap[0],
+                prev_ccsomap[1],
+                prev_ccsomap[2],
+            ],
         };
 
         decode_sb(
@@ -2084,11 +2275,31 @@ pub fn decode_tile_sbrow_entropy(
             &mut dir,
         )?;
 
+        // Persist running delta-q state for the next superblock / sbrow.
+        sb_last_qidx = recon.last_qidx;
+        sb_dqmem = recon.dqmem;
+        sb_seg_err |= recon.seg_id_err;
+
         bx += sb_step;
+    }
+
+    // Write back the running per-tile delta-q state.
+    ts.last_qidx = sb_last_qidx;
+    ts.dqmem = sb_dqmem;
+
+    // Abort the frame on an out-of-range segment id (C `return -1`).
+    if sb_seg_err {
+        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+            eprintln!("decode_tile_sbrow_entropy: seg_id_err");
+        }
+        return Err(());
     }
 
     // Error out on symbol-decoder overread.
     if msac.cnt() <= -15 {
+        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+            eprintln!("decode_tile_sbrow_entropy: msac overread cnt={}", msac.cnt());
+        }
         return Err(());
     }
 
@@ -2123,8 +2334,15 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         bitdepth_max,
         ss_hor,
         ss_ver,
+        cur_segmap,
+        prev_segmap,
+        cur_ccsomap,
+        prev_ccsomap,
+        b4_stride,
+        sb256h,
         ..
     } = fc;
+    let fc_sb256h = *sb256h;
 
     let seq_hdr = &**seq_hdr;
     let frame_hdr = &**frame_hdr;
@@ -2133,6 +2351,25 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let sb_step = *sb_step;
     let bw = *bw;
     let bh = *bh;
+    let b4_stride_v = *b4_stride;
+
+    // Allocate the current-frame segment id map when segmentation is enabled
+    // (C: `f->cur_segmap`, sized `b4_stride * 64 * sb256h`, padded to whole
+    // superblock rows so full bw4 x bh4 block writes never overrun). Reset to 0;
+    // decode_b writes each block's seg_id over its footprint.
+    if frame_hdr.segmentation.enabled != 0 {
+        let needed = (b4_stride_v as usize) * 64 * (fc_sb256h as usize);
+        if cur_segmap.len() != needed {
+            cur_segmap.resize(needed, 0);
+        }
+        cur_segmap.fill(0);
+    }
+    let prev_segmap_ref: Option<&[u8]> = prev_segmap.as_deref();
+    let prev_ccsomap_ref: [Option<&[u8]>; 3] = [
+        prev_ccsomap[0].as_deref(),
+        prev_ccsomap[1].as_deref(),
+        prev_ccsomap[2].as_deref(),
+    ];
     let refdir = *refdir;
     let skip_mode_refs = *skip_mode_refs;
 
@@ -2271,6 +2508,10 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     &mut *dst_v,
                     &mut cf,
                     &recon_frame,
+                    &mut cur_segmap[..],
+                    prev_segmap_ref,
+                    &mut cur_ccsomap[..],
+                    prev_ccsomap_ref,
                     &mut part_w,
                     &part_r,
                     by,
@@ -2681,8 +2922,76 @@ fn decode_b(
         (sm, st, intra_vals, ibc_vals, xoff, idx, r0, r1, amvd_v)
     };
 
-    // Segmentation (simplified: seg_id = 0 when not enabled)
-    b.seg_id = 0;
+    // segment_id (pre-skip read). Port of decode.c:1577-1635.
+    let mut seg_pred = 0i32;
+    if fi.seg_enabled {
+        let bx_abs = bx;
+        let by_abs = by;
+        if !has_luma {
+            b.seg_id =
+                recon.cur_segmap[(bx_abs as isize + by_abs as isize * recon.b4_stride) as usize];
+        } else if !fi.seg_update_map {
+            if let Some(prev) = recon.prev_segmap {
+                let sid = get_prev_frame_segid(by_abs, bx_abs, w4, h4, prev, recon.b4_stride);
+                if sid >= 16 {
+                    recon.seg_id_err = true;
+                    return Err(());
+                }
+                b.seg_id = sid as u8;
+            } else {
+                b.seg_id = 0;
+            }
+        } else if fi.seg_preskip {
+            seg_pred = if fi.seg_temporal {
+                let ctx = a.seg_pred[bx4] as usize + l.seg_pred[by4] as usize;
+                msac.decode_bool_adapt(cdf_m.seg_pred(ctx)) as i32
+            } else {
+                0
+            };
+            if seg_pred != 0 {
+                if let Some(prev) = recon.prev_segmap {
+                    let sid = get_prev_frame_segid(by_abs, bx_abs, w4, h4, prev, recon.b4_stride);
+                    if sid >= 16 {
+                        recon.seg_id_err = true;
+                        return Err(());
+                    }
+                    b.seg_id = sid as u8;
+                } else {
+                    b.seg_id = 0;
+                }
+            } else {
+                let mut seg_ctx = 0i32;
+                let pred_seg_id = get_cur_frame_segid(
+                    by_abs,
+                    bx_abs,
+                    have_top,
+                    have_left,
+                    &mut seg_ctx,
+                    recon.cur_segmap,
+                    recon.b4_stride,
+                );
+                let ext_flag = if fi.seg_ext {
+                    msac.decode_bool_adapt(cdf_m.seg_id_ext(seg_ctx as usize)) as u32
+                } else {
+                    0
+                };
+                let diff = msac.decode_symbol_adapt(cdf_m.seg_id(ext_flag as usize, seg_ctx as usize), 7)
+                    + (ext_flag << 3);
+                let last_active = fi.seg_last_active_segid as i32;
+                let mut sid =
+                    neg_deinterleave(diff as i32, pred_seg_id as i32, last_active + 1);
+                if sid > last_active {
+                    sid = 0;
+                }
+                if sid >= crate::headers::MAX_SEGMENTS as i32 {
+                    sid = 0;
+                }
+                b.seg_id = sid as u8;
+            }
+        }
+    } else {
+        b.seg_id = 0;
+    }
 
     // skip_mode
     if (fi.seg_globalmv_mask | fi.seg_skip_mask) & (1 << b.seg_id) == 0
@@ -2824,6 +3133,226 @@ fn decode_b(
     }
     if trace_blk {
         eprintln!("  CK skip_txfm={} rng={}", b.skip_txfm, msac.dbg_rng());
+    }
+
+    // segment_id (post-skip read). Port of decode.c:1748-1802.
+    if fi.seg_enabled && fi.seg_update_map && !fi.seg_preskip {
+        let bx_abs = bx;
+        let by_abs = by;
+        if !has_luma {
+            b.seg_id =
+                recon.cur_segmap[(bx_abs as isize + by_abs as isize * recon.b4_stride) as usize];
+        } else if b.skip_txfm == 0 && fi.seg_temporal && {
+            let ctx = a.seg_pred[bx4] as usize + l.seg_pred[by4] as usize;
+            seg_pred = msac.decode_bool_adapt(cdf_m.seg_pred(ctx)) as i32;
+            seg_pred != 0
+        } {
+            if let Some(prev) = recon.prev_segmap {
+                let sid = get_prev_frame_segid(by_abs, bx_abs, w4, h4, prev, recon.b4_stride);
+                if sid >= 16 {
+                    recon.seg_id_err = true;
+                    return Err(());
+                }
+                b.seg_id = sid as u8;
+            } else {
+                b.seg_id = 0;
+            }
+        } else {
+            let mut seg_ctx = 0i32;
+            let pred_seg_id = get_cur_frame_segid(
+                by_abs,
+                bx_abs,
+                have_top,
+                have_left,
+                &mut seg_ctx,
+                recon.cur_segmap,
+                recon.b4_stride,
+            );
+            if b.skip_txfm != 0 && !fi.any_lossless {
+                b.seg_id = pred_seg_id as u8;
+            } else {
+                let ext_flag = if fi.seg_ext {
+                    msac.decode_bool_adapt(cdf_m.seg_id_ext(seg_ctx as usize)) as u32
+                } else {
+                    0
+                };
+                let diff = msac
+                    .decode_symbol_adapt(cdf_m.seg_id(ext_flag as usize, seg_ctx as usize), 7)
+                    + (ext_flag << 3);
+                let last_active = fi.seg_last_active_segid as i32;
+                let mut sid =
+                    neg_deinterleave(diff as i32, pred_seg_id as i32, last_active + 1);
+                if sid > last_active {
+                    sid = 0;
+                }
+                b.seg_id = sid as u8;
+            }
+            if b.seg_id >= crate::headers::MAX_SEGMENTS as u8 {
+                b.seg_id = 0;
+            }
+        }
+        if trace_blk {
+            eprintln!("  CK post_segid seg_id={} rng={}", b.seg_id, msac.dbg_rng());
+        }
+    }
+
+    let skip_txfm = has_luma && b.skip_txfm != 0;
+
+    // GDF (guided deblocking filter) flag. Port of decode.c:1806-1833.
+    if has_luma {
+        let gdf_sz_log2 = if fi.gdf_is_key { 1 } else { imax(1, fi.sb128) };
+        let gdf_bs = 16 << gdf_sz_log2;
+        if (bx | by) & (gdf_bs - 1) == 0 {
+            let idx = (((by & 48) >> 2) + ((bx & 48) >> 4)) as usize;
+            let flag = if fi.gdf_enabled == crate::headers::AdaptiveBoolean::Adaptive
+                && imax(fi.cur_w, fi.cur_h) > 4 * gdf_bs
+            {
+                let f = msac.decode_bool_adapt(cdf_m.gdf()) as u8;
+                if trace_blk {
+                    eprintln!("  CK gdf flag={} rng={}", f, msac.dbg_rng());
+                }
+                f
+            } else {
+                (fi.gdf_enabled != crate::headers::AdaptiveBoolean::Off) as u8
+            };
+            let n = 1usize << gdf_sz_log2;
+            let m = &mut recon.lf_mask[recon.lf_idx];
+            m.gdf[idx..idx + n].fill(flag);
+            if gdf_bs >= 32 {
+                m.gdf[idx + 4..idx + 4 + n].fill(flag);
+                if gdf_bs == 64 {
+                    m.gdf[idx + 8..idx + 8 + n].fill(flag);
+                    m.gdf[idx + 12..idx + 12 + n].fill(flag);
+                }
+            }
+        }
+    }
+
+    // CDEF index. Port of decode.c:1835-1893.
+    if fi.cdef_enabled && (!skip_txfm || fi.cdef_on_skiptx) {
+        let idx = (((bx & 0x30) >> 4) + ((by & 0x30) >> 2)) as usize;
+        if recon.lf_mask[recon.lf_idx].cdef_idx[idx] == -1 {
+            let v;
+            if fi.cdef_n_strengths == 1 {
+                v = 0i8;
+            } else {
+                let left_cdef_idx = if bx - 16 < fi.tile_col_start {
+                    -1i32
+                } else if idx & 3 != 0 {
+                    recon.lf_mask[recon.lf_idx].cdef_idx[idx - 1] as i32
+                } else {
+                    recon.lf_mask[recon.lf_idx - 1].cdef_idx[idx + 3] as i32
+                };
+                let top_cdef_idx = if (by & !15) & (fi.sb_step - 1) == 0 {
+                    -1i32
+                } else if idx & 0xc != 0 {
+                    recon.lf_mask[recon.lf_idx].cdef_idx[idx - 4] as i32
+                } else {
+                    recon.lf_mask[recon.lf_idx - recon.sb256w as usize].cdef_idx[idx + 12] as i32
+                };
+                let ctx = if (left_cdef_idx | top_cdef_idx) != -1 {
+                    // both edges available
+                    let mut c = (left_cdef_idx == 0) as i32 + (top_cdef_idx == 0) as i32;
+                    c += (c == 2) as i32;
+                    c
+                } else {
+                    // C: !(left & top) * 2  (logical-not, so 0 -> 1, nonzero -> 0)
+                    ((left_cdef_idx & top_cdef_idx) == 0) as i32 * 2
+                };
+                if msac.decode_bool_adapt(cdf_m.cdef_idx0(ctx as usize)) != 0 {
+                    v = 0;
+                } else if fi.cdef_n_strengths == 2 {
+                    v = 1;
+                } else {
+                    let rem = fi.cdef_n_strengths as i32 - 3;
+                    v = 1 + msac.decode_symbol_adapt(cdf_m.cdef_idx(rem as usize), (rem + 1) as usize)
+                        as i8;
+                }
+                if trace_blk {
+                    eprintln!("  CK cdef_idx ctx={} v={} rng={}", ctx, v, msac.dbg_rng());
+                }
+            }
+            let splat_n = 1usize << imax(0, b_dim[2] as i32 - 4);
+            let m = &mut recon.lf_mask[recon.lf_idx];
+            m.cdef_idx[idx..idx + splat_n].fill(v);
+            if bh4 >= 32 {
+                m.cdef_idx[idx + 4..idx + 4 + splat_n].fill(v);
+                if bh4 == 64 {
+                    m.cdef_idx[idx + 8..idx + 8 + splat_n].fill(v);
+                    m.cdef_idx[idx + 12..idx + 12 + splat_n].fill(v);
+                }
+            }
+        }
+    }
+
+    // CCSO (cross-component sample offset). Port of decode.c:1895-1919.
+    if has_luma && (bx | by) & 63 == 0 {
+        let ccso_idx = (3 * ((bx >> 6) + (by >> 6) * fi.sb256w)) as usize;
+        for p in 0..3 {
+            if !fi.ccso_enabled[p] {
+                continue;
+            }
+            let val = if fi.ccso_sb_reuse[p] {
+                match recon.prev_ccsomap[p] {
+                    Some(prev) => prev[ccso_idx + p],
+                    None => 0,
+                }
+            } else {
+                let ctx = if bx - 64 >= fi.tile_col_start {
+                    recon.lf_mask[recon.lf_idx - 1].ccso[p] as usize * 2
+                } else {
+                    0
+                };
+                let v = msac.decode_bool_adapt(cdf_m.ccso(p, ctx)) as u8;
+                if trace_blk {
+                    eprintln!("  CK ccso p={} ctx={} v={} rng={}", p, ctx, v, msac.dbg_rng());
+                }
+                v
+            };
+            recon.lf_mask[recon.lf_idx].ccso[p] = val;
+            if !recon.cur_ccsomap.is_empty() {
+                recon.cur_ccsomap[ccso_idx + p] = val;
+            }
+        }
+    }
+
+    // delta-q (per-superblock). Port of decode.c:1919-1960.
+    if has_luma && (bx | by) & (63 >> (2 - fi.sb128)) == 0 {
+        let prev_qidx = recon.last_qidx;
+        let have_delta_q = fi.delta_q_present && (bs != fi.root_bs || b.skip_txfm == 0);
+        if have_delta_q {
+            if trace_blk {
+                let c = cdf_m.delta_q();
+                eprintln!("  CK delta_q_cdf {:?} rng={}", &c[..8], msac.dbg_rng());
+            }
+            let mut delta_q = msac.decode_symbol_adapt(cdf_m.delta_q(), 7) as i32;
+            if delta_q == 7 {
+                let n_bits = 1 + msac.decode_bools_bypass(3) as i32;
+                delta_q = msac.decode_bools_bypass(n_bits as u32) as i32 + 1 + (1 << n_bits);
+            }
+            if delta_q != 0 {
+                if msac.decode_bool_bypass() != 0 {
+                    delta_q = -delta_q;
+                }
+                delta_q *= 1 << fi.delta_q_res_log2;
+            }
+            recon.last_qidx = iclip(recon.last_qidx + delta_q, 1, 255);
+            if trace_blk {
+                eprintln!(
+                    "  CK delta_q d={} last_qidx={} rng={}",
+                    delta_q >> fi.delta_q_res_log2,
+                    recon.last_qidx,
+                    msac.dbg_rng()
+                );
+            }
+        }
+        let new_qidx = recon.last_qidx;
+        if new_qidx == fi.quant_yac {
+            recon.dq_active = *recon.frame.dq;
+        } else if new_qidx != prev_qidx {
+            init_quant_tables_fi(fi, new_qidx, &mut recon.dqmem);
+            recon.dq_active = recon.dqmem;
+        }
     }
 
     // Intra mode decoding
@@ -3127,6 +3656,9 @@ fn decode_b(
                     uv_mode_idx += msac.decode_bools_bypass(3) as usize;
                 }
                 if uv_mode_idx > 12 {
+                    if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+                        eprintln!("uv_mode_idx>12 bx={} by={}", bx, by);
+                    }
                     return Err(());
                 }
 
@@ -3275,7 +3807,7 @@ fn decode_b(
         a.multi_mrl[bx4..bx4 + aw].fill(multi_mrl);
         a.dip[bx4..bx4 + aw].fill((dip_val != 0) as u8);
         a.pal_sz[bx4..bx4 + aw].fill(pal_sz_val);
-        a.seg_pred[bx4..bx4 + aw].fill(0);
+        a.seg_pred[bx4..bx4 + aw].fill(seg_pred as u8);
         a.skip_mode[bx4..bx4 + aw].fill(0);
         a.intra[bx4..bx4 + aw].fill(1);
         a.intrabc[bx4..bx4 + aw].fill(0);
@@ -3298,7 +3830,7 @@ fn decode_b(
         l.multi_mrl[by4..by4 + lh].fill(multi_mrl);
         l.dip[by4..by4 + lh].fill((dip_val != 0) as u8);
         l.pal_sz[by4..by4 + lh].fill(pal_sz_val);
-        l.seg_pred[by4..by4 + lh].fill(0);
+        l.seg_pred[by4..by4 + lh].fill(seg_pred as u8);
         l.skip_mode[by4..by4 + lh].fill(0);
         l.intra[by4..by4 + lh].fill(1);
         l.intrabc[by4..by4 + lh].fill(0);
@@ -4474,6 +5006,20 @@ fn decode_b(
         }
     }
 
+    // Write the block's segment id into the current-frame segment map over its
+    // bw4 x bh4 footprint (decode.c:3328-3341). Luma-only; chroma reads it back.
+    if fi.seg_enabled && has_luma {
+        let seg_id = b.seg_id;
+        let stride = recon.b4_stride;
+        let bw4u = 1usize << b_dim[2];
+        let bh4u = bh4 as usize;
+        let mut off = (by as isize * stride + bx as isize) as usize;
+        for _ in 0..bh4u {
+            recon.cur_segmap[off..off + bw4u].fill(seg_id);
+            off = (off as isize + stride) as usize;
+        }
+    }
+
     // ---- Reconstruction leaf (intra 8bpc) ----------------------------------
     // Mirrors the luma path of `dav2d_recon_b` (recon_tmpl.c:3292-3478) plus
     // `recon_b_luma_tx` (recon_tmpl.c:2443-2675), followed by the chroma path
@@ -5098,7 +5644,7 @@ fn recon_b_intra_chroma(
                 let tu_n = (uv_t_dim.w as usize * 4) * (uv_t_dim.h as usize * 4);
                 cf_slot[..tu_n].fill(0);
 
-                let dq_tbl = recon.frame.dq[seg_id][1 + pl];
+                let dq_tbl = recon.dq_active[seg_id][1 + pl];
                 let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
 
                 let acoef = &a.ccoef[pl][(cbx4 + x as usize)..];
@@ -5145,6 +5691,9 @@ fn recon_b_intra_chroma(
                     &mut res_ctx,
                 );
                 if eob == i32::MIN {
+                    if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+                        eprintln!("recon chroma: eob==MIN cbx={} cby={} seg={}", cbx, cby, b.seg_id);
+                    }
                     return Err(());
                 }
                 if pl == 0 {
@@ -5693,7 +6242,7 @@ fn recon_b_luma_tx(
     recon.cf[..cf_n].fill(0);
 
     let dq_seg = b.seg_id as usize;
-    let dq_tbl = recon.frame.dq[dq_seg][0]; // plane 0 (luma)
+    let dq_tbl = recon.dq_active[dq_seg][0]; // plane 0 (luma)
     let qm_ref: Option<&[u8]> = recon.frame.qm[tx][0].as_deref();
 
     let params = crate::recon::DecodeCoefParams {
@@ -5737,6 +6286,9 @@ fn recon_b_luma_tx(
         &mut res_ctx,
     );
     if eob == i32::MIN {
+        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+            eprintln!("recon luma: eob==MIN bx={} by={} seg={}", bx, by, b.seg_id);
+        }
         return Err(());
     }
     let stx = (txtp >> 8) as i32;
@@ -7245,6 +7797,9 @@ mod tests {
             };
             let mut __scratch = ReconScratch::default();
             let mut __edge = vec![0u8; 2048];
+            let mut __segmap = vec![0u8; 64 * 64];
+            let mut __lf_mask: Vec<crate::lf_mask::Av2Filter> = vec![Default::default(); 4];
+            let mut __ccsomap = vec![0u8; 0];
             let mut $recon = ReconCtx {
                 dst_y: &mut __ty,
                 dst_u: &mut __tu,
@@ -7254,6 +7809,18 @@ mod tests {
                 frame: &$rf,
                 scratch: &mut __scratch,
                 edge: &mut __edge,
+                cur_segmap: &mut __segmap,
+                prev_segmap: None,
+                b4_stride: 64,
+                last_qidx: 0,
+                dqmem: [[[0; 2]; 3]; crate::headers::MAX_SEGMENTS],
+                dq_active: [[[0; 2]; 3]; crate::headers::MAX_SEGMENTS],
+                seg_id_err: false,
+                lf_mask: &mut __lf_mask,
+                lf_idx: 0,
+                sb256w: 1,
+                cur_ccsomap: &mut __ccsomap,
+                prev_ccsomap: [None, None, None],
             };
         };
     }
