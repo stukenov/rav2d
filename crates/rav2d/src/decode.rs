@@ -3146,6 +3146,9 @@ fn decode_b(
     if trace_blk {
         eprintln!("  CK intrabc b.intrabc={} intra={} rng={}", b.intrabc, b.is_intra, msac.dbg_rng());
     }
+    if intrabc && std::env::var("RAV2D_IBC2").is_ok() {
+        eprintln!("IBC2 y={} x={} bs={} bw4={} bh4={} hasC={} cbs={}", by, bx, bs as i32, bw4, bh4, has_chroma, cbs as i32);
+    }
 
     // skip_txfm
     if fi.seg_skip_mask & (1 << b.seg_id) != 0 {
@@ -3935,6 +3938,9 @@ fn decode_b(
             }
             if trace_blk {
                 eprintln!("  CK ibc_mv mvy={} mvx={} prec={} rng={}", unsafe { b.data.intra.intrabc_mv.c.y }, unsafe { b.data.intra.intrabc_mv.c.x }, mv_prec, msac.dbg_rng());
+            }
+            if std::env::var("RAV2D_IBC2").is_ok() {
+                eprintln!("IBC2MV y={} x={} mvy={} mvx={} prec={}", by, bx, unsafe { b.data.intra.intrabc_mv.c.y }, unsafe { b.data.intra.intrabc_mv.c.x }, mv_prec);
             }
         }
 
@@ -5046,10 +5052,16 @@ fn decode_b(
     if trace_blk {
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
     }
-    if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 && b.intrabc == 0 {
+    if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
         recon_b_intra(
             recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
         )?;
+        if intrabc && std::env::var("RAV2D_IBC2").is_ok() {
+            eprintln!("RIBC y={} x={} mvy={} mvx={} refmv={} drl={} qpel={} morph={} rng={}",
+                by, bx, unsafe { b.data.intra.intrabc_mv.c.y }, unsafe { b.data.intra.intrabc_mv.c.x },
+                unsafe { b.data.intra.is_refmv }, unsafe { b.data.inter.drl_idx[0] },
+                unsafe { b.data.intra.is_qpel }, unsafe { b.data.intra.morph_pred }, msac.dbg_rng());
+        }
         if trace_blk {
             eprintln!("  CK post_chroma_recon rng={}", msac.dbg_rng());
         }
@@ -5215,13 +5227,57 @@ fn recon_b_intra(
     }
 
     // Leaf: ordinary <=64px block.
+    let intrabc = b.intrabc != 0;
     if has_luma {
         let bx4 = (bx & 63) as usize;
         let by4 = (by & 63) as usize;
-        recon_b_intra_luma(recon, msac, cdf_m, a, l, b, bx, by, bx4, by4, fi)?;
+        // IntraBC: copy the prediction from the current frame at the block
+        // vector before the tx walk (recon_tmpl.c:3149-3155).
+        if intrabc {
+            let mv = unsafe { b.data.intra.intrabc_mv.c };
+            crate::recon::intrabc_pred_8bpc(
+                recon.dst_y,
+                recon.frame.y_stride_px,
+                bw4,
+                bh4,
+                bx,
+                by,
+                mv.x as i32,
+                mv.y as i32,
+                0,
+                0,
+                fi.bw * 4,
+                fi.bh * 4,
+            );
+        }
+        recon_b_intra_luma(recon, msac, cdf_m, a, l, b, bx, by, bx4, by4, intrabc, fi)?;
     }
     if has_chroma {
-        recon_b_intra_chroma(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, fi)?;
+        // IntraBC: chroma prediction copy for both planes (recon_tmpl.c:3591-3600).
+        if intrabc {
+            let mv = unsafe { b.data.intra.intrabc_mv.c };
+            let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
+            let cbw4 = cb_dim[0] as i32;
+            let cbh4 = cb_dim[1] as i32;
+            for pl in 0..2 {
+                let dst_plane: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
+                crate::recon::intrabc_pred_8bpc(
+                    dst_plane,
+                    recon.frame.uv_stride_px,
+                    cbw4,
+                    cbh4,
+                    cbx,
+                    cby,
+                    mv.x as i32,
+                    mv.y as i32,
+                    fi.ss_hor,
+                    fi.ss_ver,
+                    (fi.bw * 4) >> fi.ss_hor,
+                    (fi.bh * 4) >> fi.ss_ver,
+                );
+            }
+        }
+        recon_b_intra_chroma(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, intrabc, fi)?;
     }
     Ok(())
 }
@@ -5251,6 +5307,7 @@ fn recon_b_intra_luma(
     by: i32,
     _bx4: usize,
     _by4: usize,
+    _intrabc: bool,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     recon_b_intra_luma_geom(recon, msac, cdf_m, a, l, b, bx, by, b.bs as usize, fi)
@@ -5761,6 +5818,7 @@ fn recon_b_intra_chroma(
     cbx: i32,
     cby: i32,
     cbs: BlockSize,
+    _intrabc: bool,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     recon_b_intra_chroma_phase(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, fi, ChromaPhase::Both)
@@ -5781,6 +5839,11 @@ fn recon_b_intra_chroma_phase(
     phase: ChromaPhase,
 ) -> Result<(), ()> {
     use crate::levels::{CFL_PRED, IntraPredMode};
+
+    // IntraBC: chroma `intra = b->intra && (sdp_active || !b->intrabc)`. In this
+    // leaf path sdp_active is false, so it is false for IntraBC blocks.
+    let is_intrabc = b.intrabc != 0;
+    let is_intra = !is_intrabc;
 
     let ss_hor = recon.frame.ss_hor;
     let ss_ver = recon.frame.ss_ver;
@@ -5872,7 +5935,7 @@ fn recon_b_intra_chroma_phase(
                     tx: uvtx,
                     bs: cbs as u8 as usize,
                     plane: (pl + 1) as i32,
-                    intra: true,
+                    intra: is_intra,
                     fsc: b.fsc != 0,
                     lossless,
                     sdp_active: false,
@@ -5962,7 +6025,8 @@ fn recon_b_intra_chroma_phase(
     let _ = u_has_cf;
 
     // ---- CfL prediction (recon_tmpl.c:3588-3590, cfl()) ---------------------
-    if uv_mode == CFL_PRED {
+    // CfL is intra-only (`if (intra) cfl()`); IntraBC used the mc copy instead.
+    if is_intra && uv_mode == CFL_PRED {
         cfl_predict_8bpc(recon, b, cbs, uvtx, cbx, cby, fi)?;
     }
 
@@ -5976,8 +6040,9 @@ fn recon_b_intra_chroma_phase(
             let i = (y * cbw4ss as i32 + x) as usize;
             let dst_off = 4 * ((ssby + y as usize) * cstride + ssbx + x as usize);
 
-            // Intra prediction for both planes (skipped for CfL).
-            if uv_mode != CFL_PRED {
+            // Intra prediction for both planes (skipped for CfL and IntraBC).
+            // C gate: `if (intra && b->uv_mode != CFL_PRED)`.
+            if is_intra && uv_mode != CFL_PRED {
                 for pl in 0..2 {
                     // n_tr: top-right availability (recon_tmpl.c:3809-3828).
                     let mut n_tr = 0i32;
@@ -6129,9 +6194,13 @@ fn recon_b_intra_chroma_phase(
                 if tu_eob[i][pl] != -1 {
                     let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
                     let mut txtp = tu_txtp[i][pl] as u32;
-                    if lossless && unsafe { b.data.intra }.dpcm[1] != 0 {
+                    // recon_tmpl.c:3916-3920: dpcm is intra-only; IntraBC takes
+                    // the inter_ddt branch instead.
+                    if lossless && is_intra && unsafe { b.data.intra }.dpcm[1] != 0 {
                         txtp +=
                             ((1 + (uv_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
+                    } else if recon.frame.seq_inter_ddt && is_intrabc {
+                        txtp += txtp & crate::tables::TX_DDT_MASK[uvtx] as u32;
                     }
                     let dst_plane: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
                     crate::itx::inv_txfm_add_8bpc(
@@ -6457,19 +6526,27 @@ fn recon_b_luma_tx(
     let tw4 = t_dim.w as i32;
     let th4 = t_dim.h as i32;
 
+    let is_intrabc = b.intrabc != 0;
+    // The decode-coefs / stx "intra" flag: `b->intra && (sdp_active || !b->intrabc)`
+    // — here sdp_active is false in the luma path, so it is false for IntraBC.
+    let is_intra = !is_intrabc;
+
     let intra = &unsafe { b.data.intra };
     let orig_y_mode = intra.y_mode;
     let mut angle = intra.y_angle as i32;
 
-    // wide_angle_remap (recon_tmpl.c:1107-1136). Only applies for intra,
-    // non-IntraBC; here that is always true.
-    let y_mode_remapped = {
+    // wide_angle_remap (recon_tmpl.c:2455). Only applies for intra, non-IntraBC.
+    let y_mode = if is_intra {
         // SAFETY: y_mode is a valid IntraPredMode discriminant (0..=12).
-        let m_in: IntraPredMode = unsafe { std::mem::transmute(orig_y_mode.min(12)) };
-        crate::recon::wide_angle_remap(t_dim, m_in, &mut angle, intra.mrl_index as i32) as u8
-    };
-    let y_mode = if orig_y_mode <= 12 {
-        y_mode_remapped
+        let y_mode_remapped = {
+            let m_in: IntraPredMode = unsafe { std::mem::transmute(orig_y_mode.min(12)) };
+            crate::recon::wide_angle_remap(t_dim, m_in, &mut angle, intra.mrl_index as i32) as u8
+        };
+        if orig_y_mode <= 12 {
+            y_mode_remapped
+        } else {
+            orig_y_mode
+        }
     } else {
         orig_y_mode
     };
@@ -6489,7 +6566,7 @@ fn recon_b_luma_tx(
         tx,
         bs: b.bs as usize,
         plane: 0,
-        intra: true,
+        intra: is_intra,
         fsc: b.fsc != 0,
         lossless,
         sdp_active: false,
@@ -6548,8 +6625,10 @@ fn recon_b_luma_tx(
     let stride = recon.frame.y_stride_px;
     let dst_off = 4 * (by as usize * stride + bx as usize);
 
-    // --- intra prediction (recon_tmpl.c:2513-2606) -------------------------
-    if intra.pal_sz == 0 {
+    // --- intra prediction (recon_tmpl.c:2511-2606) -------------------------
+    // Skipped for IntraBC: the block-copy prediction was applied before the tx
+    // walk (recon_tmpl.c gate `b->intra && !b->intrabc && !b->pal_sz`).
+    if is_intra && intra.pal_sz == 0 {
         let sbsz = fi.sb_step;
         let mrl_idx = intra.mrl_index as i32;
         let mrl_mul = intra.multi_mrl != 0 && tx != 0; // tx != TX_4X4
@@ -6725,8 +6804,7 @@ fn recon_b_luma_tx(
                 | (1 << IntraPredMode::VertLeftPred as i32)
                 | (1 << IntraPredMode::SmoothHPred as i32);
             // C: transpose = intrabc || !intra || !((mask >> b->y_mode) & 1);
-            // here intra && !intrabc, so transpose = !((mask >> y_mode) & 1).
-            let transpose = (MASK >> (y_mode as i32)) & 1 == 0;
+            let transpose = is_intrabc || (MASK >> (y_mode as i32)) & 1 == 0;
             let stype = (stx & 3) - 1;
             let set = (stx >> 2) & 15;
             if tw >= 8 && th >= 8 {
@@ -6770,11 +6848,14 @@ fn recon_b_luma_tx(
             }
         }
 
-        // lossless dpcm txtp adjust (recon_tmpl.c:2656-2660).
-        if lossless && unsafe { b.data.intra }.dpcm[0] != 0 {
+        // lossless dpcm txtp adjust (recon_tmpl.c:2655-2660). The dpcm branch is
+        // intra-only (`b->intra && !b->intrabc`); IntraBC takes the inter_ddt
+        // branch ((flip)adst -> (f)ddt) when `seq_hdr->inter_ddt`.
+        if lossless && is_intra && unsafe { b.data.intra }.dpcm[0] != 0 {
             txtp += ((1 + (y_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
+        } else if recon.frame.seq_inter_ddt && is_intrabc {
+            txtp += txtp & crate::tables::TX_DDT_MASK[tx] as u32;
         }
-        // inter_ddt path is inter-only; not reachable here (intra block).
 
         crate::itx::inv_txfm_add_8bpc(recon.dst_y, dst_off, stride, recon.cf, txtp, eob, tx);
     }

@@ -1792,6 +1792,119 @@ pub struct McParams {
     pub bottom: i32,
 }
 
+/// IntraBC block-copy prediction for one plane (8bpc). Mirrors `mc(... &f->cur,
+/// DAV2D_FILTER_BILINEAR ...)` in `dav2d_recon_b` (recon_tmpl.c:3150 / 3591):
+/// copies an already-decoded region of the *current* plane (src == dst buffer)
+/// at the block-vector offset into the block at (bx,by), applying the AV2
+/// bilinear subpel filter. `bx`,`by` are in 4x4 units; `mvx`,`mvy` are the
+/// luma-resolution block vector (1/8-pel). `right`/`bottom` are `f->bw*4 >>
+/// ss_hor` / `f->bh*4 >> ss_ver` (the clamping edges); `left`/`top` are 0.
+#[allow(clippy::too_many_arguments)]
+pub fn intrabc_pred_8bpc(
+    plane: &mut [u8],
+    stride: usize,
+    bw4: i32,
+    bh4: i32,
+    bx: i32,
+    by: i32,
+    mvx: i32,
+    mvy: i32,
+    ss_hor: i32,
+    ss_ver: i32,
+    right: i32,
+    bottom: i32,
+) {
+    let left = 0i32;
+    let top = 0i32;
+    let h_mul = 4 >> ss_hor;
+    let v_mul = 4 >> ss_ver;
+    // dav2d mc(): mx/my are the 1/16-pel subpel positions actually passed to the
+    // put filter (`mx << !ss_hor`). For an unsubsampled plane that is
+    // (mvx & 7) << 1; for a subsampled chroma plane it is (mvx & 15).
+    let mx_lo = mvx & (15 >> (ss_hor == 0) as i32);
+    let my_lo = mvy & (15 >> (ss_ver == 0) as i32);
+    let mx = mx_lo << (ss_hor == 0) as i32;
+    let my = my_lo << (ss_ver == 0) as i32;
+    // Source (reference) position within the current plane, in samples.
+    let sx = bx * h_mul + (mvx >> (3 + ss_hor));
+    let sy = by * v_mul + (mvy >> (3 + ss_ver));
+    // Destination position (block origin), in samples.
+    let dpx = bx * h_mul;
+    let dpy = by * v_mul;
+
+    let w = (bw4 * h_mul) as usize;
+    let h = (bh4 * v_mul) as usize;
+
+    // Gather the source region (plus one extra row/col of subpel context) into a
+    // contiguous scratch buffer, with edge clamping identical to mc.emu_edge.
+    // This also lets src and dst share the same plane buffer safely.
+    let src_w = w + (mx_lo != 0) as usize; // extra column for the +stride tap
+    let src_h = h + (my_lo != 0) as usize; // extra row for the +stride tap
+    let src_stride = src_w;
+    let mut srcbuf = vec![0u8; src_stride * src_h];
+    for ry in 0..src_h {
+        let cy = (sy + ry as i32).clamp(top, bottom - 1) as usize;
+        for rx in 0..src_w {
+            let cx = (sx + rx as i32).clamp(left, right - 1) as usize;
+            srcbuf[ry * src_stride + rx] = plane[cy * stride + cx];
+        }
+    }
+
+    let dst_off = (dpy as usize) * stride + dpx as usize;
+
+    // put_bilin_c (mc_tmpl.c), 8bpc: intermediate_bits = 4.
+    const IB: i32 = 4;
+    if mx != 0 {
+        if my != 0 {
+            // 2-pass: horizontal into mid (16-bit), then vertical.
+            let mut mid = vec![0i32; src_w * (h + 1)];
+            for ry in 0..(h + 1) {
+                for x in 0..w {
+                    let s = ry * src_stride + x;
+                    let v = 16 * srcbuf[s] as i32 + mx * (srcbuf[s + 1] as i32 - srcbuf[s] as i32);
+                    mid[ry * w + x] = (v + ((1 << (4 - IB)) >> 1)) >> (4 - IB);
+                }
+            }
+            for ry in 0..h {
+                for x in 0..w {
+                    let m0 = mid[ry * w + x];
+                    let m1 = mid[(ry + 1) * w + x];
+                    let v = 16 * m0 + my * (m1 - m0);
+                    let px = (v + ((1 << (4 + IB)) >> 1)) >> (4 + IB);
+                    plane[dst_off + ry * stride + x] = iclip(px, 0, 255) as u8;
+                }
+            }
+        } else {
+            let rnd = (1 << IB) >> 1;
+            for ry in 0..h {
+                for x in 0..w {
+                    let s = ry * src_stride + x;
+                    let v = 16 * srcbuf[s] as i32 + mx * (srcbuf[s + 1] as i32 - srcbuf[s] as i32);
+                    let px = (v + ((1 << (4 - IB)) >> 1)) >> (4 - IB);
+                    plane[dst_off + ry * stride + x] = iclip((px + rnd) >> IB, 0, 255) as u8;
+                }
+            }
+        }
+    } else if my != 0 {
+        for ry in 0..h {
+            for x in 0..w {
+                let s0 = ry * src_stride + x;
+                let s1 = (ry + 1) * src_stride + x;
+                let v = 16 * srcbuf[s0] as i32 + my * (srcbuf[s1] as i32 - srcbuf[s0] as i32);
+                let px = (v + ((1 << 4) >> 1)) >> 4;
+                plane[dst_off + ry * stride + x] = iclip(px, 0, 255) as u8;
+            }
+        }
+    } else {
+        // integer copy
+        for ry in 0..h {
+            for x in 0..w {
+                plane[dst_off + ry * stride + x] = srcbuf[ry * src_stride + x];
+            }
+        }
+    }
+}
+
 pub fn mc_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
