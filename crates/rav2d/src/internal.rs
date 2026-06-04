@@ -334,6 +334,11 @@ pub struct DecoderContext {
     /// Off by default while reconstruction and the entropy-path bugs are being
     /// worked through; the orchestration runs end-to-end when enabled.
     pub run_decode: bool,
+
+    /// The most recently reconstructed picture, handed off to the decoder's
+    /// output queue by `gen_picture`. (Minimal output path; visibility/POC
+    /// reordering lands with full output queueing.)
+    pub frame_out: Option<crate::picture::Picture>,
 }
 
 #[derive(Default)]

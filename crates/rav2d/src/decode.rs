@@ -2395,7 +2395,12 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     // Inter-frame CDF reference selection lands with M3.
     let in_cdf = None;
 
-    decode_frame(&mut fc, n_tc, 1, in_cdf, qcat)
+    decode_frame(&mut fc, n_tc, 1, in_cdf, qcat)?;
+
+    // Hand the reconstructed picture to the decoder's output path. (Visibility
+    // filtering / POC reordering is wired with full output queueing later.)
+    c.frame_out = Some(std::mem::take(&mut fc.cur_pic));
+    Ok(())
 }
 
 fn get_snglref_ctx(

@@ -99,9 +99,12 @@ pub fn dav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
     unsafe {
         let mut settings: sys::Dav2dSettings = std::mem::zeroed();
         sys::dav2d_default_settings(&mut settings);
-        // Deterministic single-threaded reference; emit invisible frames too so
-        // the frame sequence matches rav2d's gated decode path.
+        // Deterministic single-threaded reference. Disable in-loop filters and
+        // film grain so the reference is PURE reconstruction — rav2d has no
+        // post-filters yet, so comparing pre-filter pixels isolates recon.
         settings.n_threads = 1;
+        settings.apply_grain = 0;
+        settings.inloop_filters = 0; // DAV2D_INLOOPFILTER_NONE
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
         let r = sys::dav2d_open(&mut ctx, &settings);
@@ -169,6 +172,7 @@ pub fn rav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
     let mut s = Settings::default();
     s.n_threads = 1;
     s.apply_grain = false;
+    s.run_decode = true;
     let mut dec = Decoder::open(&s).expect("open");
 
     let mut frames = Vec::new();
@@ -200,15 +204,41 @@ pub fn rav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
 }
 
 fn rav2d_picture_planes(pic: &rav2d::Picture) -> FramePlanes {
-    // Mirror the dav2d extraction once rav2d exposes plane data; placeholder for
-    // now so the harness compiles ahead of reconstruction.
-    let _ = pic;
+    let w = pic.p.w;
+    let h = pic.p.h;
+    let bpc = pic.p.bpc;
+    let layout = pic.p.layout as i32;
+    let bytes_per_sample = if bpc > 8 { 2usize } else { 1usize };
+    let (ssh, ssv) = ss(layout);
+
+    let mut planes: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for pl in 0..3 {
+        if pl > 0 && layout == 0 {
+            break;
+        }
+        let pw = if pl == 0 { w } else { (w + ssh) >> ssh };
+        let ph = if pl == 0 { h } else { (h + ssv) >> ssv };
+        let stride = pic.stride[if pl == 0 { 0 } else { 1 }];
+        let base = match pic.data[pl] {
+            Some(p) => p.as_ptr() as *const u8,
+            None => continue,
+        };
+        let row_bytes = pw as usize * bytes_per_sample;
+        let mut buf = Vec::with_capacity(row_bytes * ph as usize);
+        for y in 0..ph as isize {
+            let row = unsafe { base.offset(y * stride) };
+            let slice = unsafe { std::slice::from_raw_parts(row, row_bytes) };
+            buf.extend_from_slice(slice);
+        }
+        planes[pl] = buf;
+    }
+
     FramePlanes {
-        w: 0,
-        h: 0,
-        bpc: 0,
-        layout: 0,
-        planes: [Vec::new(), Vec::new(), Vec::new()],
+        w,
+        h,
+        bpc,
+        layout,
+        planes,
     }
 }
 
@@ -257,10 +287,49 @@ fn dav2d_reference_decodes_keyframe_clip() {
     assert!(!f0.planes[0].is_empty(), "empty luma plane");
 }
 
-/// Full bit-exact comparison rav2d vs dav2d. Enabled once intra reconstruction
-/// produces pixels (M1) and output queueing emits frames (M2-out).
+/// M1 gate: frame-0 LUMA must match the dav2d reference (in-loop filters off,
+/// so pure reconstruction). Chroma + later frames + filters are follow-ups.
+/// ACTIVE DEBUG TARGET: intra-luma recon runs but is not yet bit-exact.
 #[test]
-#[ignore = "enabled at M1: requires rav2d reconstruction + output queueing"]
+#[ignore = "M1 debug target: intra-luma recon not yet bit-exact"]
+fn bit_exact_keyframe_luma() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode(&path);
+    let got = rav2d_decode(&path);
+    assert!(!got.is_empty(), "rav2d produced no frames");
+    assert!(!reference.is_empty(), "dav2d produced no frames");
+    assert_eq!(
+        (reference[0].w, reference[0].h),
+        (got[0].w, got[0].h),
+        "frame 0 dims differ"
+    );
+
+    let r = &reference[0].planes[0];
+    let g = &got[0].planes[0];
+    assert_eq!(r.len(), g.len(), "frame 0 luma size differs");
+    let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
+    if diff != 0 {
+        let first = r.iter().zip(g.iter()).position(|(a, b)| a != b).unwrap();
+        let stride = reference[0].w as usize;
+        panic!(
+            "frame 0 luma differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
+            r.len(),
+            first % stride,
+            first / stride,
+            r[first],
+            g[first]
+        );
+    }
+}
+
+/// Full bit-exact comparison rav2d vs dav2d (all planes, all frames, filters on).
+/// Enabled once chroma recon + post-filters + inter support land.
+#[test]
+#[ignore = "enabled later: needs chroma recon + post-filters + inter + filters-on"]
 fn bit_exact_keyframe_clip() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
     let reference = dav2d_decode(&path);

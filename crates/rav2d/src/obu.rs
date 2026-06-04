@@ -3421,6 +3421,7 @@ mod tests {
             output_invisible_frames: false,
             n_passes: 1,
             run_decode: false,
+            frame_out: None,
         }
     }
 

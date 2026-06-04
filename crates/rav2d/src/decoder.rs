@@ -66,6 +66,10 @@ pub struct Settings {
     pub inloop_filters: InloopFilterType,
     /// Which frame types to decode.
     pub decode_frame_type: DecodeFrameType,
+    /// Bring-up gate: actually run reconstruction (intra only so far) and emit
+    /// pictures. Default off while recon/filters are incomplete; enabled by the
+    /// conformance harness. Will become unconditional once decode is complete.
+    pub run_decode: bool,
 }
 
 impl Default for Settings {
@@ -81,6 +85,7 @@ impl Default for Settings {
             output_invisible_frames: false,
             inloop_filters: InloopFilterType::All,
             decode_frame_type: DecodeFrameType::All,
+            run_decode: false,
         }
     }
 }
@@ -242,7 +247,8 @@ impl Decoder {
             strict_std_compliance: s.strict_std_compliance,
             output_invisible_frames: s.output_invisible_frames,
             n_passes: 1,
-            run_decode: false,
+            run_decode: s.run_decode,
+            frame_out: None,
         };
 
         Ok(Self {
@@ -338,6 +344,14 @@ impl Decoder {
                     self.input.consume(consumed);
                     if self.input.is_empty() {
                         self.input.unref();
+                    }
+                    // A frame was reconstructed during parsing: enqueue it.
+                    if let Some(pic) = self.ctx.frame_out.take() {
+                        self.dpb[self.dpb_in].pic.p = pic;
+                        self.dpb_in += 1;
+                        if self.dpb_in == self.dpb_sz {
+                            self.dpb_in = 0;
+                        }
                     }
                 }
                 Err(_e) => {
