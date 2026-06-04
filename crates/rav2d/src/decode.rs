@@ -3105,6 +3105,20 @@ pub fn decode_frame(
 
     decode_frame_main(fc, n_passes)?;
 
+    // Finalize the output CDF (dav2d decode.c:5256-5272). For the single-thread
+    // path the update tile's adapted CDF becomes `out_cdf` with its symbol counts
+    // reset. avg_cdf_type (tile CDF shift/accumulate) is not exercised by the
+    // single-tile bring-up clips and is deferred. Only produced when CDF update
+    // is enabled (otherwise refs keep `in_cdf`, handled by the ref-list update).
+    if frame_hdr.tip.frame_mode != 2 && frame_hdr.disable_cdf_update == 0 {
+        let upd = frame_hdr.tiling.update as usize;
+        if let Some(ts) = fc.ts.get(upd) {
+            let mut out = ts.cdf.clone();
+            out.reset_count(frame_hdr.is_key_or_intra());
+            fc.out_cdf = Some(std::sync::Arc::new(out));
+        }
+    }
+
     Ok(())
 }
 
@@ -3170,19 +3184,257 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
 
     let qcat = crate::cdf::cdf_thread_init_static_qcat(frame_hdr.quant.yac as u32) as usize;
 
-    fc.seq_hdr = seq_hdr;
-    fc.frame_hdr = frame_hdr;
+    let is_inter_or_switch = frame_hdr.is_inter_or_switch();
+    let allow_intrabc = frame_hdr.allow_intrabc != 0;
 
-    // Keyframes / intra frames with no primary reference use the static CDF.
-    // Inter-frame CDF reference selection lands with M3.
-    let in_cdf = None;
+    // ---- Reference-frame setup (decode.c:5406-5443) ------------------------
+    // Validate each signalled reference, share its picture into `fc.refp[i]`,
+    // and compute the per-ref scaling / global-warp-allowed flags. Single-ref
+    // bring-up: scaled references (svc != 0) are validated but the scaled-MC
+    // path is a follow-up; an unequal-dimension ref triggers the deferral note.
+    let mut ref_coded_width = [0i32; 7];
+    if is_inter_or_switch {
+        for i in 0..7 {
+            let refidx = frame_hdr.refidx[i] as usize;
+            let rp = &c.refs[refidx].p;
+            let rpic = rp.pic.as_ref();
+            let valid = rpic.is_some_and(|p| {
+                let pw = p.p.w;
+                let ph = p.p.h;
+                frame_hdr.width * 2 >= pw
+                    && frame_hdr.height * 2 >= ph
+                    && frame_hdr.width <= pw * 16
+                    && frame_hdr.height <= ph * 16
+                    && seq_hdr.layout == p.p.layout
+                    && bpc == p.p.bpc
+            });
+            if !valid {
+                return Err(());
+            }
+            let p = rpic.unwrap();
+            fc.refp[i].pic = Some(p.clone());
+            fc.refp[i].frame_hdr = rp.frame_hdr.clone();
+            ref_coded_width[i] = p.frame_hdr.as_ref().map(|h| h.width).unwrap_or(p.p.w);
+            if frame_hdr.width != p.p.w || frame_hdr.height != p.p.h {
+                let scale_fac = |ref_sz: i32, this_sz: i32| -> i32 {
+                    (((ref_sz << 14) + (this_sz >> 1)) / this_sz) as i32
+                };
+                fc.svc[i][0].scale = scale_fac(p.p.w, frame_hdr.width);
+                fc.svc[i][1].scale = scale_fac(p.p.h, frame_hdr.height);
+                fc.svc[i][0].step = (fc.svc[i][0].scale + 8) >> 4;
+                fc.svc[i][1].step = (fc.svc[i][1].scale + 8) >> 4;
+            } else {
+                fc.svc[i][0].scale = 0;
+                fc.svc[i][1].scale = 0;
+            }
+            let mut gm = frame_hdr.gmv.m[i];
+            fc.gmv_warp_allowed[i] = (gm.wm_type
+                > crate::headers::WarpedMotionType::Translation
+                && frame_hdr.force_integer_mv == 0
+                && crate::warpmv::get_shear_params(&mut gm) == 0
+                && fc.svc[i][0].scale == 0) as u8;
+        }
+    }
 
-    decode_frame(&mut fc, n_tc, 1, in_cdf, qcat)?;
+    // ---- Entropy CDF selection (decode.c:5446-5471) ------------------------
+    // primary_ref_frame == NONE -> static qcat init (keyframe path). Otherwise
+    // clone the saved CDF of the primary ref. The avg primary/secondary CDF
+    // path (use_pri_sec_cdf) is deferred (not exercised by the bring-up clips).
+    let p_ref_idx = frame_hdr.primary_ref_frame;
+    let in_cdf: Option<crate::cdf::CdfContext> = if p_ref_idx == crate::headers::PRIMARY_REF_NONE {
+        fc.use_pri_sec_cdf = 0;
+        None
+    } else {
+        fc.use_pri_sec_cdf = 0;
+        let pri_ref = frame_hdr.refidx[p_ref_idx as usize] as usize;
+        c.refs[pri_ref].cdf.as_ref().map(|a| (**a).clone())
+    };
+
+    fc.seq_hdr = seq_hdr.clone();
+    fc.frame_hdr = frame_hdr.clone();
+    fc.in_cdf = in_cdf;
+
+    // ---- refpoc / refdist / refdir / furthest_future_refidx + refmvs (decode.c:5538-5596) ----
+    let use_rfm = is_inter_or_switch || allow_intrabc;
+    if use_rfm {
+        if is_inter_or_switch {
+            let poc = frame_hdr.frame_offset as i32;
+            let nbits = seq_hdr.order_hint_n_bits as i32;
+            let mut furthest_future_refidx: i32 = -2;
+            for i in 0..7 {
+                let rpoc = fc.refp[i]
+                    .frame_hdr
+                    .as_ref()
+                    .map(|h| h.frame_offset as i32)
+                    .unwrap_or(0);
+                fc.refpoc[i] = rpoc as u8;
+                let delta = crate::env::get_poc_diff(nbits, rpoc, poc);
+                fc.refdist[i] = delta as i8;
+                fc.absrefdist[i] = delta.unsigned_abs() as u8;
+                fc.refdir[i] = (delta > 0) as u8;
+                if delta > 0
+                    && (furthest_future_refidx < 0
+                        || (fc.refdist[furthest_future_refidx as usize] as i32) < delta)
+                {
+                    furthest_future_refidx = i as i32;
+                }
+            }
+            fc.furthest_future_refidx = furthest_future_refidx as i8;
+        } else {
+            fc.refpoc = [0; 7];
+        }
+        // Reference temporal MVs (decode.c:5571-5589).
+        if frame_hdr.use_ref_frame_mvs != 0 {
+            let bw = ((frame_hdr.width + 7) >> 3) << 1;
+            let bh = ((frame_hdr.height + 7) >> 3) << 1;
+            for i in 0..7 {
+                let refidx = frame_hdr.refidx[i] as usize;
+                let ref_w = ((ref_coded_width[i] + 7) >> 3) << 1;
+                let ref_h = ((fc.refp[i].pic.as_ref().map(|p| p.p.h).unwrap_or(0) + 7) >> 3) << 1;
+                if c.refs[refidx].refmvs.is_some() && ref_w == bw && ref_h == bh {
+                    fc.ref_mvs[i] = c.refs[refidx].refmvs.clone();
+                } else {
+                    fc.ref_mvs[i] = None;
+                }
+                fc.refrefpoc[i] = c.refs[refidx].refpoc;
+                fc.refcnt[i] = fc.refp[i]
+                    .frame_hdr
+                    .as_ref()
+                    .map(|h| h.n_ref_frames)
+                    .unwrap_or(0);
+            }
+        }
+    }
+
+    // ---- prev_segmap from the primary ref (decode.c:5598-5618) -------------
+    if frame_hdr.segmentation.enabled != 0
+        && (frame_hdr.segmentation.temporal != 0 || frame_hdr.segmentation.update_map == 0)
+    {
+        let pri = frame_hdr.primary_ref_frame as usize;
+        let ref_w = ((ref_coded_width[pri] + 7) >> 3) << 1;
+        let ref_h = ((fc.refp[pri].pic.as_ref().map(|p| p.p.h).unwrap_or(0) + 7) >> 3) << 1;
+        let bw = ((frame_hdr.width + 7) >> 3) << 1;
+        let bh = ((frame_hdr.height + 7) >> 3) << 1;
+        if ref_w == bw && ref_h == bh {
+            fc.prev_segmap = c.refs[frame_hdr.refidx[pri] as usize].segmap.clone();
+        }
+    }
+
+    // ---- skip_mode_refs (decode.c:5687-5691) ------------------------------
+    let skip_mode_r1 = (frame_hdr.skip_mode_enabled != 0
+        && frame_hdr.n_ref_frames > 1
+        && (fc.absrefdist[0] as i32 - fc.absrefdist[1] as i32).abs() <= 1)
+        as i8;
+    fc.skip_mode_refs = RefPair { r: [0, skip_mode_r1] };
+
+    // ---- decode -----------------------------------------------------------
+    let in_cdf_ref = fc.in_cdf.take();
+    decode_frame(&mut fc, n_tc, 1, in_cdf_ref.as_ref(), qcat)?;
+
+    // ---- Reference-list + CDF update per refresh_frame_flags (decode.c:5694) ----
+    // dav2d performs this UNCONDITIONALLY before launching decode and rolls back
+    // on failure. Single-thread decode here is synchronous and already succeeded,
+    // so we publish after success (equivalent for n_fc == 1). The decoded picture
+    // is shared into every refreshed slot so later frames can reference it.
+    let cur_pic = std::mem::take(&mut fc.cur_pic);
+    let shared = std::sync::Arc::new(cur_pic);
+    let out_cdf_for_refs: Option<std::sync::Arc<crate::cdf::CdfContext>> =
+        if frame_hdr.disable_cdf_update == 0 {
+            fc.out_cdf.clone()
+        } else {
+            in_cdf_ref.map(std::sync::Arc::new)
+        };
+    let cur_segmap_arc: Option<Vec<u8>> = if !fc.cur_segmap.is_empty() {
+        Some(fc.cur_segmap.clone())
+    } else {
+        None
+    };
+    let cur_ccsomap_arc: Option<Vec<u8>> = if !fc.cur_ccsomap.is_empty() {
+        Some(fc.cur_ccsomap.clone())
+    } else {
+        None
+    };
+    let refresh = frame_hdr.refresh_frame_flags;
+    for i in 0..8 {
+        if refresh & (1 << i) != 0 {
+            c.refs[i].p.pic = Some(shared.clone());
+            c.refs[i].p.frame_hdr = Some(frame_hdr.clone());
+            c.refs[i].p.showable = frame_hdr.show_immediate == 0;
+            c.refs[i].cdf = out_cdf_for_refs.clone();
+            c.refs[i].segmap = if frame_hdr.segmentation.update_map != 0 {
+                cur_segmap_arc.clone()
+            } else {
+                fc.prev_segmap.clone()
+            };
+            if is_inter_or_switch {
+                c.refs[i].refmvs = if fc.mvs.is_empty() {
+                    None
+                } else {
+                    Some(fc.mvs.clone())
+                };
+            }
+            c.refs[i].ccsomap = cur_ccsomap_arc.clone();
+            c.refs[i].refpoc = fc.refpoc;
+        }
+    }
 
     // Hand the reconstructed picture to the decoder's output path. (Visibility
     // filtering / POC reordering is wired with full output queueing later.)
-    c.frame_out = Some(std::mem::take(&mut fc.cur_pic));
+    // The output buffer must be independently owned; clone the shared pixels.
+    c.frame_out = Some(clone_picture(&shared));
     Ok(())
+}
+
+/// Clone a `Picture`'s pixel planes into a fresh independently-owned allocation
+/// (the output path takes ownership while references keep the shared `Arc`).
+fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
+    let allocator: std::sync::Arc<dyn crate::picture::PicAllocator> =
+        std::sync::Arc::new(crate::picture::DefaultPicAllocator::new());
+    let dst = match crate::picture::Picture::alloc(
+        src.p.w,
+        src.p.h,
+        src.p.layout,
+        src.p.bpc,
+        src.seq_hdr.clone(),
+        src.frame_hdr.clone(),
+        allocator,
+    ) {
+        Some(p) => p,
+        None => return crate::picture::Picture::new(),
+    };
+    let n_planes = if src.p.layout == crate::headers::PixelLayout::I400 {
+        1
+    } else {
+        3
+    };
+    for pl in 0..n_planes {
+        let (sp, dp) = (src.data[pl], dst.data[pl]);
+        if let (Some(sp), Some(dp)) = (sp, dp) {
+            let stride_idx = if pl == 0 { 0 } else { 1 };
+            let s_stride = src.stride[stride_idx];
+            let d_stride = dst.stride[stride_idx];
+            let ss_ver = (src.p.layout == crate::headers::PixelLayout::I420) as i32;
+            let ss_hor =
+                matches!(src.p.layout, crate::headers::PixelLayout::I420
+                    | crate::headers::PixelLayout::I422) as i32;
+            let bytes = (src.p.bpc + 7) / 8;
+            let (pw, ph) = if pl == 0 {
+                (src.p.w, src.p.h)
+            } else {
+                ((src.p.w + ss_hor) >> ss_hor, (src.p.h + ss_ver) >> ss_ver)
+            };
+            let row_bytes = (pw * bytes) as usize;
+            for y in 0..ph as usize {
+                // SAFETY: both allocations span stride*height bytes per plane.
+                unsafe {
+                    let srow = sp.as_ptr().offset(y as isize * s_stride);
+                    let drow = dp.as_ptr().offset(y as isize * d_stride);
+                    std::ptr::copy_nonoverlapping(srow, drow, row_bytes);
+                }
+            }
+        }
+    }
+    dst
 }
 
 fn get_snglref_ctx(

@@ -249,6 +249,13 @@ pub struct FrameContext {
     /// Output picture buffer that reconstruction writes into (the pixel planes
     /// that `cur` only describes as metadata).
     pub cur_pic: crate::picture::Picture,
+
+    /// Entropy CDF this frame decodes with (dav2d `f->in_cdf`). `None` selects
+    /// the static qcat init (keyframe / primary_ref_frame == NONE).
+    pub in_cdf: Option<CdfContext>,
+    /// Finalized entropy CDF after decode (dav2d `f->out_cdf`); merged from the
+    /// update tile, count reset. Stored into refreshed `c.refs[i].cdf`.
+    pub out_cdf: Option<Arc<CdfContext>>,
 }
 
 #[derive(Clone, Default)]
@@ -257,6 +264,10 @@ pub struct ThreadPicture {
     pub showable: bool,
     pub frame_hdr: Option<Arc<FrameHeader>>,
     pub progress: [Arc<AtomicU32>; 2],
+    /// Shared decoded picture pixels. Set when this slot references a fully
+    /// reconstructed frame (inter reference setup / ref-list update). `None` for
+    /// header-only ref tracking. Mirrors dav2d's refcounted `Dav2dThreadPicture`.
+    pub pic: Option<Arc<crate::picture::Picture>>,
 }
 
 pub struct TileGroup {
@@ -366,6 +377,10 @@ pub struct RefState {
     pub refmvs: Option<Vec<refmvs::TemporalBlock>>,
     pub ccsomap: Option<Vec<u8>>,
     pub refpoc: [u8; 7],
+    /// Entropy CDF saved by the frame that wrote this slot (dav2d `c->cdf[i]`).
+    /// `None` until a frame refreshes this slot. Cloned into the next frame's
+    /// `in_cdf` when it selects this slot as `primary_ref_frame`.
+    pub cdf: Option<Arc<CdfContext>>,
 }
 
 #[cfg(test)]
