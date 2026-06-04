@@ -19,7 +19,7 @@ use crate::quantizer::dq_lookup;
 use crate::refmvs;
 use crate::tables::{
     BLOCK_DIMENSIONS, DEFAULT_WM_PARAMS, NS_WIENER_COEF_RANGE_UV, NS_WIENER_COEF_RANGE_Y,
-    SUBSET_MASKS_UV, SUBSET_MASKS_Y,
+    SUBSET_MASKS_UV, SUBSET_MASKS_Y, TXFM_DIMENSIONS,
 };
 use crate::warpmv::{find_affine_int, get_shear_params, set_affine_mv2d};
 
@@ -1845,6 +1845,31 @@ pub struct ReconFrameCtx<'a> {
     pub seq_ist: [bool; 2],
     pub seq_cctx: bool,
     pub layout: crate::headers::PixelLayout,
+    // Extra frame/seq state needed by the reconstruction (coef + intra) leaf.
+    pub bitdepth: u32,
+    pub seg_lossless: [u8; crate::headers::MAX_SEGMENTS],
+    pub reduced_txtp_set: i32,
+    pub tcq: bool,
+    pub seq_intra_edge_filter: bool,
+    pub seq_ibp: bool,
+    pub seq_inter_ddt: bool,
+    /// Per-mode IBP weights (`dav2d_ibp_weights[7][16][16]`), used by z1/z3.
+    pub ibp_weights: [[[u8; 16]; 16]; 7],
+}
+
+/// Per-superblock reconstruction scratch (mirrors the relevant parts of
+/// `Dav2dTaskContext` used by the luma recon leaf). `is_coded[0]` tracks the
+/// 64x64 grid of decoded luma tx blocks for top-right / bottom-left availability.
+pub struct ReconScratch {
+    pub is_coded: [[u64; 64]; 2],
+}
+
+impl Default for ReconScratch {
+    fn default() -> Self {
+        Self {
+            is_coded: [[0u64; 64]; 2],
+        }
+    }
 }
 
 /// Mutable reconstruction borrows bundled so only one new param threads through
@@ -1856,6 +1881,12 @@ pub struct ReconCtx<'a, 'f> {
     pub cdf_coef: &'a mut crate::cdf::CdfCoefContext,
     pub cf: &'a mut [i32],
     pub frame: &'a ReconFrameCtx<'f>,
+    /// Per-superblock recon scratch (is_coded grid). Reset by the caller at each
+    /// superblock boundary, mirroring the C `memset(t->is_coded, ...)`.
+    pub scratch: &'a mut ReconScratch,
+    /// Temporary edge buffer for `prepare_intra_edges` (`t->scratch.edge`,
+    /// 257 entries wide; we use a generous fixed slab indexed from the middle).
+    pub edge: &'a mut [u8],
 }
 
 /// Decode one superblock row of a tile (entropy/parse pass).
@@ -1897,10 +1928,21 @@ pub fn decode_tile_sbrow_entropy(
     let row_start = ts.tiling.row_start;
     let row_end = ts.tiling.row_end;
 
+    // Per-superblock reconstruction scratch. `is_coded` is reset at each SB
+    // boundary (mirrors C `memset(t->is_coded, 0, ...)`); `edge` is the working
+    // buffer for prepare_intra_edges (origin in the middle of the slab).
+    let mut recon_scratch = ReconScratch::default();
+    let mut recon_edge = vec![0u8; 2048];
+
     let mut bx = col_start;
     while bx < col_end {
         let a_idx = (tile_row * sb256w + (bx >> 6)) as usize;
         let lf_idx = ((bx >> 6) + sb256y * sb256w) as usize;
+
+        // Reset is_coded for this superblock (luma + chroma rows).
+        for row in recon_scratch.is_coded.iter_mut() {
+            row.fill(0);
+        }
 
         // Reset CDEF indices for this superblock's coverage in the lf mask.
         match root_bs {
@@ -2004,6 +2046,8 @@ pub fn decode_tile_sbrow_entropy(
             cdf_coef: &mut ts.cdf.coef,
             cf: &mut *cf,
             frame: recon_frame,
+            scratch: &mut recon_scratch,
+            edge: &mut recon_edge,
         };
 
         decode_sb(
@@ -2014,7 +2058,7 @@ pub fn decode_tile_sbrow_entropy(
             &mut cby,
             &mut intra_region,
             &mut sdp_cfl_disallowed,
-            Pass::Entropy as u8,
+            crate::internal::PASS_ALL,
             &mut a_arr[a_idx],
             l,
             msac,
@@ -2115,6 +2159,8 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         None => &mut [],
     };
 
+    // bitdepth in bits from bitdepth_max (255 -> 8, 1023 -> 10, 4095 -> 12).
+    let bitdepth_v: u32 = (crate::intops::ulog2((bitdepth_max_v + 1) as u32)) as u32;
     let recon_frame = ReconFrameCtx {
         dq: &*dq,
         qm: &*qm,
@@ -2129,6 +2175,14 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         seq_ist: seq_hdr.ist,
         seq_cctx: seq_hdr.cctx,
         layout: seq_hdr.layout,
+        bitdepth: bitdepth_v,
+        seg_lossless: frame_hdr.segmentation.lossless,
+        reduced_txtp_set: frame_hdr.reduced_txtp_set as i32,
+        tcq: frame_hdr.tcq != 0,
+        seq_intra_edge_filter: seq_hdr.intra_edge_filter,
+        seq_ibp: seq_hdr.ibp,
+        seq_inter_ddt: seq_hdr.inter_ddt,
+        ibp_weights: crate::ibp::init_ibp_weights(),
     };
     let mut cf = vec![0i32; 64 * 64];
 
@@ -2441,7 +2495,7 @@ fn decode_b(
     cby: i32,
     intra_region: i32,
     _sdp_cfl_disallowed: i32,
-    _pass: u8,
+    pass: u8,
     a: &mut BlockContext,
     l: &mut BlockContext,
     msac: &mut MsacContext,
@@ -4323,7 +4377,891 @@ fn decode_b(
         }
     }
 
+    // ---- Reconstruction leaf (M1a: intra luma 8bpc only) -------------------
+    // Mirrors the luma path of `dav2d_recon_b` (recon_tmpl.c:3292-3478) plus
+    // `recon_b_luma_tx` (recon_tmpl.c:2443-2675). Chroma (U/V), inter, IntraBC
+    // and palette are NOT handled here yet.
+    if pass & (Pass::Recon as u8) != 0 && has_luma && b.is_intra != 0 && b.intrabc == 0 {
+        recon_b_intra_luma(recon, msac, cdf_m, a, l, &b, bx, by, bx4, by4, fi)?;
+    }
+
     Ok(b)
+}
+
+/// Reconstruct the luma plane of an intra (non-IntraBC) block at the decode_b
+/// leaf, for the 8bpc path.
+///
+/// Port of the luma `switch (b->tx_part)` walk in `dav2d_recon_b`
+/// (recon_tmpl.c:3292-3478) plus `recon_b_luma_tx` (recon_tmpl.c:2443-2675).
+/// Caller guarantees `b.is_intra != 0 && b.intrabc == 0` and luma is present.
+///
+/// Simplifications vs C (M1a, documented for the bit-exact follow-up):
+///  - palette blocks (`pal_sz != 0`) skip intra prediction (matches C gate) but
+///    are otherwise still walked; palette pixel fill is not implemented.
+///  - `n_tr`/`n_bl` top-right / bottom-left availability use the per-SB
+///    `is_coded` grid as in C; the `prefilter_toplevel_sb_edge` (top SB row
+///    edge backup) is passed as `None` (no cross-SB-row prefilter buffer yet).
+#[allow(clippy::too_many_arguments)]
+fn recon_b_intra_luma(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    bx: i32,
+    by: i32,
+    _bx4: usize,
+    _by4: usize,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    let bs = b.bs as usize;
+    let seg_id = b.seg_id as usize;
+    let lossless = recon.frame.seg_lossless[seg_id] != 0;
+
+    // tp[b->tx_part] (recon_tmpl.c:3293) and the lossless override below.
+    let tp = &crate::tables::TX_PART_TBL[bs];
+
+    // pb.col_start / pb.row_start are this block's origin (used by is_hv5).
+    let pb_col_start = bx;
+    let pb_row_start = by;
+
+    if lossless {
+        // recon_tmpl.c:3296-3308: single tx size, raster walk over the block.
+        let tx = if b.tx_size_ll != 0 {
+            crate::tables::MAX_TXFM_SIZE_FOR_BS[bs][3] as usize
+        } else {
+            0 // TX_4X4
+        };
+        let t_dim = &TXFM_DIMENSIONS[tx];
+        let tw4 = t_dim.w as i32;
+        let th4 = t_dim.h as i32;
+        let h4 = imin(BLOCK_DIMENSIONS[bs][1] as i32, fi.bh - by);
+        let w4 = imin(BLOCK_DIMENSIONS[bs][0] as i32, fi.bw - bx);
+        let mut y = 0;
+        while y < h4 {
+            let mut x = 0;
+            while x < w4 {
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    bx + x,
+                    by + y,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+                x += tw4;
+            }
+            y += th4;
+        }
+        return Ok(());
+    }
+
+    let tx_part = b.tx_part as usize;
+    let tx = tp[tx_part] as usize;
+
+    match unsafe { TxPartition::from_raw(b.tx_part) } {
+        TxPartition::None => {
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+        }
+        TxPartition::Split => {
+            let t_dim = &TXFM_DIMENSIONS[tx];
+            let tw4 = t_dim.w as i32;
+            let th4 = t_dim.h as i32;
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            let have_v_split = bx + tw4 < fi.bw;
+            if have_v_split {
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    bx + tw4,
+                    by,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+            }
+            if by + th4 >= fi.bh {
+                return Ok(());
+            }
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by + th4,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            if have_v_split {
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    bx + tw4,
+                    by + th4,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+            }
+        }
+        TxPartition::H => {
+            let th4 = TXFM_DIMENSIONS[tx].h as i32;
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            if by + th4 >= fi.bh {
+                return Ok(());
+            }
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by + th4,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+        }
+        TxPartition::V => {
+            let tw4 = TXFM_DIMENSIONS[tx].w as i32;
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            if bx + tw4 >= fi.bw {
+                return Ok(());
+            }
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx + tw4,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+        }
+        TxPartition::H4 => {
+            // recon_tmpl.c:3366-3387. Up to 4 stacked tiles; a tile is only
+            // started if the previous one did not reach the frame's bottom edge.
+            let th4 = TXFM_DIMENSIONS[tx].h as i32;
+            for i in 0..4 {
+                let yy = by + i * th4;
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    bx,
+                    yy,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+                if yy + th4 >= fi.bh {
+                    break;
+                }
+            }
+        }
+        TxPartition::V4 => {
+            // recon_tmpl.c:3389-3410.
+            let tw4 = TXFM_DIMENSIONS[tx].w as i32;
+            for i in 0..4 {
+                let xx = bx + i * tw4;
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    xx,
+                    by,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+                if xx + tw4 >= fi.bw {
+                    break;
+                }
+            }
+        }
+        TxPartition::H5 => {
+            let tx_big = tp[TxPartition::H as usize] as usize;
+            let t_dim_small = &TXFM_DIMENSIONS[tx];
+            let tw4_small = t_dim_small.w as i32;
+            let th4_small = t_dim_small.h as i32;
+            let th4_big = TXFM_DIMENSIONS[tx_big].h as i32;
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            let have_v_split = bx + tw4_small < fi.bw;
+            if have_v_split {
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    bx + tw4_small,
+                    by,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+            }
+            if by + th4_small >= fi.bh {
+                return Ok(());
+            }
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx_big,
+                bx,
+                by + th4_small,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            if by + th4_small + th4_big >= fi.bh {
+                return Ok(());
+            }
+            let yb = by + th4_small + th4_big;
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                yb,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            if have_v_split {
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    bx + tw4_small,
+                    yb,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+            }
+        }
+        TxPartition::V5 => {
+            let tx_big = tp[TxPartition::V as usize] as usize;
+            let t_dim_small = &TXFM_DIMENSIONS[tx];
+            let tw4_small = t_dim_small.w as i32;
+            let th4_small = t_dim_small.h as i32;
+            let tw4_big = TXFM_DIMENSIONS[tx_big].w as i32;
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                bx,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            let have_h_split = by + th4_small < fi.bh;
+            if have_h_split {
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    bx,
+                    by + th4_small,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+            }
+            if bx + tw4_small >= fi.bw {
+                return Ok(());
+            }
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx_big,
+                bx + tw4_small,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            if bx + tw4_small + tw4_big >= fi.bw {
+                return Ok(());
+            }
+            let xb = bx + tw4_small + tw4_big;
+            recon_b_luma_tx(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                tx,
+                xb,
+                by,
+                pb_col_start,
+                pb_row_start,
+                lossless,
+                fi,
+            )?;
+            if have_h_split {
+                recon_b_luma_tx(
+                    recon,
+                    msac,
+                    cdf_m,
+                    a,
+                    l,
+                    b,
+                    tx,
+                    xb,
+                    by + th4_small,
+                    pb_col_start,
+                    pb_row_start,
+                    lossless,
+                    fi,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Reconstruct a single luma transform block (intra, non-IntraBC, 8bpc).
+///
+/// Port of `recon_b_luma_tx` (recon_tmpl.c:2443-2675), combined-pass branch:
+/// decode coefficients, run intra prediction into `dst_y`, then add the inverse
+/// transform residual. `bx`/`by` are the tx block's 4x4 grid position.
+#[allow(clippy::too_many_arguments)]
+fn recon_b_luma_tx(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    tx: usize,
+    bx: i32,
+    by: i32,
+    pb_col_start: i32,
+    pb_row_start: i32,
+    lossless: bool,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    use crate::levels::IntraPredMode;
+
+    let bx4 = (bx & 63) as usize;
+    let by4 = (by & 63) as usize;
+    let t_dim = &TXFM_DIMENSIONS[tx];
+    let tw = t_dim.w as usize * 4;
+    let th = t_dim.h as usize * 4;
+    let tw4 = t_dim.w as i32;
+    let th4 = t_dim.h as i32;
+
+    let intra = &unsafe { b.data.intra };
+    let orig_y_mode = intra.y_mode;
+    let mut angle = intra.y_angle as i32;
+
+    // wide_angle_remap (recon_tmpl.c:1107-1136). Only applies for intra,
+    // non-IntraBC; here that is always true.
+    let y_mode_remapped = {
+        // SAFETY: y_mode is a valid IntraPredMode discriminant (0..=12).
+        let m_in: IntraPredMode = unsafe { std::mem::transmute(orig_y_mode.min(12)) };
+        crate::recon::wide_angle_remap(t_dim, m_in, &mut angle, intra.mrl_index as i32) as u8
+    };
+    let y_mode = if orig_y_mode <= 12 {
+        y_mode_remapped
+    } else {
+        orig_y_mode
+    };
+
+    // --- decode coefficients (combined pass: always decode) ----------------
+    let mut txtp: u16 = 0;
+    let mut res_ctx: u8 = 0;
+    // Zero the tx coefficient region; decode_coefs may not fully initialise it.
+    let cf_n = tw * th;
+    recon.cf[..cf_n].fill(0);
+
+    let dq_seg = b.seg_id as usize;
+    let dq_tbl = recon.frame.dq[dq_seg][0]; // plane 0 (luma)
+    let qm_ref: Option<&[u8]> = recon.frame.qm[tx][0].as_deref();
+
+    let params = crate::recon::DecodeCoefParams {
+        tx,
+        bs: b.bs as usize,
+        plane: 0,
+        intra: true,
+        fsc: b.fsc != 0,
+        lossless,
+        sdp_active: false,
+        y_mode: y_mode as usize,
+        uv_mode: 0,
+        seg_id: dq_seg,
+        seq_fsc: recon.frame.seq_fsc,
+        seq_ist: recon.frame.seq_ist,
+        seq_cctx: recon.frame.seq_cctx,
+        chroma_dctonly: false,
+        reduced_txtp_set: recon.frame.reduced_txtp_set,
+        tcq_enabled: recon.frame.tcq,
+        layout: recon.frame.layout,
+        u_has_cf: 0,
+        cbx: 0,
+        cby: 0,
+        luma_fsc_map: &[],
+        dq_tbl,
+        bitdepth: recon.frame.bitdepth,
+        qm: qm_ref,
+        ss_hor: recon.frame.ss_hor != 0,
+        ss_ver: recon.frame.ss_ver != 0,
+    };
+
+    let mut eob = crate::recon::decode_coefs(
+        msac,
+        recon.cdf_coef,
+        cdf_m,
+        &a.lcoef[bx4..],
+        &l.lcoef[by4..],
+        &params,
+        recon.cf,
+        &mut txtp,
+        &mut res_ctx,
+    );
+    if eob == i32::MIN {
+        return Err(());
+    }
+    let stx = (txtp >> 8) as i32;
+    let mut txtp = (txtp & 0xff) as u32;
+
+    // dav2d_memset_likely_pow2 of the lcoef context (recon_tmpl.c:2497-2500).
+    let aw = imin(tw4, fi.bw - bx).max(0) as usize;
+    let lh = imin(th4, fi.bh - by).max(0) as usize;
+    if aw > 0 {
+        a.lcoef[bx4..bx4 + aw].fill(res_ctx);
+    }
+    if lh > 0 {
+        l.lcoef[by4..by4 + lh].fill(res_ctx);
+    }
+
+    // dst origin for this tx block.
+    let stride = recon.frame.y_stride_px;
+    let dst_off = 4 * (by as usize * stride + bx as usize);
+
+    // --- intra prediction (recon_tmpl.c:2513-2606) -------------------------
+    if intra.pal_sz == 0 {
+        let sbsz = fi.sb_step;
+        let mrl_idx = intra.mrl_index as i32;
+        let mrl_mul = intra.multi_mrl != 0 && tx != 0; // tx != TX_4X4
+        let is_hv5 = (by > pb_row_start || bx > pb_col_start)
+            && (b.tx_part == TxPartition::H5 as u8 || b.tx_part == TxPartition::V5 as u8);
+
+        // n_tr: top-right availability (recon_tmpl.c:2519-2540).
+        let mut n_tr = 0i32;
+        if by > fi.tile_row_start {
+            let mut w = imin(tw4, fi.tile_col_end - bx - tw4);
+            if is_hv5 {
+                n_tr = 0;
+            } else if (by & (sbsz - 1)) == 0 {
+                n_tr = w;
+            } else {
+                let end = imin((bx + sbsz) & !(sbsz - 1), fi.tile_col_end);
+                w = imin(w, end - bx - tw4);
+                if w <= 0 {
+                    n_tr = 0;
+                } else {
+                    let xpos = ((bx4 as i32 + tw4) & 63) as u32;
+                    let bits = recon.scratch.is_coded[0][by4 - 1] >> xpos;
+                    let inv = 0x10000u64 | !bits;
+                    n_tr = imin(inv.trailing_zeros() as i32, w);
+                }
+            }
+        }
+
+        // n_bl: bottom-left availability (recon_tmpl.c:2542-2562).
+        let mut n_bl = 0i32;
+        if bx > fi.tile_col_start {
+            let end = imin((by + sbsz) & !(sbsz - 1), fi.tile_row_end);
+            let h = imin(th4, end - by - th4);
+            // C distinguishes is_hv5 / bottom-edge as separate n_bl=0 cases
+            // (recon_tmpl.c:2548-2556); merged here as both set n_bl = 0.
+            if is_hv5 || h <= 0 {
+                n_bl = 0;
+            } else if (bx & (sbsz - 1)) == 0 {
+                n_bl = h;
+            } else {
+                let mask = 1u64 << (((bx4 as i32 - 1) & 63) as u32);
+                let mut y = 0;
+                while y < h {
+                    let row = (by4 as i32 + y + th4) as usize;
+                    if row >= 64 || (recon.scratch.is_coded[0][row] & mask) == 0 {
+                        break;
+                    }
+                    y += 1;
+                }
+                n_bl = y;
+            }
+        }
+
+        let mut apply_ibp = recon.frame.seq_ibp && tx != 0 && mrl_idx == 0;
+        let dip = intra.dip as i32 - 1;
+        let sm_top = intra.is_sm[0].a;
+        let sm_left = intra.is_sm[0].l;
+        let is_sm_flag = if apply_ibp {
+            (sm_top * crate::levels::ANGLE_SMOOTH_TOP_EDGE_FLAG)
+                | (sm_left * crate::levels::ANGLE_SMOOTH_LEFT_EDGE_FLAG)
+        } else {
+            (sm_top | sm_left)
+                * (crate::levels::ANGLE_SMOOTH_TOP_EDGE_FLAG
+                    | crate::levels::ANGLE_SMOOTH_LEFT_EDGE_FLAG)
+        };
+        if intra.y_angle & 1 != 0 {
+            apply_ibp = false;
+        }
+        let have_left = bx > fi.tile_col_start;
+        let have_top = by > fi.tile_row_start;
+        let intra_flags = crate::levels::ANGLE_IS_LUMA
+            | is_sm_flag
+            | if recon.frame.seq_intra_edge_filter {
+                crate::levels::ANGLE_USE_EDGE_FILTER_FLAG
+            } else {
+                0
+            }
+            | if apply_ibp {
+                crate::levels::ANGLE_IBP_FLAG
+            } else {
+                0
+            }
+            | (mrl_idx << crate::levels::ANGLE_MRL_IDX_SHIFT)
+            | if mrl_mul {
+                crate::levels::ANGLE_MULTI_MRL_FLAG
+            } else {
+                0
+            }
+            | if have_left {
+                crate::levels::ANGLE_HAS_LEFT_FLAG
+            } else {
+                0
+            }
+            | if have_top {
+                crate::levels::ANGLE_HAS_TOP_FLAG
+            } else {
+                0
+            }
+            | if dip >= 0 {
+                crate::levels::ANGLE_DIP_FLAG
+            } else {
+                0
+            };
+        let angle_eff = if dip >= 0 { dip } else { angle };
+
+        // Edge buffer origin: C uses `edge + 128 + !!mrl_idx*9`; we centre in a
+        // larger slab so any layout (incl. multi-mrl second edge) fits.
+        let edge_o: usize = 768 + if mrl_idx != 0 { 9 } else { 0 };
+
+        let m = crate::ipred_prepare::prepare_intra_edges_8bpc(
+            bx,
+            by,
+            fi.tile_col_end,
+            fi.tile_row_end,
+            n_tr,
+            n_bl,
+            recon.dst_y,
+            dst_off,
+            stride,
+            None, // prefilter_toplevel_sb_edge: cross-SB-row backup not wired yet
+            y_mode,
+            tw4,
+            th4,
+            angle_eff | intra_flags,
+            recon.edge,
+            edge_o,
+        );
+
+        let pred_angle = angle_eff | intra_flags;
+        let max_w = 4 * fi.bw - 4 * bx;
+        let max_h = 4 * fi.bh - 4 * by;
+        dispatch_ipred(
+            m,
+            recon.dst_y,
+            dst_off,
+            stride,
+            recon.edge,
+            edge_o,
+            tw,
+            th,
+            pred_angle,
+            max_w,
+            max_h,
+            &recon.frame.ibp_weights,
+        );
+    }
+
+    // --- residual add (recon_tmpl.c:2608-2667) -----------------------------
+    if eob != -1 {
+        if stx != 0 {
+            // Secondary transform reorder (recon_tmpl.c:2611-2654).
+            const MASK: i32 = (1 << IntraPredMode::HorPred as i32)
+                | (1 << IntraPredMode::HorDownPred as i32)
+                | (1 << IntraPredMode::VertLeftPred as i32)
+                | (1 << IntraPredMode::SmoothHPred as i32);
+            // C: transpose = intrabc || !intra || !((mask >> b->y_mode) & 1);
+            // here intra && !intrabc, so transpose = !((mask >> y_mode) & 1).
+            let transpose = (MASK >> (y_mode as i32)) & 1 == 0;
+            let stype = (stx & 3) - 1;
+            let set = (stx >> 2) & 15;
+            if tw >= 8 && th >= 8 {
+                let koff = (set as usize * 3 + stype as usize) * 1536;
+                let mut sums = [0i32; 48];
+                crate::stx::stxfm(
+                    &mut sums,
+                    recon.cf,
+                    &crate::stx_tables::STX_8X8_KERNEL[koff..],
+                    48,
+                    eob as usize,
+                    recon.frame.bitdepth_max,
+                );
+                recon.cf[..32].fill(0);
+                let idx = (imin(t_dim.lh as i32, 3) - 1) as usize;
+                let scan_out = &crate::stx_tables::STX_SCAN_ORDERS_8X8[idx][transpose as usize];
+                let mapping =
+                    &crate::stx_tables::COEFF8X8_MAPPING[set as usize * 3 + stype as usize];
+                for x in 0..48 {
+                    recon.cf[scan_out[mapping[x] as usize] as usize] = sums[x];
+                }
+                eob = [63, 119, 231][idx];
+            } else {
+                let koff = (set as usize * 3 + stype as usize) * 128;
+                let mut sums = [0i32; 16];
+                crate::stx::stxfm(
+                    &mut sums,
+                    recon.cf,
+                    &crate::stx_tables::STX_4X4_KERNEL[koff..],
+                    16,
+                    eob as usize,
+                    recon.frame.bitdepth_max,
+                );
+                let idx = imin(t_dim.lh as i32, 3) as usize;
+                let scan_out = &crate::stx_tables::STX_SCAN_ORDERS_4X4[idx][transpose as usize];
+                recon.cf[4..8].fill(0);
+                for x in 0..16 {
+                    recon.cf[scan_out[x] as usize] = sums[x];
+                }
+                eob = [15, 15, 51, 99][idx];
+            }
+        }
+
+        // lossless dpcm txtp adjust (recon_tmpl.c:2656-2660).
+        if lossless && unsafe { b.data.intra }.dpcm[0] != 0 {
+            txtp += ((1 + (y_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
+        }
+        // inter_ddt path is inter-only; not reachable here (intra block).
+
+        crate::itx::inv_txfm_add_8bpc(recon.dst_y, dst_off, stride, recon.cf, txtp, eob, tx);
+    }
+
+    // mark is_coded for this tx region (recon_tmpl.c:2669-2672).
+    let coded_w = imin(tw4, 64 - bx4 as i32).max(0) as u32;
+    if coded_w > 0 {
+        let mask: u64 = (((1u128 << coded_w) - 1) as u64) << (bx4 as u32);
+        for y in 0..th4 {
+            let row = by4 + y as usize;
+            if row < 64 {
+                recon.scratch.is_coded[0][row] |= mask;
+            }
+        }
+    }
+
+    let _ = orig_y_mode; // C restores b->y_mode; we never mutated b.
+    Ok(())
+}
+
+/// Dispatch the resolved intra predictor `m` into `dst` (mirrors the C
+/// `dsp->ipred.intra_pred[m]` table; recon_tmpl.c:2596-2606 / ipred_tmpl.c).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_ipred(
+    m: u8,
+    dst: &mut [u8],
+    dst_off: usize,
+    stride: usize,
+    edge: &[u8],
+    edge_o: usize,
+    w: usize,
+    h: usize,
+    angle: i32,
+    max_w: i32,
+    max_h: i32,
+    ibp_weights: &[[[u8; 16]; 16]; 7],
+) {
+    use crate::ipred::*;
+    use crate::levels::*;
+    let d = &mut dst[dst_off..];
+    match m {
+        0 /* DcPred */ => ipred_dc(d, stride, edge, edge_o, w, h, angle),
+        _ if m == DC_128_PRED => ipred_dc_128(d, stride, w, h),
+        _ if m == TOP_DC_PRED => ipred_dc_top(d, stride, edge, edge_o, w, h, angle),
+        _ if m == LEFT_DC_PRED => ipred_dc_left(d, stride, edge, edge_o, w, h, angle),
+        2 /* HorPred */ => ipred_h(d, stride, edge, edge_o, w, h),
+        1 /* VertPred */ => ipred_v(d, stride, edge, edge_o, w, h),
+        12 /* PaethPred */ => ipred_paeth(d, stride, edge, edge_o, w, h),
+        9 /* SmoothPred */ => ipred_smooth(d, stride, edge, edge_o, w, h),
+        10 /* SmoothVPred */ => ipred_smooth_v(d, stride, edge, edge_o, w, h),
+        11 /* SmoothHPred */ => ipred_smooth_h(d, stride, edge, edge_o, w, h),
+        _ if m == Z1_PRED => {
+            ipred_z1(d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights)
+        }
+        _ if m == Z2_PRED => ipred_z2(d, stride, edge, edge_o, w, h, angle, max_w, max_h),
+        _ if m == Z3_PRED => {
+            ipred_z3(d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights)
+        }
+        _ if m == DIP_PRED => ipred_dip_8bpc(d, stride, edge, edge_o, w, h, angle),
+        _ => ipred_dc_128(d, stride, w, h),
+    }
 }
 
 pub fn decode_sb(
@@ -5481,7 +6419,17 @@ mod tests {
                 seq_ist: [false; 2],
                 seq_cctx: false,
                 layout: crate::headers::PixelLayout::I420,
+                bitdepth: 8,
+                seg_lossless: [0u8; crate::headers::MAX_SEGMENTS],
+                reduced_txtp_set: 0,
+                tcq: false,
+                seq_intra_edge_filter: false,
+                seq_ibp: false,
+                seq_inter_ddt: false,
+                ibp_weights: [[[0u8; 16]; 16]; 7],
             };
+            let mut __scratch = ReconScratch::default();
+            let mut __edge = vec![0u8; 2048];
             let mut $recon = ReconCtx {
                 dst_y: &mut __ty,
                 dst_u: &mut __tu,
@@ -5489,6 +6437,8 @@ mod tests {
                 cdf_coef: &mut __tcoef,
                 cf: &mut __tcf,
                 frame: &$rf,
+                scratch: &mut __scratch,
+                edge: &mut __edge,
             };
         };
     }

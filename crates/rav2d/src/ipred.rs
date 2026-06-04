@@ -275,8 +275,8 @@ pub fn get_filter_strength(wh: i32, angle: i32, is_sm: bool) -> i32 {
 pub fn filter_edge(
     out: &mut [u8],
     sz: usize,
-    lim_from: usize,
-    lim_to: usize,
+    lim_from: i32,
+    lim_to: i32,
     inp: &[u8],
     from: i32,
     to: i32,
@@ -285,22 +285,24 @@ pub fn filter_edge(
     static KERNEL: [[u8; 5]; 3] = [[0, 4, 8, 4, 0], [0, 5, 6, 5, 0], [2, 4, 4, 4, 2]];
 
     debug_assert!(strength > 0);
-    let mut i = 0;
-    while i < imin(sz as i32, lim_from as i32) as usize {
-        out[i] = inp[iclip(i as i32, from, to - 1) as usize];
+    // NB: lim_from / lim_to may be negative (C uses signed `int`); compare in
+    // i32 space so a negative bound yields an empty loop instead of wrapping.
+    let mut i: i32 = 0;
+    while i < imin(sz as i32, lim_from) {
+        out[i as usize] = inp[iclip(i, from, to - 1) as usize];
         i += 1;
     }
-    while i < imin(lim_to as i32, sz as i32) as usize {
+    while i < imin(lim_to, sz as i32) {
         let mut s = 0i32;
         for j in 0..5 {
-            s += inp[iclip(i as i32 - 2 + j, from, to - 1) as usize] as i32
+            s += inp[iclip(i - 2 + j, from, to - 1) as usize] as i32
                 * KERNEL[strength - 1][j as usize] as i32;
         }
-        out[i] = ((s + 8) >> 4) as u8;
+        out[i as usize] = ((s + 8) >> 4) as u8;
         i += 1;
     }
-    while i < sz {
-        out[i] = inp[iclip(i as i32, from, to - 1) as usize];
+    while i < sz as i32 {
+        out[i as usize] = inp[iclip(i, from, to - 1) as usize];
         i += 1;
     }
 }
@@ -658,7 +660,8 @@ pub fn ipred_z1(
     let dx = DR_INTRA_DERIVATIVE[angle as usize] as i32;
     let max_base_x = (width + height) as i32 - 1 + (mrl_idx as i32 * 2);
 
-    let mut filt = [0u8; 136];
+    // C: pixel filt[1 + 1 + 3 + 64 + 64 + 2 * 3 + 2] (= 141).
+    let mut filt = [0u8; 141];
     let top_off = 2 + mrl_idx;
     let sz = 1 + mrl_idx + width + height + mrl_idx * 2;
     let str = if enable_intra_edge_filter && have_top && mrl_idx == 0 {
@@ -671,7 +674,7 @@ pub fn ipred_z1(
             &mut filt[1..],
             sz,
             1,
-            sz + max_width as usize - width,
+            sz as i32 + max_width - width as i32,
             &tl[o..],
             0,
             sz as i32,
@@ -813,7 +816,8 @@ pub fn ipred_z3(
     let dy = DR_INTRA_DERIVATIVE[(270 - angle) as usize] as i32;
     let max_base_y = (width + height) as i32 - 1 + (mrl_idx as i32 * 2);
 
-    let mut filt = [0u8; 136];
+    // C: pixel filt[1 + 1 + 3 + 64 + 64 + 2 * 3 + 2] (= 141).
+    let mut filt = [0u8; 141];
     let left_off = 1 + width + height + mrl_idx * 2;
     let sz = 1 + mrl_idx + width + height + mrl_idx * 2;
 
@@ -827,8 +831,8 @@ pub fn ipred_z3(
         filter_edge(
             &mut filt[2..],
             sz,
-            height - max_height as usize,
-            sz - 1,
+            height as i32 - max_height,
+            sz as i32 - 1,
             &tl[o + 1 - sz..],
             0,
             sz as i32,
@@ -971,7 +975,7 @@ pub fn ipred_z2(
             &mut filt[1..],
             sz_t,
             1,
-            sz_t + max_width as usize - width,
+            sz_t as i32 + max_width - width as i32,
             &tl[o..],
             0,
             sz_t as i32,
@@ -996,8 +1000,8 @@ pub fn ipred_z2(
         filter_edge(
             &mut filt2[1..],
             sz_l,
-            height - max_height as usize,
-            sz_l - 1,
+            height as i32 - max_height,
+            sz_l as i32 - 1,
             &tl[o - (height + mrl_idx)..],
             0,
             sz_l as i32,
