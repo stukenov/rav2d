@@ -1656,9 +1656,12 @@ pub fn cfl_gen_mat_8bpc(
     }
 
     if has_l {
-        let start = if dir_t && !has_t { 0 } else { 1 };
-        let end = if dir_t && !has_t { refh } else { refh - 1 };
-        for i in start..end {
+        // C (ipred_tmpl.c:1307-1308): start = dir_t && !has_t;
+        //   for (i = 1 - start; i < refh - start - 1; i++)
+        let start = (dir_t && !has_t) as i32;
+        let begin = (1 - start) as usize;
+        let end = imax(begin as i32, refh as i32 - start - 1) as usize;
+        for i in begin..end {
             let v0 = y[left_off + i * n_left] as i32;
             let ni = left_off + (i + dir_t as usize) * n_left + dir_l as usize;
             let v1 = sqrnd_8bpc(y[ni] as i32);
@@ -2159,6 +2162,12 @@ pub fn cfl_pred_8bpc(
         }
     }
 
+    if std::env::var("RAV2D_CFLSUM").is_ok() {
+        let npx = (if has_t { w >> skiph as usize } else { 0 })
+            + (if has_l { h >> skipv as usize } else { 0 });
+        eprintln!("CFLSUM has_t={} has_l={} sum_dc=[{},{},{}] npx={} w={} h={} skiph={} skipv={}",
+            has_t as i32, has_l as i32, dc[0], dc[1], dc[2], npx, w, h, skiph as i32, skipv as i32);
+    }
     if !has_t && !has_l {
         dc[0] = 4 << 8;
         dc[1] = 128;
@@ -2200,6 +2209,10 @@ pub fn cfl_pred_8bpc(
         alpha[1] = ((flags & CFL_ALPHA_V_MASK) as i32) >> shv;
     }
 
+    if std::env::var("RAV2D_CFLI").is_ok() {
+        eprintln!("CFLI implicit={} dc=[{},{},{}] alpha=[{},{}] ntop={} nleft={} flags={:x} w={} h={}",
+            implicit as i32, dc[0], dc[1], dc[2], alpha[0], alpha[1], n_top, n_left, flags, w, h);
+    }
     if alpha[0] == 0 {
         let dc_u = iclip(dc[1], 0, 255) as u8;
         splat_dc(u_buf, cstride as usize, u_off, w, h, dc_u);

@@ -493,6 +493,14 @@ fn diff_loc() {
     let path = media(&clip);
     let r = dav2d_decode(&path);
     let g = rav2d_decode(&path);
+    if std::env::var("RAV2D_DQ").is_ok() {
+        let mut h: u64 = 1469598103934665603;
+        for &b in &g[0].planes[0] {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        eprintln!("RAV2D_LUMAHASH frames={} luma0hash={:x}", g.len(), h);
+    }
     let (r, g) = (&r[0], &g[0]);
     for pl in 0..3 {
         let (ssh, ssv) = ss(r.layout);

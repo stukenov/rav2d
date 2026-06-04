@@ -5448,8 +5448,9 @@ fn recon_b_intra(
                     };
                     if let Some(ph) = phase {
                         let ccbs = if read_cbs != BlockSize::Invalid { read_cbs } else { recon_cbs };
+                        let sdp_active = lbs2 == BlockSize::Invalid;
                         recon_b_intra_chroma_phase(
-                            recon, msac, cdf_m, a, l, b, sub_cbx, sub_cby, ccbs, fi, ph,
+                            recon, msac, cdf_m, a, l, b, sub_cbx, sub_cby, ccbs, sdp_active, fi, ph,
                         )?;
                     }
                 }
@@ -5535,7 +5536,8 @@ fn recon_b_intra(
                 );
             }
         }
-        recon_b_intra_chroma(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, intrabc, fi)?;
+        let sdp_active = lbs == BlockSize::Invalid;
+        recon_b_intra_chroma(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, intrabc, sdp_active, fi)?;
     }
     Ok(())
 }
@@ -6077,9 +6079,12 @@ fn recon_b_intra_chroma(
     cby: i32,
     cbs: BlockSize,
     _intrabc: bool,
+    sdp_active: bool,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
-    recon_b_intra_chroma_phase(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, fi, ChromaPhase::Both)
+    recon_b_intra_chroma_phase(
+        recon, msac, cdf_m, a, l, b, cbx, cby, cbs, sdp_active, fi, ChromaPhase::Both,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6093,15 +6098,15 @@ fn recon_b_intra_chroma_phase(
     cbx: i32,
     cby: i32,
     cbs: BlockSize,
+    sdp_active: bool,
     fi: &SbFrameInfo,
     phase: ChromaPhase,
 ) -> Result<(), ()> {
     use crate::levels::{CFL_PRED, IntraPredMode};
 
-    // IntraBC: chroma `intra = b->intra && (sdp_active || !b->intrabc)`. In this
-    // leaf path sdp_active is false, so it is false for IntraBC blocks.
+    // chroma `intra = b->intra && (sdp_active || !b->intrabc)` (recon_tmpl.c:3564).
     let is_intrabc = b.intrabc != 0;
-    let is_intra = !is_intrabc;
+    let is_intra = b.is_intra != 0 && (sdp_active || !is_intrabc);
 
     let ss_hor = recon.frame.ss_hor;
     let ss_ver = recon.frame.ss_ver;
@@ -6165,6 +6170,11 @@ fn recon_b_intra_chroma_phase(
     let mut tu_txtp = [[0u16; 2]; 256];
     let mut tu_eob = [[-1i16; 2]; 256];
 
+    // Snapshot the per-4x4 luma fsc map for the lossless-chroma txtp derivation
+    // (recon_tmpl.c:430 `t->luma_fsc_map`, used when sdp_active). Copied out to
+    // sidestep the `recon` borrow inside the per-TU coef loop below.
+    let luma_fsc_map: [u8; 256] = recon.scratch.luma_fsc_map;
+
     // IntraBC blocks with skip_txfm code no chroma coefficients: fill the ccoef
     // contexts with 0x40 and leave all TU eobs at -1 (recon_tmpl.c:3536-3540).
     // (For non-IntraBC intra blocks skip_txfm is always 0; the chroma-only SDP
@@ -6215,7 +6225,7 @@ fn recon_b_intra_chroma_phase(
                     intra: is_intra,
                     fsc: b.fsc != 0,
                     lossless,
-                    sdp_active: false,
+                    sdp_active,
                     y_mode: 0,
                     uv_mode: uv_mode as usize,
                     seg_id,
@@ -6229,7 +6239,7 @@ fn recon_b_intra_chroma_phase(
                     u_has_cf,
                     cbx,
                     cby,
-                    luma_fsc_map: &[],
+                    luma_fsc_map: &luma_fsc_map,
                     dq_tbl,
                     bitdepth: recon.frame.bitdepth,
                     qm: qm_ref,
@@ -6260,9 +6270,9 @@ fn recon_b_intra_chroma_phase(
                 tu_txtp[i][pl] = txtp;
                 tu_eob[i][pl] = eob as i16;
 
-                if std::env::var("RAV2D_CTX").is_ok() {
-                    eprintln!("CHROMATX cby={} cbx={} pl={} i={} uvtx={} txtp={} eob={} uvmode={} uhascf={} rng={}",
-                        cby, cbx, pl, i, uvtx, txtp & 0xff, eob, uv_mode, u_has_cf, msac.dbg_rng());
+                if std::env::var("RAV2D_CTX").is_ok() && cby < 8 {
+                    eprintln!("CHROMATX cby={} cbx={} pl={} uvtx={} txtp={} eob={} uvmode={} cfl_type={} rng={}",
+                        cby, cbx, pl, uvtx, txtp & 0xff, eob, uv_mode, unsafe { b.data.intra.cfl_type }, msac.dbg_rng());
                 }
 
                 let aw = imin(ctw4, 64 - (cbx4 + x as usize) as i32).max(0) as usize;
@@ -6305,6 +6315,19 @@ fn recon_b_intra_chroma_phase(
     // CfL is intra-only (`if (intra) cfl()`); IntraBC used the mc copy instead.
     if is_intra && uv_mode == CFL_PRED {
         cfl_predict_8bpc(recon, b, cbs, uvtx, cbx, cby, fi)?;
+        if std::env::var("RAV2D_CFLPX").is_ok() && cby < 8 {
+            let ss_hor = recon.frame.ss_hor as usize;
+            let ss_ver = recon.frame.ss_ver as usize;
+            let cstride = recon.frame.uv_stride_px;
+            let ssbx = (cbx >> ss_hor) as usize;
+            let ssby = (cby >> ss_ver) as usize;
+            let off = 4 * (ssby * cstride + ssbx);
+            let mut u = Vec::new();
+            let mut v = Vec::new();
+            for r in 0..4 { for c in 0..4 { u.push(recon.dst_u[off + r*cstride + c]); v.push(recon.dst_v[off + r*cstride + c]); } }
+            eprintln!("CFLOUT cbx={} cby={} type={} u={:?} v={:?}",
+                cbx, cby, unsafe { b.data.intra.cfl_type }, u, v);
+        }
     }
 
     // ---- prediction + inverse transform per TU (recon_tmpl.c:3791-3938) -----
@@ -6478,6 +6501,11 @@ fn recon_b_intra_chroma_phase(
                             ((1 + (uv_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
                     } else if recon.frame.seq_inter_ddt && is_intrabc {
                         txtp += txtp & crate::tables::TX_DDT_MASK[uvtx] as u32;
+                    }
+                    if std::env::var("RAV2D_RESID").is_ok() && cby < 4 && pl == 0 {
+                        eprintln!("RESID cbx={} cby={} txtp={:x} eob={} dpcm={} uvmode={} segid={} lossless={}",
+                            cbx, cby, txtp, tu_eob[i][pl], unsafe { b.data.intra.dpcm[1] }, uv_mode,
+                            b.seg_id, lossless as i32);
                     }
                     let dst_plane: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
                     crate::itx::inv_txfm_add_8bpc(
@@ -6725,6 +6753,11 @@ fn cfl_predict_8bpc(
             edge_flags,
             dir,
         );
+        if std::env::var("RAV2D_MHCCP").is_ok() && cby < 8 {
+            eprintln!("MAT cbx={} cby={} dir={} mat00={} mat01={} mat02={} mat11={} mat12={} mat22={} imat0_3=[{}, {}, {}, {}]",
+                cbx, cby, dir as i32, mat[0][0], mat[0][1], mat[0][2], mat[1][1], mat[1][2], mat[2][2],
+                imat[0][0], imat[0][1], imat[0][2], imat[0][3]);
+        }
     }
 
     for pl in 0..2 {
@@ -6768,6 +6801,11 @@ fn cfl_predict_8bpc(
             edge_flags,
             dir,
         );
+        if std::env::var("RAV2D_MHCCP").is_ok() && pl == 0 && cby < 8 {
+            let c: Vec<u8> = (0..4).map(|i| chroma[chroma_off + i]).collect();
+            eprintln!("MHCCP cbx={} cby={} dir={} eflags={:x} alpha=[{}, {}, {}] refw={} refh={} u0_3={:?}",
+                cbx, cby, dir as i32, edge_flags, alpha[0], alpha[1], alpha[2], refw, refh, c);
+        }
     }
     Ok(())
 }
@@ -6845,6 +6883,13 @@ fn recon_b_luma_tx(
         let dq_seg = b.seg_id as usize;
         let dq_tbl = recon.dq_active[dq_seg][0]; // plane 0 (luma)
         let qm_ref: Option<&[u8]> = recon.frame.qm[tx][0].as_deref();
+        if std::env::var("RAV2D_DQ").is_ok() && by < 1 && bx < 20 {
+            eprintln!(
+                "DQ y bx={} by={} tx={} bs={} txpart={} seg={} dq=[{},{}] lastq={} qm={}",
+                bx, by, tx, b.bs, b.tx_part, dq_seg, dq_tbl[0], dq_tbl[1], recon.last_qidx,
+                qm_ref.is_some() as i32
+            );
+        }
 
         let params = crate::recon::DecodeCoefParams {
             tx,
@@ -7173,6 +7218,10 @@ fn recon_b_luma_tx(
             "LUMATX y={} x={} tx={} txtp={} eob={} ymode={} ang={} dip={} mrl={} fsc={} sum={} first={:?}",
             by, bx, tx, txtp & 0xff, eob, y_mode, intra.y_angle as i32, intra.dip as i32 - 1, intra.mrl_index, b.fsc, sum, first
         );
+        if bx == 0 && by == 0 && tw >= 64 {
+            let tail: Vec<u8> = (56..64).map(|i| recon.dst_y[dst_off + i]).collect();
+            eprintln!("LUMATAIL y=0 x=0 px56_63={:?}", tail);
+        }
     }
 
     let _ = orig_y_mode; // C restores b->y_mode; we never mutated b.
