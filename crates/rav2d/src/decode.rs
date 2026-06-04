@@ -1830,6 +1830,34 @@ impl SbFrameInfo {
     }
 }
 
+/// Read-only per-frame reconstruction scalars (shared ref).
+pub struct ReconFrameCtx<'a> {
+    pub dq: &'a [[[u32; 2]; 3]; crate::headers::MAX_SEGMENTS],
+    pub qm: &'a [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES],
+    pub y_stride_px: usize,
+    pub uv_stride_px: usize,
+    pub y_h: usize,
+    pub uv_h: usize,
+    pub ss_hor: i32,
+    pub ss_ver: i32,
+    pub bitdepth_max: i32,
+    pub seq_fsc: bool,
+    pub seq_ist: [bool; 2],
+    pub seq_cctx: bool,
+    pub layout: crate::headers::PixelLayout,
+}
+
+/// Mutable reconstruction borrows bundled so only one new param threads through
+/// decode_sb's recursion (Rust auto-reborrows &mut ReconCtx at each call).
+pub struct ReconCtx<'a, 'f> {
+    pub dst_y: &'a mut [u8],
+    pub dst_u: &'a mut [u8],
+    pub dst_v: &'a mut [u8],
+    pub cdf_coef: &'a mut crate::cdf::CdfCoefContext,
+    pub cf: &'a mut [i32],
+    pub frame: &'a ReconFrameCtx<'f>,
+}
+
 /// Decode one superblock row of a tile (entropy/parse pass).
 ///
 /// Port of the entropy branch of `dav2d_decode_tile_sbrow` (decode.c:4516-4642)
@@ -1849,6 +1877,11 @@ pub fn decode_tile_sbrow_entropy(
     lf_mask: &mut [crate::lf_mask::Av2Filter],
     lr_mask: &mut [crate::lf_mask::Av2Restoration],
     l: &mut BlockContext,
+    dst_y: &mut [u8],
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    cf: &mut [i32],
+    recon_frame: &ReconFrameCtx,
     part_w: &mut Vec<u8>,
     part_r: &[u8],
     by: i32,
@@ -1964,6 +1997,15 @@ pub fn decode_tile_sbrow_entropy(
         let mut part_w_idx = 0usize;
         let mut part_r_idx = 0usize;
 
+        let mut recon = ReconCtx {
+            dst_y: &mut *dst_y,
+            dst_u: &mut *dst_u,
+            dst_v: &mut *dst_v,
+            cdf_coef: &mut ts.cdf.coef,
+            cf: &mut *cf,
+            frame: recon_frame,
+        };
+
         decode_sb(
             fi,
             &mut bx_m,
@@ -1978,6 +2020,7 @@ pub fn decode_tile_sbrow_entropy(
             msac,
             &mut ts.cdf.m,
             &mut ts.cdf.dmv,
+            &mut recon,
             part_w,
             &mut part_w_idx,
             part_r,
@@ -2020,6 +2063,12 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         refdist,
         absrefdist,
         skip_mode_refs,
+        cur_pic,
+        dq,
+        qm,
+        bitdepth_max,
+        ss_hor,
+        ss_ver,
         ..
     } = fc;
 
@@ -2032,6 +2081,56 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let bh = *bh;
     let refdir = *refdir;
     let skip_mode_refs = *skip_mode_refs;
+
+    // Reconstruction destination planes. The decode_b leaf is a no-op this step,
+    // so these slices are threaded but not yet written. Built once and reborrowed
+    // at each tile/sbrow decode_sb call below.
+    let ss_hor_v = *ss_hor;
+    let ss_ver_v = *ss_ver;
+    let bitdepth_max_v = *bitdepth_max;
+    let y_h: usize = cur_pic.p.h.max(0) as usize;
+    let uv_h: usize = if seq_hdr.layout == crate::headers::PixelLayout::I400 {
+        0
+    } else {
+        ((cur_pic.p.h + ss_ver_v) >> ss_ver_v).max(0) as usize
+    };
+    let y_stride_px: usize = cur_pic.stride[0].unsigned_abs();
+    let uv_stride_px: usize = cur_pic.stride[1].unsigned_abs();
+    let y_ptr = cur_pic.data[0].map(|p| p.as_ptr());
+    let u_ptr = cur_pic.data[1].map(|p| p.as_ptr());
+    let v_ptr = cur_pic.data[2].map(|p| p.as_ptr());
+    // SAFETY: pointers/strides come from the live `cur_pic` allocation; each plane
+    // slice spans stride*height bytes. `fc`/`cur_pic` is not otherwise accessed
+    // while these slices are live, so there is no aliasing of the same memory.
+    let dst_y: &mut [u8] = match y_ptr {
+        Some(p) => unsafe { std::slice::from_raw_parts_mut(p, y_stride_px * y_h) },
+        None => &mut [],
+    };
+    let dst_u: &mut [u8] = match u_ptr {
+        Some(p) => unsafe { std::slice::from_raw_parts_mut(p, uv_stride_px * uv_h) },
+        None => &mut [],
+    };
+    let dst_v: &mut [u8] = match v_ptr {
+        Some(p) => unsafe { std::slice::from_raw_parts_mut(p, uv_stride_px * uv_h) },
+        None => &mut [],
+    };
+
+    let recon_frame = ReconFrameCtx {
+        dq: &*dq,
+        qm: &*qm,
+        y_stride_px,
+        uv_stride_px,
+        y_h,
+        uv_h,
+        ss_hor: ss_hor_v,
+        ss_ver: ss_ver_v,
+        bitdepth_max: bitdepth_max_v,
+        seq_fsc: seq_hdr.fsc,
+        seq_ist: seq_hdr.ist,
+        seq_cctx: seq_hdr.cctx,
+        layout: seq_hdr.layout,
+    };
+    let mut cf = vec![0i32; 64 * 64];
 
     let c_root_bs = if seq_hdr.layout == crate::headers::PixelLayout::I400 {
         BlockSize::Invalid
@@ -2090,6 +2189,11 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     &mut lf.mask,
                     &mut lf.lr_mask,
                     &mut l,
+                    &mut *dst_y,
+                    &mut *dst_u,
+                    &mut *dst_v,
+                    &mut cf,
+                    &recon_frame,
                     &mut part_w,
                     &part_r,
                     by,
@@ -2343,9 +2447,11 @@ fn decode_b(
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
     cdf_dmv: &mut CdfMvContext,
+    recon: &mut ReconCtx,
     lbs: BlockSize,
     cbs: BlockSize,
 ) -> Result<Av2Block, ()> {
+    let _ = &mut *recon;
     let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
     debug_assert!(bs != BlockSize::Invalid);
     let bs_idx = bs as u8 as usize;
@@ -4234,6 +4340,7 @@ pub fn decode_sb(
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
     cdf_dmv: &mut CdfMvContext,
+    recon: &mut ReconCtx,
     part_w: &mut Vec<u8>,
     part_w_idx: &mut usize,
     part_r: &[u8],
@@ -4272,6 +4379,7 @@ pub fn decode_sb(
             msac,
             cdf_m,
             cdf_dmv,
+            recon,
             part_w,
             part_w_idx,
             part_r,
@@ -4294,6 +4402,7 @@ pub fn decode_sb(
             msac,
             cdf_m,
             cdf_dmv,
+            recon,
             part_w,
             part_w_idx,
             part_r,
@@ -4543,6 +4652,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 lbs,
                 cbs,
             )?;
@@ -4588,6 +4698,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4618,6 +4729,7 @@ pub fn decode_sb(
                     msac,
                     cdf_m,
                     cdf_dmv,
+                    recon,
                     part_w,
                     part_w_idx,
                     part_r,
@@ -4657,6 +4769,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4687,6 +4800,7 @@ pub fn decode_sb(
                     msac,
                     cdf_m,
                     cdf_dmv,
+                    recon,
                     part_w,
                     part_w_idx,
                     part_r,
@@ -4715,6 +4829,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4738,6 +4853,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4762,6 +4878,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4785,6 +4902,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4819,6 +4937,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4849,6 +4968,7 @@ pub fn decode_sb(
                     msac,
                     cdf_m,
                     cdf_dmv,
+                    recon,
                     part_w,
                     part_w_idx,
                     part_r,
@@ -4880,6 +5000,7 @@ pub fn decode_sb(
                         msac,
                         cdf_m,
                         cdf_dmv,
+                        recon,
                         part_w,
                         part_w_idx,
                         part_r,
@@ -4909,6 +5030,7 @@ pub fn decode_sb(
                         msac,
                         cdf_m,
                         cdf_dmv,
+                        recon,
                         part_w,
                         part_w_idx,
                         part_r,
@@ -4944,6 +5066,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -4974,6 +5097,7 @@ pub fn decode_sb(
                     msac,
                     cdf_m,
                     cdf_dmv,
+                    recon,
                     part_w,
                     part_w_idx,
                     part_r,
@@ -5005,6 +5129,7 @@ pub fn decode_sb(
                         msac,
                         cdf_m,
                         cdf_dmv,
+                        recon,
                         part_w,
                         part_w_idx,
                         part_r,
@@ -5034,6 +5159,7 @@ pub fn decode_sb(
                         msac,
                         cdf_m,
                         cdf_dmv,
+                        recon,
                         part_w,
                         part_w_idx,
                         part_r,
@@ -5073,6 +5199,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -5098,6 +5225,7 @@ pub fn decode_sb(
                     msac,
                     cdf_m,
                     cdf_dmv,
+                    recon,
                     part_w,
                     part_w_idx,
                     part_r,
@@ -5126,6 +5254,7 @@ pub fn decode_sb(
                         msac,
                         cdf_m,
                         cdf_dmv,
+                        recon,
                         part_w,
                         part_w_idx,
                         part_r,
@@ -5152,6 +5281,7 @@ pub fn decode_sb(
                             msac,
                             cdf_m,
                             cdf_dmv,
+                            recon,
                             part_w,
                             part_w_idx,
                             part_r,
@@ -5192,6 +5322,7 @@ pub fn decode_sb(
                 msac,
                 cdf_m,
                 cdf_dmv,
+                recon,
                 part_w,
                 part_w_idx,
                 part_r,
@@ -5217,6 +5348,7 @@ pub fn decode_sb(
                     msac,
                     cdf_m,
                     cdf_dmv,
+                    recon,
                     part_w,
                     part_w_idx,
                     part_r,
@@ -5245,6 +5377,7 @@ pub fn decode_sb(
                         msac,
                         cdf_m,
                         cdf_dmv,
+                        recon,
                         part_w,
                         part_w_idx,
                         part_r,
@@ -5271,6 +5404,7 @@ pub fn decode_sb(
                             msac,
                             cdf_m,
                             cdf_dmv,
+                            recon,
                             part_w,
                             part_w_idx,
                             part_r,
@@ -5306,6 +5440,7 @@ pub fn decode_sb(
             msac,
             cdf_m,
             cdf_dmv,
+            recon,
             BlockSize::Invalid,
             cbs_orig,
         )?;
@@ -5318,6 +5453,45 @@ pub fn decode_sb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a throwaway `ReconCtx` (and its backing scratch) bound to the given
+    /// idents in the caller's scope. The recon leaf is a no-op under
+    /// `Pass::Entropy`, so contents are never read; this just satisfies the
+    /// threaded parameter for decode_sb / decode_b unit tests.
+    macro_rules! make_dummy_recon {
+        ($rf:ident, $recon:ident) => {
+            let mut __ty = vec![0u8; 64 * 64];
+            let mut __tu = vec![0u8; 64 * 64];
+            let mut __tv = vec![0u8; 64 * 64];
+            let mut __tcf = vec![0i32; 64 * 64];
+            let mut __tcoef = crate::cdf::CdfCoefContext::default();
+            let __dq = [[[0u32; 2]; 3]; crate::headers::MAX_SEGMENTS];
+            let __qm: [[Option<Vec<u8>>; 3]; crate::levels::N_RECT_TX_SIZES] = Default::default();
+            let $rf = ReconFrameCtx {
+                dq: &__dq,
+                qm: &__qm,
+                y_stride_px: 64,
+                uv_stride_px: 64,
+                y_h: 64,
+                uv_h: 64,
+                ss_hor: 0,
+                ss_ver: 0,
+                bitdepth_max: 255,
+                seq_fsc: false,
+                seq_ist: [false; 2],
+                seq_cctx: false,
+                layout: crate::headers::PixelLayout::I420,
+            };
+            let mut $recon = ReconCtx {
+                dst_y: &mut __ty,
+                dst_u: &mut __tu,
+                dst_v: &mut __tv,
+                cdf_coef: &mut __tcoef,
+                cf: &mut __tcf,
+                frame: &$rf,
+            };
+        };
+    }
 
     #[test]
     fn test_neg_deinterleave_zero_ref() {
@@ -6799,6 +6973,7 @@ mod tests {
         let mut dir = 0i32;
         let pass = Pass::Entropy as u8;
 
+        make_dummy_recon!(_rf, _recon);
         let result = decode_sb(
             &fi,
             &mut bx,
@@ -6813,6 +6988,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             &mut part_w,
             &mut part_w_idx,
             part_r,
@@ -6907,6 +7083,7 @@ mod tests {
         let mut dir = 0i32;
         let pass = Pass::Entropy as u8;
 
+        make_dummy_recon!(_rf, _recon);
         let result = decode_sb(
             &fi,
             &mut bx,
@@ -6921,6 +7098,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             &mut part_w,
             &mut part_w_idx,
             part_r,
@@ -7005,6 +7183,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             8,
@@ -7019,6 +7198,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
@@ -7101,6 +7281,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             8,
@@ -7115,6 +7296,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
@@ -7195,6 +7377,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             8,
@@ -7209,6 +7392,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
@@ -7288,6 +7472,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             8,
@@ -7302,6 +7487,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
@@ -7386,6 +7572,7 @@ mod tests {
         a.midx[9] = 17;
         l.midx[9] = 17;
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             8,
@@ -7400,6 +7587,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
@@ -7480,6 +7668,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             8,
@@ -7494,6 +7683,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
@@ -7579,6 +7769,7 @@ mod tests {
         let mut l = BlockContext::default();
 
         // Decode with both luma and chroma
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             4,
@@ -7593,6 +7784,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs4x4,
         )
@@ -7682,6 +7874,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             4,
@@ -7696,6 +7889,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs4x4,
             BlockSize::Bs4x4,
         )
@@ -7782,6 +7976,7 @@ mod tests {
         let mut l = BlockContext::default();
 
         // Decode 8x8 block at (4,4); keyframe → always intra
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             4,
@@ -7796,6 +7991,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs4x4,
         )
@@ -7890,6 +8086,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             4,
@@ -7904,6 +8101,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
@@ -8003,6 +8201,7 @@ mod tests {
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
 
+        make_dummy_recon!(_rf, _recon);
         let b = decode_b(
             &fi,
             4,
@@ -8017,6 +8216,7 @@ mod tests {
             &mut msac,
             &mut cdf_m,
             &mut cdf_dmv,
+            &mut _recon,
             BlockSize::Bs8x8,
             BlockSize::Bs8x8,
         )
