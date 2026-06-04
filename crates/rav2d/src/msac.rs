@@ -167,6 +167,11 @@ impl<'a> MsacContext<'a> {
     }
 
     #[inline]
+    pub fn dbg_rng(&self) -> u32 {
+        self.rng
+    }
+
+    #[inline]
     fn ctx_refill(&mut self) {
         let mut c = 40 - self.cnt;
         let mut dif = self.dif;

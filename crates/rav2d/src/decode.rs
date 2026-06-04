@@ -2561,6 +2561,25 @@ fn decode_b(
         b.cbs = cbs as i8;
     }
 
+    if std::env::var("RAV2D_TRACE").is_ok() {
+        eprintln!(
+            "BLK y={} x={} cby={} cbx={} bs={} lbs={} cbs={} hasL={} hasC={} ireg={} rng={}",
+            by, bx, cby, cbx, bs as i32, lbs as i32, cbs as i32, has_luma as i32,
+            has_chroma as i32, intra_region, msac.dbg_rng()
+        );
+    }
+    let trace_blk = std::env::var("RAV2D_BLK")
+        .ok()
+        .map(|s| {
+            let mut it = s.split(',');
+            (
+                it.next().unwrap_or("").parse::<i32>().unwrap_or(-1),
+                it.next().unwrap_or("").parse::<i32>().unwrap_or(-1),
+            )
+        })
+        .map(|(ty, tx)| ty == by && tx == bx)
+        .unwrap_or(false);
+
     // Pre-compute cross-SB boundary neighbour context values.
     // The C code uses nx[2] pointers into a/l; here we read out
     // the values we need before any mutable operations.
@@ -2784,6 +2803,9 @@ fn decode_b(
         }
     }
     let intrabc = has_luma && b.intrabc != 0;
+    if trace_blk {
+        eprintln!("  CK intrabc b.intrabc={} intra={} rng={}", b.intrabc, b.is_intra, msac.dbg_rng());
+    }
 
     // skip_txfm
     if fi.seg_skip_mask & (1 << b.seg_id) != 0 {
@@ -2795,6 +2817,9 @@ fn decode_b(
     } else {
         let ctx = nx_skip_txfm[0] as usize + nx_skip_txfm[1] as usize + b.skip_mode as usize * 3;
         b.skip_txfm = msac.decode_bool_adapt(cdf_m.skip_txfm(ctx)) as u8;
+    }
+    if trace_blk {
+        eprintln!("  CK skip_txfm={} rng={}", b.skip_txfm, msac.dbg_rng());
     }
 
     // Intra mode decoding
@@ -2955,6 +2980,9 @@ fn decode_b(
                 (nb_fsc[0] + nb_fsc[1]) as usize
             };
             b.fsc = msac.decode_bool_adapt(cdf_m.fsc(fsc_ctx, sz_ctx)) as u8;
+        }
+        if trace_blk {
+            eprintln!("  CK ymode={} fsc={} rng={}", unsafe { b.data.intra.y_mode }, b.fsc, msac.dbg_rng());
         }
 
         // MRL (Multi-Reference Line) index
@@ -3130,6 +3158,9 @@ fn decode_b(
                 }
             }
         }
+        if trace_blk {
+            eprintln!("  CK uvmode uv={} cfl_type={} rng={}", unsafe { b.data.intra.uv_mode }, unsafe { b.data.intra.cfl_type }, msac.dbg_rng());
+        }
     }
 
     // Palette and DIP (has_luma intra path)
@@ -3187,9 +3218,16 @@ fn decode_b(
         }
     }
 
+    if trace_blk {
+        eprintln!("  CK predip dip={} pal={} rng={}", unsafe { b.data.intra.dip }, unsafe { b.data.intra.pal_sz }, msac.dbg_rng());
+    }
+
     // TX partition (intra path)
     if b.is_intra != 0 && !intrabc && has_luma {
         read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
+    }
+    if trace_blk {
+        eprintln!("  CK txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
     }
 
     // is_sm flags for reconstruction (smooth mode neighbours)
@@ -3289,6 +3327,9 @@ fn decode_b(
         unsafe {
             b.data.intra.is_refmv = msac.decode_bool_adapt(cdf_m.intrabc_mode()) as u8;
         }
+        if trace_blk {
+            eprintln!("  CK ibc_mode is_refmv={} rng={}", unsafe { b.data.intra.is_refmv }, msac.dbg_rng());
+        }
 
         unsafe {
             b.data.inter.drl_idx[0] = 0;
@@ -3301,6 +3342,9 @@ fn decode_b(
                 b.data.inter.drl_idx[0] += 1;
             }
         }
+        if trace_blk {
+            eprintln!("  CK ibc_drl drl={} maxbits={} rng={}", unsafe { b.data.inter.drl_idx[0] }, fi.max_bvp_drl_bits, msac.dbg_rng());
+        }
 
         let is_refmv = unsafe { b.data.intra.is_refmv };
         unsafe {
@@ -3310,6 +3354,9 @@ fn decode_b(
             unsafe {
                 b.data.intra.is_qpel = msac.decode_bool_adapt(cdf_m.intrabc_precision()) as u8;
             }
+        }
+        if trace_blk {
+            eprintln!("  CK ibc_qpel is_qpel={} fim={} rng={}", unsafe { b.data.intra.is_qpel }, fi.force_integer_mv, msac.dbg_rng());
         }
 
         // IntraBC MV residual
@@ -3325,10 +3372,16 @@ fn decode_b(
                 }
                 b.data.intra.intrabc_mv = mv;
             }
+            if trace_blk {
+                eprintln!("  CK ibc_mv mvy={} mvx={} prec={} rng={}", unsafe { b.data.intra.intrabc_mv.c.y }, unsafe { b.data.intra.intrabc_mv.c.x }, mv_prec, msac.dbg_rng());
+            }
         }
 
         // TX partition for IntraBC
         read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
+        if trace_blk {
+            eprintln!("  CK ibc_txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
+        }
 
         // morph_pred for IntraBC
         unsafe {
@@ -3351,6 +3404,9 @@ fn decode_b(
             }
         }
         let morph_pred = unsafe { b.data.intra.morph_pred };
+        if trace_blk {
+            eprintln!("  CK ibc_morph morph={} rng={}", morph_pred, msac.dbg_rng());
+        }
 
         // IntraBC context write-back
         if has_luma {
@@ -4418,12 +4474,21 @@ fn decode_b(
     // Mirrors the luma path of `dav2d_recon_b` (recon_tmpl.c:3292-3478) plus
     // `recon_b_luma_tx` (recon_tmpl.c:2443-2675), followed by the chroma path
     // (recon_tmpl.c:3482-3942). Inter, IntraBC and palette are NOT handled here.
+    if trace_blk {
+        eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
+    }
     if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 && b.intrabc == 0 {
         if has_luma {
             recon_b_intra_luma(recon, msac, cdf_m, a, l, &b, bx, by, bx4, by4, fi)?;
         }
+        if trace_blk {
+            eprintln!("  CK post_luma_recon rng={}", msac.dbg_rng());
+        }
         if has_chroma {
             recon_b_intra_chroma(recon, msac, cdf_m, a, l, &b, cbx, cby, cbs, fi)?;
+        }
+        if trace_blk {
+            eprintln!("  CK post_chroma_recon rng={}", msac.dbg_rng());
         }
     }
 
@@ -5083,6 +5148,11 @@ fn recon_b_intra_chroma(
                 }
                 tu_txtp[i][pl] = txtp;
                 tu_eob[i][pl] = eob as i16;
+
+                if std::env::var("RAV2D_CTX").is_ok() {
+                    eprintln!("CHROMATX cby={} cbx={} pl={} i={} uvtx={} txtp={} eob={} uvmode={} uhascf={} rng={}",
+                        cby, cbx, pl, i, uvtx, txtp & 0xff, eob, uv_mode, u_has_cf, msac.dbg_rng());
+                }
 
                 let aw = imin(ctw4, 64 - (cbx4 + x as usize) as i32).max(0) as usize;
                 let lh = imin(cth4, 64 - (cby4 + y as usize) as i32).max(0) as usize;
@@ -5815,6 +5885,17 @@ fn recon_b_luma_tx(
         let pred_angle = angle_eff | intra_flags;
         let max_w = 4 * fi.bw - 4 * bx;
         let max_h = 4 * fi.bh - 4 * by;
+        if std::env::var("RAV2D_PRED").map(|s| {
+            let mut it = s.split(',');
+            it.next().and_then(|v| v.parse::<i32>().ok()) == Some(by)
+                && it.next().and_then(|v| v.parse::<i32>().ok()) == Some(bx)
+        }).unwrap_or(false) {
+            let topo = edge_o;
+            eprintln!("PRED y={} x={} m={} tw={} th={} mrl={} edge_top={:?} edge_left={:?}",
+                by, bx, m, tw, th, mrl_idx,
+                &recon.edge[topo+1..topo+1+tw.min(8)],
+                (1..=th.min(8)).map(|i| recon.edge[topo - i]).collect::<Vec<_>>());
+        }
         dispatch_ipred(
             m,
             recon.dst_y,
@@ -5829,6 +5910,14 @@ fn recon_b_luma_tx(
             max_h,
             &recon.frame.ibp_weights,
         );
+        if std::env::var("RAV2D_PRED").map(|s| {
+            let mut it = s.split(',');
+            it.next().and_then(|v| v.parse::<i32>().ok()) == Some(by)
+                && it.next().and_then(|v| v.parse::<i32>().ok()) == Some(bx)
+        }).unwrap_or(false) {
+            let p: Vec<u8> = (0..tw.min(8)).map(|i| recon.dst_y[dst_off + i]).collect();
+            eprintln!("PRED y={} x={} predrow0={:?}", by, bx, p);
+        }
     }
 
     // --- residual add (recon_tmpl.c:2608-2667) -----------------------------
@@ -5906,6 +5995,24 @@ fn recon_b_luma_tx(
         }
     }
 
+    if std::env::var("RAV2D_TRACE").is_ok() {
+        let mut sum: u64 = 0;
+        let mut first = [0u8; 8];
+        for yy in 0..th.min(64) {
+            for xx in 0..tw.min(64) {
+                let p = recon.dst_y[dst_off + yy * stride + xx];
+                sum = sum.wrapping_add(p as u64).wrapping_mul(31);
+            }
+        }
+        for (i, fv) in first.iter_mut().enumerate() {
+            *fv = recon.dst_y[dst_off + i.min(tw - 1)];
+        }
+        eprintln!(
+            "LUMATX y={} x={} tx={} txtp={} eob={} ymode={} ang={} dip={} mrl={} fsc={} sum={} first={:?}",
+            by, bx, tx, txtp & 0xff, eob, y_mode, intra.y_angle as i32, intra.dip as i32 - 1, intra.mrl_index, b.fsc, sum, first
+        );
+    }
+
     let _ = orig_y_mode; // C restores b->y_mode; we never mutated b.
     Ok(())
 }
@@ -5935,8 +6042,8 @@ fn dispatch_ipred(
         _ if m == DC_128_PRED => ipred_dc_128(d, stride, w, h),
         _ if m == TOP_DC_PRED => ipred_dc_top(d, stride, edge, edge_o, w, h, angle),
         _ if m == LEFT_DC_PRED => ipred_dc_left(d, stride, edge, edge_o, w, h, angle),
-        2 /* HorPred */ => ipred_h(d, stride, edge, edge_o, w, h),
-        1 /* VertPred */ => ipred_v(d, stride, edge, edge_o, w, h),
+        2 /* HorPred */ => ipred_h(d, stride, edge, edge_o, w, h, angle),
+        1 /* VertPred */ => ipred_v(d, stride, edge, edge_o, w, h, angle),
         12 /* PaethPred */ => ipred_paeth(d, stride, edge, edge_o, w, h),
         9 /* SmoothPred */ => ipred_smooth(d, stride, edge, edge_o, w, h),
         10 /* SmoothVPred */ => ipred_smooth_v(d, stride, edge, edge_o, w, h),
@@ -5978,6 +6085,13 @@ pub fn decode_sb(
 ) -> Result<(), ()> {
     let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
     assert!(bs != BlockSize::Invalid);
+
+    if std::env::var("RAV2D_TRACE_SB").is_ok() {
+        eprintln!(
+            "SB y={} x={} bs={} lbs={} cbs={} ireg={} dir={} rng={}",
+            *by, *bx, bs as i32, lbs as i32, cbs as i32, *intra_region, *dir_ptr, msac.dbg_rng()
+        );
+    }
 
     let b_dim = &BLOCK_DIMENSIONS[bs as u8 as usize];
     let bw4 = b_dim[0] as i32;

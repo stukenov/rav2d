@@ -465,3 +465,21 @@ fn intra_frame0_sweep() {
     }
     eprintln!("\n=== intra frame-0 sweep ===\n{}", summary.join("\n"));
 }
+
+/// Debug helper: decode one clip (env CLIP) with both decoders so RAV2D_TRACE
+/// emits matched LUMATX/CHROMATX traces to stderr.
+#[test]
+#[ignore = "debug trace harness"]
+fn trace_clip() {
+    let clip = std::env::var("CLIP").unwrap_or_else(|_| "avm-v14.1.0-bus.64x64.l5.lossless.obu".into());
+    let path = media(&clip);
+    let which = std::env::var("WHICH").unwrap_or_else(|_| "both".into());
+    if which == "dav2d" || which == "both" {
+        eprintln!("@@@DAV2D@@@");
+        let _ = dav2d_decode(&path);
+    }
+    if which == "rav2d" || which == "both" {
+        eprintln!("@@@RAV2D@@@");
+        let _ = rav2d_decode(&path);
+    }
+}

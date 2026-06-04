@@ -483,7 +483,30 @@ pub fn ipred_dc(
     }
 }
 
-pub fn ipred_v(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, width: usize, height: usize) {
+pub fn ipred_v(
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    width: usize,
+    height: usize,
+    angle: i32,
+) {
+    // multi-reference-line averaging (ipred_tmpl.c:251-268).
+    if angle & ANGLE_MULTI_MRL_FLAG != 0 {
+        let e_stride = (width + height) * 2 + 1;
+        for x in 0..width {
+            let top = tl[o + 1 + x] as i32;
+            let top2 = tl[o + 1 + e_stride + x] as i32;
+            dst[x] = ((top + top2 + 1) >> 1) as u8;
+        }
+        let mut off = stride;
+        for _ in 1..height {
+            dst.copy_within(0..width, off);
+            off += stride;
+        }
+        return;
+    }
     let mut off = 0;
     for _ in 0..height {
         dst[off..off + width].copy_from_slice(&tl[o + 1..o + 1 + width]);
@@ -491,7 +514,30 @@ pub fn ipred_v(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, width: usize,
     }
 }
 
-pub fn ipred_h(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, width: usize, height: usize) {
+pub fn ipred_h(
+    dst: &mut [u8],
+    stride: usize,
+    tl: &[u8],
+    o: usize,
+    width: usize,
+    height: usize,
+    angle: i32,
+) {
+    // multi-reference-line averaging (ipred_tmpl.c:282-295).
+    if angle & ANGLE_MULTI_MRL_FLAG != 0 {
+        let e_stride = (width + height) * 2 + 1;
+        let mut off = 0;
+        for y in 0..height {
+            let left = tl[o - 1 - y] as i32;
+            let left2 = tl[o + e_stride - 1 - y] as i32;
+            let v = ((left + left2 + 1) >> 1) as u8;
+            for x in 0..width {
+                dst[off + x] = v;
+            }
+            off += stride;
+        }
+        return;
+    }
     let mut off = 0;
     for y in 0..height {
         let v = tl[o - 1 - y];
@@ -2262,7 +2308,7 @@ mod tests {
     fn test_ipred_v_basic() {
         let tl = make_tl_buf(4, 4, 8);
         let mut dst = [0u8; 16];
-        ipred_v(&mut dst, 4, &tl, 8, 4, 4);
+        ipred_v(&mut dst, 4, &tl, 8, 4, 4, 0);
         for y in 1..4 {
             for x in 0..4 {
                 assert_eq!(dst[y * 4 + x], dst[x]);
@@ -2274,7 +2320,7 @@ mod tests {
     fn test_ipred_h_basic() {
         let tl = make_tl_buf(4, 4, 8);
         let mut dst = [0u8; 16];
-        ipred_h(&mut dst, 4, &tl, 8, 4, 4);
+        ipred_h(&mut dst, 4, &tl, 8, 4, 4, 0);
         for y in 0..4 {
             let v = dst[y * 4];
             for x in 1..4 {
