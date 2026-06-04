@@ -1994,6 +1994,14 @@ pub struct ReconScratch {
     /// back to derive `midx` for UV mode decoding (decode.c:3425-3441).
     pub luma_intra_dir_mode_map: [u8; 256],
     pub luma_fsc_map: [u8; 256],
+    /// Chroma coefficient / metadata storage used to split the chroma decode of
+    /// a >64px block into a coef-read phase (with the first luma 64x64) and a
+    /// recon phase (with the last), mirroring the `cbs_stage` mechanism in
+    /// `dav2d_recon_b`. `cf_uv` holds U then V coefficients (n_tu*16 each).
+    pub chroma_cf: Vec<i32>,
+    pub chroma_txtp: [[u16; 2]; 256],
+    pub chroma_eob: [[i16; 2]; 256],
+    pub chroma_u_has_cf: i32,
 }
 
 impl Default for ReconScratch {
@@ -2002,6 +2010,10 @@ impl Default for ReconScratch {
             is_coded: [[0u64; 64]; 2],
             luma_intra_dir_mode_map: [0u8; 256],
             luma_fsc_map: [0u8; 256],
+            chroma_cf: Vec::new(),
+            chroma_txtp: [[0u16; 2]; 256],
+            chroma_eob: [[-1i16; 2]; 256],
+            chroma_u_has_cf: 0,
         }
     }
 }
@@ -3023,7 +3035,7 @@ fn decode_b(
     // These are used by intrabc, FSC, MRL, multi_mrl, DIP, morph_pred.
     // boff[i] = -1 means unavailable.
     let have_top_in_sb = (by & (fi.sb_step - 1)) != 0;
-    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_boff) =
+    let (nb_fsc, nb_mrl, nb_multi_mrl, nb_intrabc, nb_midx, nb_mvprec, nb_motion_mode, nb_morph, nb_boff) =
         if has_luma {
             let mut fsc = [0u8; 2];
             let mut mrl = [0u8; 2];
@@ -3032,6 +3044,7 @@ fn decode_b(
             let mut mid = [0xffu8; 2];
             let mut mvp = [0u8; 2];
             let mut mm = [0u8; 2];
+            let mut mp = [0u8; 2];
             let mut boff = [-1i32; 2];
             let mut idx = 0usize;
 
@@ -3044,6 +3057,7 @@ fn decode_b(
                 mid[0] = l.midx[off];
                 mvp[0] = l.mvprec[off];
                 mm[0] = l.motion_mode[off];
+                mp[0] = l.morph_pred[off];
                 boff[0] = off as i32;
                 idx += 1;
             }
@@ -3056,6 +3070,7 @@ fn decode_b(
                 mid[idx] = a.midx[off];
                 mvp[idx] = a.mvprec[off];
                 mm[idx] = a.motion_mode[off];
+                mp[idx] = a.morph_pred[off];
                 boff[idx] = off as i32;
                 idx += 1;
             }
@@ -3067,6 +3082,7 @@ fn decode_b(
                 mid[idx] = l.midx[by4];
                 mvp[idx] = l.mvprec[by4];
                 mm[idx] = l.motion_mode[by4];
+                mp[idx] = l.morph_pred[by4];
                 boff[idx] = by4 as i32;
                 idx += 1;
             }
@@ -3078,6 +3094,7 @@ fn decode_b(
                 mid[idx] = a.midx[bx4];
                 mvp[idx] = a.mvprec[bx4];
                 mm[idx] = a.motion_mode[bx4];
+                mp[idx] = a.morph_pred[bx4];
                 boff[idx] = bx4 as i32;
                 if idx == 0 {
                     fsc[1] = fsc[0];
@@ -3087,9 +3104,10 @@ fn decode_b(
                     mid[1] = mid[0];
                     mvp[1] = mvp[0];
                     mm[1] = mm[0];
+                    mp[1] = mp[0];
                 }
             }
-            (fsc, mrl, mmrl, ibc, mid, mvp, mm, boff)
+            (fsc, mrl, mmrl, ibc, mid, mvp, mm, mp, boff)
         } else {
             (
                 [0u8; 2],
@@ -3097,6 +3115,7 @@ fn decode_b(
                 [0u8; 2],
                 [0u8; 2],
                 [0xffu8; 2],
+                [0u8; 2],
                 [0u8; 2],
                 [0u8; 2],
                 [-1i32; 2],
@@ -3913,27 +3932,13 @@ fn decode_b(
             }
         }
 
-        // TX partition for IntraBC
-        read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
-        if trace_blk {
-            eprintln!("  CK ibc_txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
-        }
-
-        // morph_pred for IntraBC
+        // morph_pred for IntraBC (read BEFORE the tx partition, decode.c:2398).
         unsafe {
             b.data.intra.morph_pred = 0;
         }
         if !fi.is_inter_or_switch && fi.bawp && fi.allow_screen_content_tools {
-            let nb_mp_0 = if have_left {
-                l.morph_pred[(by4 + bh4 as usize).saturating_sub(1)]
-            } else {
-                0
-            };
-            let nb_mp_1 = if have_top {
-                a.morph_pred[(bx4 + bw4 as usize).saturating_sub(1)]
-            } else {
-                0
-            };
+            let nb_mp_0 = if nb_boff[0] != -1 { nb_morph[0] } else { 0 };
+            let nb_mp_1 = if nb_boff[1] != -1 { nb_morph[1] } else { 0 };
             let ctx = nb_mp_0 as usize + nb_mp_1 as usize;
             unsafe {
                 b.data.intra.morph_pred = msac.decode_bool_adapt(cdf_m.morph_pred(ctx)) as u8;
@@ -3942,6 +3947,12 @@ fn decode_b(
         let morph_pred = unsafe { b.data.intra.morph_pred };
         if trace_blk {
             eprintln!("  CK ibc_morph morph={} rng={}", morph_pred, msac.dbg_rng());
+        }
+
+        // TX partition for IntraBC
+        read_tx_part(msac, cdf_m, &mut b, bs, fi.any_lossless, fi.txfm_switchable);
+        if trace_blk {
+            eprintln!("  CK ibc_txpart tx_part={} tx_size_ll={} rng={}", b.tx_part, b.tx_size_ll, msac.dbg_rng());
         }
 
         // IntraBC context write-back
@@ -5028,15 +5039,9 @@ fn decode_b(
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
     }
     if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 && b.intrabc == 0 {
-        if has_luma {
-            recon_b_intra_luma(recon, msac, cdf_m, a, l, &b, bx, by, bx4, by4, fi)?;
-        }
-        if trace_blk {
-            eprintln!("  CK post_luma_recon rng={}", msac.dbg_rng());
-        }
-        if has_chroma {
-            recon_b_intra_chroma(recon, msac, cdf_m, a, l, &b, cbx, cby, cbs, fi)?;
-        }
+        recon_b_intra(
+            recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
+        )?;
         if trace_blk {
             eprintln!("  CK post_chroma_recon rng={}", msac.dbg_rng());
         }
@@ -5056,6 +5061,161 @@ fn decode_b(
     }
 
     Ok(b)
+}
+
+/// Intra reconstruction entry point mirroring `dav2d_recon_b` (recon_tmpl.c:3068).
+///
+/// Blocks larger than 64px in either dimension (`imax(bw4,bh4) > 16`) are not
+/// reconstructed as a single unit: they are split into 64x64 (or 128x128 for
+/// 256px) sub-blocks, each decoding its own luma transform(s). The chroma is
+/// decoded once — its coefficients are read with the first luma sub-block and
+/// the pixels reconstructed with the last (the `cbs_stage` mechanism), so the
+/// MSAC ordering matches the C decoder. <=64px blocks take the direct path.
+#[allow(clippy::too_many_arguments)]
+fn recon_b_intra(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    bx: i32,
+    by: i32,
+    cbx: i32,
+    cby: i32,
+    lbs: BlockSize,
+    cbs: BlockSize,
+    has_luma: bool,
+    has_chroma: bool,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
+    let b_dim = &BLOCK_DIMENSIONS[bs as u8 as usize];
+    let bw4 = b_dim[0] as i32;
+    let bh4 = b_dim[1] as i32;
+
+    if imax(bw4, bh4) > 16 {
+        // Split into 64x64 (or 128x128) sub-blocks. csplit[bs - 128x128][ss].
+        const CSPLIT: [[BlockSize; 3]; 3] = [
+            // BS_128x128
+            [BlockSize::Bs64x64, BlockSize::Bs128x64, BlockSize::Bs128x128],
+            // BS_128x64
+            [BlockSize::Bs64x64, BlockSize::Bs64x64, BlockSize::Bs128x64],
+            // BS_64x128
+            [BlockSize::Bs64x64, BlockSize::Bs64x64, BlockSize::Bs64x128],
+        ];
+        let ss_hor = fi.ss_hor;
+        let ss_ver = fi.ss_ver;
+        let y_end = imin(by + bh4, fi.bh);
+        let x_end = imin(bx + bw4, fi.bw);
+        let (step, lbs2, cbs2i) = if imax(bw4, bh4) == 64 {
+            (
+                32,
+                if lbs == BlockSize::Invalid { BlockSize::Invalid } else { BlockSize::Bs128x128 },
+                if cbs == BlockSize::Invalid { BlockSize::Invalid } else { BlockSize::Bs128x128 },
+            )
+        } else {
+            let csplit_row = (bs as i32 - BlockSize::Bs128x128 as i32) as usize;
+            let csi = (ss_hor + ss_ver) as usize;
+            (
+                16,
+                if lbs == BlockSize::Invalid { BlockSize::Invalid } else { BlockSize::Bs64x64 },
+                if cbs == BlockSize::Invalid { BlockSize::Invalid } else { CSPLIT[csplit_row][csi] },
+            )
+        };
+
+        let mut sub_by = by;
+        let mut sub_cby = cby;
+        let mut yy = 0;
+        while sub_by < y_end {
+            let mut sub_bx = bx;
+            let mut sub_cbx = cbx;
+            let mut xx = 0;
+            while sub_bx < x_end {
+                // cbs2[0] = coef-read stage, cbs2[1] = recon stage (recon_tmpl.c:3111).
+                let (read_cbs, recon_cbs) = if step == 32 {
+                    (cbs2i, cbs2i)
+                } else {
+                    let read = if ((xx & ss_hor) | (yy & ss_ver)) == 0 {
+                        cbs2i
+                    } else {
+                        BlockSize::Invalid
+                    };
+                    let recon = if (ss_hor == 0 || sub_bx + step >= x_end)
+                        && (ss_ver == 0 || sub_by + step >= y_end)
+                    {
+                        cbs2i
+                    } else {
+                        BlockSize::Invalid
+                    };
+                    (read, recon)
+                };
+
+                if imax(
+                    BLOCK_DIMENSIONS[lbs2 as u8 as usize][0] as i32,
+                    BLOCK_DIMENSIONS[lbs2 as u8 as usize][1] as i32,
+                ) > 16
+                {
+                    // 256px case: recurse one more level (lbs2 == 128x128).
+                    recon_b_intra(
+                        recon, msac, cdf_m, a, l, b, sub_bx, sub_by, sub_cbx, sub_cby, lbs2,
+                        if read_cbs != BlockSize::Invalid { read_cbs } else { recon_cbs },
+                        lbs2 != BlockSize::Invalid,
+                        read_cbs != BlockSize::Invalid || recon_cbs != BlockSize::Invalid,
+                        fi,
+                    )?;
+                } else {
+                    // Luma 64x64 sub-block: the tx walk uses the sub-block size,
+                    // but `b.bs` (passed to coef decode) stays the full block.
+                    if lbs2 != BlockSize::Invalid {
+                        recon_b_intra_luma_geom(
+                            recon, msac, cdf_m, a, l, b, sub_bx, sub_by, lbs2 as usize, fi,
+                        )?;
+                    }
+                    // Chroma: read phase with the first sub-block, recon with the last.
+                    let phase = match (read_cbs != BlockSize::Invalid, recon_cbs != BlockSize::Invalid) {
+                        (true, true) => Some(ChromaPhase::Both),
+                        (true, false) => Some(ChromaPhase::ReadOnly),
+                        (false, true) => Some(ChromaPhase::ReconOnly),
+                        (false, false) => None,
+                    };
+                    if let Some(ph) = phase {
+                        let ccbs = if read_cbs != BlockSize::Invalid { read_cbs } else { recon_cbs };
+                        recon_b_intra_chroma_phase(
+                            recon, msac, cdf_m, a, l, b, sub_cbx, sub_cby, ccbs, fi, ph,
+                        )?;
+                    }
+                }
+
+                sub_bx += step;
+                if step == 32 {
+                    sub_cbx += step;
+                } else if (xx & ss_hor) == ss_hor {
+                    sub_cbx += step << ss_hor;
+                }
+                xx += 1;
+            }
+            sub_by += step;
+            if step == 32 {
+                sub_cby += step;
+            } else if (yy & ss_ver) == ss_ver {
+                sub_cby += step << ss_ver;
+            }
+            yy += 1;
+        }
+        return Ok(());
+    }
+
+    // Leaf: ordinary <=64px block.
+    if has_luma {
+        let bx4 = (bx & 63) as usize;
+        let by4 = (by & 63) as usize;
+        recon_b_intra_luma(recon, msac, cdf_m, a, l, b, bx, by, bx4, by4, fi)?;
+    }
+    if has_chroma {
+        recon_b_intra_chroma(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, fi)?;
+    }
+    Ok(())
 }
 
 /// Reconstruct the luma plane of an intra (non-IntraBC) block at the decode_b
@@ -5085,7 +5245,27 @@ fn recon_b_intra_luma(
     _by4: usize,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
-    let bs = b.bs as usize;
+    recon_b_intra_luma_geom(recon, msac, cdf_m, a, l, b, bx, by, b.bs as usize, fi)
+}
+
+/// As `recon_b_intra_luma`, but with the transform-walk geometry block size
+/// given explicitly. For >64px blocks split into 64x64 sub-blocks the tx walk
+/// uses the sub-block size while coefficient decoding still uses the full
+/// `b.bs` (mirroring `dav2d_recon_b`, where `b->bs` is unchanged by the split).
+#[allow(clippy::too_many_arguments)]
+fn recon_b_intra_luma_geom(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    bx: i32,
+    by: i32,
+    geom_bs: usize,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    let bs = geom_bs;
     let seg_id = b.seg_id as usize;
     let lossless = recon.frame.seg_lossless[seg_id] != 0;
 
@@ -5551,6 +5731,18 @@ fn recon_b_intra_luma(
 /// then runs prediction + inverse transform in a second pass; CfL prediction is
 /// applied once for the whole block between the two passes. We mirror that order.
 #[allow(clippy::too_many_arguments)]
+/// Which part of the chroma decode to perform. For blocks split into 64x64
+/// luma sub-blocks (`imax(bw4,bh4) > 16`), the chroma coefficient read happens
+/// with the first sub-block and the pixel reconstruction with the last, so the
+/// MSAC ordering matches `dav2d_recon_b`'s `cbs_stage` mechanism. For ordinary
+/// (<=64px) blocks both phases run in a single `Both` call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChromaPhase {
+    Both,
+    ReadOnly,
+    ReconOnly,
+}
+
 fn recon_b_intra_chroma(
     recon: &mut ReconCtx,
     msac: &mut MsacContext,
@@ -5562,6 +5754,23 @@ fn recon_b_intra_chroma(
     cby: i32,
     cbs: BlockSize,
     fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    recon_b_intra_chroma_phase(recon, msac, cdf_m, a, l, b, cbx, cby, cbs, fi, ChromaPhase::Both)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recon_b_intra_chroma_phase(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    cbx: i32,
+    cby: i32,
+    cbs: BlockSize,
+    fi: &SbFrameInfo,
+    phase: ChromaPhase,
 ) -> Result<(), ()> {
     use crate::levels::{CFL_PRED, IntraPredMode};
 
@@ -5629,6 +5838,7 @@ fn recon_b_intra_chroma(
 
     // ---- decode coefficients for both planes (recon_tmpl.c:3543-3580) -------
     let mut u_has_cf = 0i32;
+    if phase != ChromaPhase::ReconOnly {
     for pl in 0..2 {
         let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
         let mut y = 0;
@@ -5720,6 +5930,28 @@ fn recon_b_intra_chroma(
             y += txh;
         }
     }
+    } // end coef-read phase
+
+    // Stash decoded coefficients for the deferred recon phase, or restore them.
+    if phase == ChromaPhase::ReadOnly {
+        let need = n_tu * 16 * 2;
+        if recon.scratch.chroma_cf.len() < need {
+            recon.scratch.chroma_cf.resize(need, 0);
+        }
+        recon.scratch.chroma_cf[..n_tu * 16].copy_from_slice(cf_u);
+        recon.scratch.chroma_cf[n_tu * 16..need].copy_from_slice(cf_v);
+        recon.scratch.chroma_txtp = tu_txtp;
+        recon.scratch.chroma_eob = tu_eob;
+        recon.scratch.chroma_u_has_cf = u_has_cf;
+        return Ok(());
+    } else if phase == ChromaPhase::ReconOnly {
+        cf_u.copy_from_slice(&recon.scratch.chroma_cf[..n_tu * 16]);
+        cf_v.copy_from_slice(&recon.scratch.chroma_cf[n_tu * 16..n_tu * 16 * 2]);
+        tu_txtp = recon.scratch.chroma_txtp;
+        tu_eob = recon.scratch.chroma_eob;
+        u_has_cf = recon.scratch.chroma_u_has_cf;
+    }
+    let _ = u_has_cf;
 
     // ---- CfL prediction (recon_tmpl.c:3588-3590, cfl()) ---------------------
     if uv_mode == CFL_PRED {
