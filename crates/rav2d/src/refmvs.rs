@@ -2961,6 +2961,13 @@ pub fn init_frame(
         rf.n_blocks = n_blocks * rf.sbsz;
     }
 
+    // Store each reference's temporal MV grid (dav2d `rf->rp_ref[n]`). load_tmvs
+    // projects from these; an absent ref keeps an empty grid and is excluded from
+    // the mfmv selection below (its `rp_ref[n].is_none()` marks ref_done).
+    for n in 0..7 {
+        rf.rp_ref[n] = rp_ref[n].clone().unwrap_or_default();
+    }
+
     let poc = frm_hdr.frame_offset as i32;
     let nbits = seq_hdr.order_hint_n_bits as i32;
     let n_refs = frm_hdr.n_ref_frames as usize;

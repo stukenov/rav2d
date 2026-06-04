@@ -2134,9 +2134,9 @@ pub fn decode_tile_sbrow_entropy(
     let mut sb_seg_err = false;
 
     // Reference-MV per-superblock-row init (decode.c:4456). Sets up the above-row
-    // `ra` slice and tile bounds; needed for IntraBC block-vector prediction.
-    // Only maintained when IntraBC is allowed (otherwise `rf` is uninitialised).
-    let refmvs_active = fi.allow_intrabc;
+    // `ra` slice and tile bounds; needed for IntraBC and inter block-MV
+    // prediction. Maintained when IntraBC is allowed or the frame is inter.
+    let refmvs_active = fi.allow_intrabc || fi.is_inter_or_switch;
     if refmvs_active {
         crate::refmvs::tile_sbrow_init(
             rt,
@@ -2429,6 +2429,13 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         sbh,
         rf,
         inloop_filters,
+        refp,
+        mvs,
+        ref_mvs,
+        refrefpoc,
+        refcnt,
+        refpoc,
+        svc,
         ..
     } = fc;
     let fc_sb256h = *sb256h;
@@ -2551,22 +2558,65 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let mut l = BlockContext::default();
 
     // Initialise the reference-MV frame state (`f->rf`) and a per-tile working
-    // Tile. Only the spatial grid / above-row / banks are needed for IntraBC on
-    // an intra frame; temporal candidates are unused (no ref frames).
+    // Tile. For IntraBC on an intra frame only the spatial grid / above-row /
+    // banks are needed (no temporal candidates). For inter frames the reference
+    // temporal MVs are wired and (when use_ref_frame_mvs) projected per sbrow.
     let allow_intrabc = frame_hdr.allow_intrabc != 0;
-    if allow_intrabc {
-        let no_refs: [Option<Vec<refmvs::TemporalBlock>>; 7] = Default::default();
+    let is_inter_or_switch = frame_hdr.is_inter_or_switch();
+    let refmvs_active = allow_intrabc || is_inter_or_switch;
+    if refmvs_active {
         refmvs::init_frame(
             rf,
             seq_hdr,
             frame_hdr,
-            &[0u8; 7],
-            &[[0u8; 7]; 7],
-            &[0u8; 7],
-            &no_refs,
+            refpoc,
+            refrefpoc,
+            refcnt,
+            ref_mvs,
             false,
             false,
         );
+    }
+
+    // Allocate the current-frame temporal MV grid (decode.c:5541-5547) when
+    // ref_frame_mvs is enabled, sized for the whole frame; the per-block splat
+    // (splat_oneref_mv's `t_dst`) writes decoded MVs into `rf.rp` so later frames
+    // can reference them. `rf.rp` is dav2d's `f->mvs` (the same buffer).
+    let _ = (&mvs, &refp, &svc);
+    if refmvs_active && seq_hdr.ref_frame_mvs {
+        let needed = (fc_sb256h as usize) * 32 * ((b4_stride_v >> 1) as usize);
+        if rf.rp.len() != needed {
+            rf.rp = vec![refmvs::TemporalBlock::default(); needed];
+        } else {
+            rf.rp.fill(refmvs::TemporalBlock::default());
+        }
+    } else {
+        rf.rp.clear();
+    }
+
+    // Project reference temporal MVs into `rf.rp_proj` for every superblock row
+    // up front (decode.c:5151-5154 runs load_tmvs per sbrow before the tile-col
+    // decode; the projection reads only reference data so doing all rows now is
+    // equivalent for the single-thread path).
+    if is_inter_or_switch && frame_hdr.use_ref_frame_mvs != 0 {
+        let mut by = 0i32;
+        while by < bh {
+            let by_end = (by + sb_step) >> 1;
+            refmvs::load_tmvs(
+                rf,
+                0,
+                0,
+                bw >> 1,
+                by >> 1,
+                by_end,
+                seq_hdr.mv_traj,
+                frame_hdr.tip.frame_mode,
+                seq_hdr.tip_hole_fill,
+                frame_hdr.tmvp_sample_step as i32,
+                frame_hdr.n_ref_frames as i32,
+            );
+            by += sb_step;
+        }
     }
     let rf_ref: &refmvs::Frame = &*rf;
     let mut rt = refmvs::Tile {
@@ -3187,6 +3237,18 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     let is_inter_or_switch = frame_hdr.is_inter_or_switch();
     let allow_intrabc = frame_hdr.allow_intrabc != 0;
 
+    if std::env::var("RAV2D_FINFO").is_ok() {
+        eprintln!(
+            "FINFO type={:?} poc={} pri_ref={} n_ref={} refidx={:?} use_rfm={} refresh={:#x} switchable_comp={} skip_mode={} warp={} masked_comp={} motion_modes={:#x} tip={} show_imm={} disable_cdf={} subpel={:?}",
+            frame_hdr.frame_type, frame_hdr.frame_offset, frame_hdr.primary_ref_frame,
+            frame_hdr.n_ref_frames, frame_hdr.refidx, frame_hdr.use_ref_frame_mvs,
+            frame_hdr.refresh_frame_flags, frame_hdr.switchable_comp_refs,
+            frame_hdr.skip_mode_enabled, frame_hdr.warp_motion, seq_hdr.masked_compound,
+            frame_hdr.motion_modes, frame_hdr.tip.frame_mode, frame_hdr.show_immediate,
+            frame_hdr.disable_cdf_update, frame_hdr.subpel_filter_mode,
+        );
+    }
+
     // ---- Reference-frame setup (decode.c:5406-5443) ------------------------
     // Validate each signalled reference, share its picture into `fc.refp[i]`,
     // and compute the per-ref scaling / global-warp-allowed flags. Single-ref
@@ -3367,10 +3429,10 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
                 fc.prev_segmap.clone()
             };
             if is_inter_or_switch {
-                c.refs[i].refmvs = if fc.mvs.is_empty() {
+                c.refs[i].refmvs = if fc.rf.rp.is_empty() {
                     None
                 } else {
-                    Some(fc.mvs.clone())
+                    Some(fc.rf.rp.clone())
                 };
             }
             c.refs[i].ccsomap = cur_ccsomap_arc.clone();
