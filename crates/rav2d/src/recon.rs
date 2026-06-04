@@ -624,6 +624,10 @@ pub fn decode_coefs(
     let chroma = p.plane != 0;
     let cf_max = !((!127u32) << p.bitdepth) as i32;
 
+    if std::env::var("RAV2D_CF").is_ok() {
+        eprintln!("CF pl={} ENTER tx={} rng={}", p.plane, p.tx, msac.dbg_rng());
+    }
+
     // skip detection
     let sctx = if p.fsc && !chroma && p.seq_fsc {
         9
@@ -631,11 +635,20 @@ pub fn decode_coefs(
         get_skip_ctx(t_dim, p.bs, a, l, p.plane, p.u_has_cf, p.ss_hor, p.ss_ver) as usize
     };
     let all_skip = if p.plane == 2 {
+        if std::env::var("RAV2D_CF").is_ok() {
+            eprintln!("CF pl=2 SKIPCDF cdf0={} rng={}", coef.skip_v(sctx)[0], msac.dbg_rng());
+        }
         msac.decode_bool_adapt(coef.skip_v(sctx))
     } else {
         let i = if !p.intra || p.fsc { 1 } else { 0 };
+        if std::env::var("RAV2D_CF").is_ok() {
+            eprintln!("CF pl={} SKIPCDF i={} txctx={} sctx={} cdf0={} rng={}", p.plane, i, t_dim.ctx, sctx, coef.skip(i, t_dim.ctx as usize, sctx)[0], msac.dbg_rng());
+        }
         msac.decode_bool_adapt(coef.skip(i, t_dim.ctx as usize, sctx))
     };
+    if std::env::var("RAV2D_CF").is_ok() {
+        eprintln!("CF pl={} tx={} sctx={} all_skip={} rng={}", p.plane, p.tx, sctx, all_skip, msac.dbg_rng());
+    }
     if all_skip != 0 {
         *res_ctx = 0x40;
         *txtp = if !chroma && p.fsc {
@@ -690,6 +703,10 @@ pub fn decode_coefs(
         if eob_bin != 0 {
             eob = (eob << eob_bin) | msac.decode_bools_bypass(eob_bin as u32) as i32;
         }
+    }
+
+    if std::env::var("RAV2D_CF").is_ok() {
+        eprintln!("CF pl={} eob={} rng={}", p.plane, eob, msac.dbg_rng());
     }
 
     // transform type selection
@@ -1413,6 +1430,9 @@ pub fn decode_coefs(
             cf[rc] = if sign != 0 { -val } else { val };
         }
 
+        if std::env::var("RAV2D_CF").is_ok() {
+            eprintln!("CF pl={} RET-fsc eob={} rng={}", p.plane, eob, msac.dbg_rng());
+        }
         *res_ctx = (cul_level.min(63) | dc_sign_level) as u8;
         return eob;
     }
@@ -1690,6 +1710,9 @@ pub fn decode_coefs(
     }
 
     if dc_tok == 0 {
+        if std::env::var("RAV2D_CF").is_ok() {
+            eprintln!("CF pl={} RET eob={} dc_tok={} rng={}", p.plane, eob, dc_tok, msac.dbg_rng());
+        }
         *res_ctx = (cul_level.min(63) | dc_sign_level) as u8;
         return eob;
     }
@@ -1745,6 +1768,9 @@ pub fn decode_coefs(
         cf[0] = if dc_sign != 0 { -dc_val } else { dc_val };
     }
 
+    if std::env::var("RAV2D_CF").is_ok() {
+        eprintln!("CF pl={} RET eob={} dc_tok={} rng={}", p.plane, eob, dc_tok, msac.dbg_rng());
+    }
     *res_ctx = (cul_level.min(63) | dc_sign_level) as u8;
     eob
 }

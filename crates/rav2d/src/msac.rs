@@ -172,6 +172,11 @@ impl<'a> MsacContext<'a> {
     }
 
     #[inline]
+    pub fn dbg_dif(&self) -> u64 {
+        self.dif
+    }
+
+    #[inline]
     fn ctx_refill(&mut self) {
         let mut c = 40 - self.cnt;
         let mut dif = self.dif;

@@ -2799,6 +2799,10 @@ fn decode_b(
         b.intrabc = 0;
         if fi.allow_intrabc && imin(bw4, bh4) < 16 && b.is_intra != 0 && intra_region == 0 {
             let ctx = (nb_intrabc[0] + nb_intrabc[1]) as usize;
+            if std::env::var("RAV2D_IBC").is_ok() {
+                let c = cdf_m.intrabc(ctx);
+                eprintln!("IBC y={} x={} ctx={} cdf0={} cdf1={} rng_in={} dif={}", by, bx, ctx, c[0], c[1], msac.dbg_rng(), msac.dbg_dif());
+            }
             b.intrabc = msac.decode_bool_adapt(cdf_m.intrabc(ctx)) as u8;
         }
     }
@@ -5105,7 +5109,7 @@ fn recon_b_intra_chroma(
                     bs: cbs as u8 as usize,
                     plane: (pl + 1) as i32,
                     intra: true,
-                    fsc: false,
+                    fsc: b.fsc != 0,
                     lossless,
                     sdp_active: false,
                     y_mode: 0,
