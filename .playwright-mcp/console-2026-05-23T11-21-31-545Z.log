@@ -1,0 +1,4 @@
+[     953ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://lemmy.ml/favicon.ico:0
+[    1005ms] [LOG] {hash: 00104729a8d3f904979ea0641c20cda68d980ab884831429fdf74159a8b2e618, nonce: 604} @ https://lemmy.ml/.within.website/x/cmd/anubis/static/js/main.mjs?cacheBuster=v1.25.0:30
+[    1665ms] [ERROR] Manifest: Line: 1, column: 1, Syntax error. @ https://lemmy.ml/manifest.webmanifest:0
+[    1900ms] [ERROR] Manifest: Line: 1, column: 1, Syntax error. @ https://lemmy.ml/manifest.webmanifest:0

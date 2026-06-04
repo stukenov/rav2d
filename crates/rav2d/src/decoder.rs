@@ -242,6 +242,7 @@ impl Decoder {
             strict_std_compliance: s.strict_std_compliance,
             output_invisible_frames: s.output_invisible_frames,
             n_passes: 1,
+            run_decode: false,
         };
 
         Ok(Self {

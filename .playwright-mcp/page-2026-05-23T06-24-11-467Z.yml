@@ -1,0 +1,30 @@
+- generic [ref=e1]:
+  - text: You have to be logged in to submit.
+  - text: Login
+  - generic [ref=e2]:
+    - table [ref=e3]:
+      - rowgroup [ref=e4]:
+        - row "username:" [ref=e5]:
+          - cell "username:" [ref=e6]
+          - cell [ref=e7]:
+            - textbox [active] [ref=e8]
+        - row "password:" [ref=e9]:
+          - cell "password:" [ref=e10]
+          - cell [ref=e11]:
+            - textbox [ref=e12]
+    - button "login" [ref=e13]
+  - link "Forgot your password?" [ref=e14] [cursor=pointer]:
+    - /url: forgot
+  - text: Create Account
+  - generic [ref=e15]:
+    - table [ref=e16]:
+      - rowgroup [ref=e17]:
+        - row "username:" [ref=e18]:
+          - cell "username:" [ref=e19]
+          - cell [ref=e20]:
+            - textbox [ref=e21]
+        - row "password:" [ref=e22]:
+          - cell "password:" [ref=e23]
+          - cell [ref=e24]:
+            - textbox [ref=e25]
+    - button "create account" [ref=e26]

@@ -325,6 +325,11 @@ pub struct DecoderContext {
     pub strict_std_compliance: bool,
     pub output_invisible_frames: bool,
     pub n_passes: i32,
+
+    /// Bring-up gate: run the single-threaded frame decode from `parse_obus`.
+    /// Off by default while reconstruction and the entropy-path bugs are being
+    /// worked through; the orchestration runs end-to-end when enabled.
+    pub run_decode: bool,
 }
 
 #[derive(Default)]

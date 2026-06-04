@@ -2697,7 +2697,13 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 if !frame_without_data && c.n_tile_data == 0 {
                     return Err(Rav2dError::InvalidData);
                 }
-                // STUB: submit frame for tile decoding, loop filtering, and output
+                // Run the single-threaded frame decode (entropy pass; recon,
+                // filters and output are wired in subsequent milestones). Gated
+                // during bring-up; errors are non-fatal so header parsing still
+                // succeeds.
+                if c.run_decode {
+                    let _ = crate::decode::submit_frame(c, 1);
+                }
                 c.frame_hdr = None;
                 c.n_tiles = 0;
             }
@@ -3412,6 +3418,7 @@ mod tests {
             strict_std_compliance: false,
             output_invisible_frames: false,
             n_passes: 1,
+            run_decode: false,
         }
     }
 
@@ -3482,6 +3489,38 @@ mod tests {
         let seq = c.seq_hdr.unwrap();
         assert_eq!(seq.max_width, 352);
         assert_eq!(seq.max_height, 288);
+    }
+
+    // M1 bring-up driver: runs the full single-threaded decode pipeline
+    // (submit_frame -> decode_frame -> decode_tile_sbrow -> decode_sb/decode_b)
+    // on a small keyframe. The orchestration executes end-to-end, but decode_b
+    // currently desyncs the entropy decoder (reads a wrong CDF slot, tripping
+    // the `count <= 32` assertion in decode_symbol_adapt). Ignored until the
+    // entropy path is validated against the C reference; run with
+    // `cargo test -- --ignored test_decode_keyframe_bringup`.
+    #[test]
+    #[ignore = "M1: decode runs end-to-end but decode_b has an entropy desync"]
+    fn test_decode_keyframe_bringup() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../dav2d/media/avm-v14.1.0-bus.64x64.l5.obu"
+        );
+        let data = std::fs::read(path).expect("Failed to read test OBU file");
+        let mut c = make_decoder_ctx();
+        c.frame_size_limit = 64 * 64;
+        c.all_layers = true;
+        c.run_decode = true;
+
+        let mut offset = 0;
+        while offset < data.len() {
+            match parse_obus(&mut c, &data[offset..]) {
+                Ok(consumed) => {
+                    assert!(consumed > 0);
+                    offset += consumed;
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     fn try_parse_obu_file(filename: &str) -> (bool, Option<(i32, i32)>) {

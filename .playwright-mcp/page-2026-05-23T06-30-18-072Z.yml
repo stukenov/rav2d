@@ -1,0 +1,731 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - 'link "Lobsters (Current traffic: 0%)" [ref=e3] [cursor=pointer]':
+      - /url: /
+    - navigation [ref=e5]:
+      - link "Active" [ref=e6] [cursor=pointer]:
+        - /url: /active
+      - link "Recent" [ref=e7] [cursor=pointer]:
+        - /url: /recent
+      - link "Comments" [ref=e8] [cursor=pointer]:
+        - /url: /comments
+      - link "Search" [ref=e9] [cursor=pointer]:
+        - /url: /search
+      - link "Login" [ref=e10] [cursor=pointer]:
+        - /url: /login
+  - generic [ref=e11]:
+    - list [ref=e12]:
+      - listitem [ref=e13]:
+        - generic [ref=e14]:
+          - link "△ 86" [ref=e16] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e17]:
+            - 'heading "Gnutella: A Protocol Outliving the World That Created It" [level=1] [ref=e18]':
+              - 'link "Gnutella: A Protocol Outliving the World That Created It" [ref=e19] [cursor=pointer]':
+                - /url: https://rickcarlino.com/notes/p2p/gnutella-explanation.html
+            - generic [ref=e20]:
+              - link "distributed" [ref=e21] [cursor=pointer]:
+                - /url: /t/distributed
+              - link "historical" [ref=e22] [cursor=pointer]:
+                - /url: /t/historical
+              - link "networking" [ref=e23] [cursor=pointer]:
+                - /url: /t/networking
+            - link "rickcarlino.com" [ref=e24] [cursor=pointer]:
+              - /url: /domains/rickcarlino.com
+            - generic [ref=e25]:
+              - link [ref=e26] [cursor=pointer]:
+                - /url: /~rickcarlino
+                - img [ref=e27]
+              - text: authored by
+              - link "rickcarlino" [ref=e28] [cursor=pointer]:
+                - /url: /~rickcarlino
+              - time [ref=e29]: 27 hours ago
+              - text: "|"
+              - group [ref=e30]:
+                - generic "caches" [ref=e31] [cursor=pointer]
+              - generic [ref=e32]:
+                - text: "|"
+                - heading "26 comments" [level=2] [ref=e33] [cursor=pointer]
+      - listitem [ref=e34]:
+        - generic [ref=e35]:
+          - link "△ 39" [ref=e37] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e38]:
+            - heading "A Forth-inspired language for writing websites" [level=1] [ref=e39]:
+              - link "A Forth-inspired language for writing websites" [ref=e40] [cursor=pointer]:
+                - /url: https://robida.net/entries/2026/05/21/a-forth-inspired-language-for-writing-websites
+            - generic [ref=e41]:
+              - link "concatenative" [ref=e42] [cursor=pointer]:
+                - /url: /t/concatenative
+              - link "web" [ref=e43] [cursor=pointer]:
+                - /url: /t/web
+            - link "robida.net" [ref=e44] [cursor=pointer]:
+              - /url: /domains/robida.net
+            - generic [ref=e45]:
+              - link [ref=e46] [cursor=pointer]:
+                - /url: /~EvanHahn
+                - img [ref=e47]
+              - text: via
+              - link "EvanHahn" [ref=e48] [cursor=pointer]:
+                - /url: /~EvanHahn
+              - time [ref=e49]: 18 hours ago
+              - text: "|"
+              - group [ref=e50]:
+                - generic "caches" [ref=e51] [cursor=pointer]
+              - generic [ref=e52]:
+                - text: "|"
+                - heading "14 comments" [level=2] [ref=e53] [cursor=pointer]
+      - listitem [ref=e54]:
+        - generic [ref=e55]:
+          - link "△ 14" [ref=e57] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e58]:
+            - heading "The mysterious XF86AudioPlay issue" [level=1] [ref=e59]:
+              - link "The mysterious XF86AudioPlay issue" [ref=e60] [cursor=pointer]:
+                - /url: https://michael-prokop.at/blog/2026/05/20/the-mysterious-xf86audioplay-issue/
+            - link "linux" [ref=e62] [cursor=pointer]:
+              - /url: /t/linux
+            - link "michael-prokop.at" [ref=e63] [cursor=pointer]:
+              - /url: /domains/michael-prokop.at
+            - generic [ref=e64]:
+              - link [ref=e65] [cursor=pointer]:
+                - /url: /~vbernat
+                - img [ref=e66]
+              - text: via
+              - link "vbernat" [ref=e67] [cursor=pointer]:
+                - /url: /~vbernat
+              - time [ref=e68]: 9 hours ago
+              - text: "|"
+              - group [ref=e69]:
+                - generic "caches" [ref=e70] [cursor=pointer]
+              - generic [ref=e71]:
+                - text: "|"
+                - heading "2 comments" [level=2] [ref=e72] [cursor=pointer]
+      - listitem [ref=e73]:
+        - generic [ref=e74]:
+          - link "△ 38" [ref=e76] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e77]:
+            - heading "C Programming Language Quiz" [level=1] [ref=e78]:
+              - link "C Programming Language Quiz" [ref=e79] [cursor=pointer]:
+                - /url: https://stefansf.de/c-quiz/
+            - link "c" [ref=e81] [cursor=pointer]:
+              - /url: /t/c
+            - link "stefansf.de" [ref=e82] [cursor=pointer]:
+              - /url: /domains/stefansf.de
+            - generic [ref=e83]:
+              - link [ref=e84] [cursor=pointer]:
+                - /url: /~spc476
+                - img [ref=e85]
+              - text: via
+              - link "spc476" [ref=e86] [cursor=pointer]:
+                - /url: /~spc476
+              - time [ref=e87]: 23 hours ago
+              - text: "|"
+              - group [ref=e88]:
+                - generic "caches" [ref=e89] [cursor=pointer]
+              - generic [ref=e90]:
+                - text: "|"
+                - heading "15 comments" [level=2] [ref=e91] [cursor=pointer]
+      - listitem [ref=e92]:
+        - generic [ref=e93]:
+          - link "△ 30" [ref=e95] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e96]:
+            - heading "Designing Firefox for the future" [level=1] [ref=e97]:
+              - link "Designing Firefox for the future" [ref=e98] [cursor=pointer]:
+                - /url: https://blog.mozilla.org/en/firefox/new-firefox-design/
+            - link "browsers" [ref=e100] [cursor=pointer]:
+              - /url: /t/browsers
+            - link "blog.mozilla.org" [ref=e101] [cursor=pointer]:
+              - /url: /domains/blog.mozilla.org
+            - generic [ref=e102]:
+              - link [ref=e103] [cursor=pointer]:
+                - /url: /~thang
+                - img [ref=e104]
+              - text: via
+              - link "thang" [ref=e105] [cursor=pointer]:
+                - /url: /~thang
+              - time [ref=e106]: 21 hours ago
+              - text: "|"
+              - group [ref=e107]:
+                - generic "caches" [ref=e108] [cursor=pointer]
+              - generic [ref=e109]:
+                - text: "|"
+                - heading "24 comments" [level=2] [ref=e110] [cursor=pointer]
+      - listitem [ref=e111]:
+        - generic [ref=e112]:
+          - link "△ 15" [ref=e114] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e115]:
+            - heading "A blueprint for formal verification of Apple corecrypto" [level=1] [ref=e116]:
+              - link "A blueprint for formal verification of Apple corecrypto" [ref=e117] [cursor=pointer]:
+                - /url: https://security.apple.com/blog/formal-verification-corecrypto/
+            - generic [ref=e118]:
+              - link "cryptography" [ref=e119] [cursor=pointer]:
+                - /url: /t/cryptography
+              - link "formalmethods" [ref=e120] [cursor=pointer]:
+                - /url: /t/formalmethods
+            - link "security.apple.com" [ref=e121] [cursor=pointer]:
+              - /url: /domains/security.apple.com
+            - generic [ref=e122]:
+              - link [ref=e123] [cursor=pointer]:
+                - /url: /~typesanitizer
+                - img [ref=e124]
+              - text: via
+              - link "typesanitizer" [ref=e125] [cursor=pointer]:
+                - /url: /~typesanitizer
+              - time [ref=e126]: 10 hours ago
+              - text: "|"
+              - group [ref=e127]:
+                - generic "caches" [ref=e128] [cursor=pointer]
+              - generic [ref=e129]:
+                - text: "|"
+                - heading "2 comments" [level=2] [ref=e130] [cursor=pointer]
+      - listitem [ref=e131]:
+        - generic [ref=e132]:
+          - link "△ 118" [ref=e134] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e135]:
+            - heading "Flipper One — we need your help" [level=1] [ref=e136]:
+              - link "Flipper One — we need your help" [ref=e137] [cursor=pointer]:
+                - /url: https://blog.flipper.net/flipper-one-we-need-your-help/
+            - link "hardware" [ref=e139] [cursor=pointer]:
+              - /url: /t/hardware
+            - link "blog.flipper.net" [ref=e140] [cursor=pointer]:
+              - /url: /domains/blog.flipper.net
+            - generic [ref=e141]:
+              - link [ref=e142] [cursor=pointer]:
+                - /url: /~strugee
+                - img [ref=e143]
+              - text: via
+              - link "strugee" [ref=e144] [cursor=pointer]:
+                - /url: /~strugee
+              - time [ref=e145]: 36 hours ago
+              - text: "|"
+              - group [ref=e146]:
+                - generic "caches" [ref=e147] [cursor=pointer]
+              - generic [ref=e148]:
+                - text: "|"
+                - heading "42 comments" [level=2] [ref=e149] [cursor=pointer]
+      - listitem [ref=e150]:
+        - generic [ref=e151]:
+          - link "△ 14" [ref=e153] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e154]:
+            - heading "The Maintainer's Dilemma" [level=1] [ref=e155]:
+              - link "The Maintainer's Dilemma" [ref=e156] [cursor=pointer]:
+                - /url: https://spf13.com/p/the-maintainers-dilemma/
+            - link "vibecoding" [ref=e158] [cursor=pointer]:
+              - /url: /t/vibecoding
+            - link "spf13.com" [ref=e159] [cursor=pointer]:
+              - /url: /domains/spf13.com
+            - generic [ref=e160]:
+              - link [ref=e161] [cursor=pointer]:
+                - /url: /~telemachus
+                - img [ref=e162]
+              - text: via
+              - link "telemachus" [ref=e163] [cursor=pointer]:
+                - /url: /~telemachus
+              - time [ref=e164]: 18 hours ago
+              - text: "|"
+              - group [ref=e165]:
+                - generic "caches" [ref=e166] [cursor=pointer]
+              - generic [ref=e167]:
+                - text: "|"
+                - heading "10 comments" [level=2] [ref=e168] [cursor=pointer]
+      - listitem [ref=e169]:
+        - generic [ref=e170]:
+          - link "△ 77" [ref=e172] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e173]:
+            - heading "Announcing Web Serial Support in Firefox" [level=1] [ref=e174]:
+              - link "Announcing Web Serial Support in Firefox" [ref=e175] [cursor=pointer]:
+                - /url: https://hacks.mozilla.org/2026/05/web-serial-support-in-firefox/
+            - generic [ref=e176]:
+              - link "browsers" [ref=e177] [cursor=pointer]:
+                - /url: /t/browsers
+              - link "web" [ref=e178] [cursor=pointer]:
+                - /url: /t/web
+            - link "hacks.mozilla.org" [ref=e179] [cursor=pointer]:
+              - /url: /domains/hacks.mozilla.org
+            - generic [ref=e180]:
+              - link [ref=e181] [cursor=pointer]:
+                - /url: /~commanderk
+                - img [ref=e182]
+              - text: via
+              - link "commanderk - New user" [ref=e183] [cursor=pointer]:
+                - /url: /~commanderk
+                - text: commanderk
+              - time [ref=e184]: 34 hours ago
+              - text: "|"
+              - group [ref=e185]:
+                - generic "caches" [ref=e186] [cursor=pointer]
+              - generic [ref=e187]:
+                - text: "|"
+                - heading "37 comments" [level=2] [ref=e188] [cursor=pointer]
+      - listitem [ref=e189]:
+        - generic [ref=e190]:
+          - link "△ 8" [ref=e192] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e193]:
+            - 'heading "CVE-2026-46529: 10-year-old RCE in Linux PDF Viewer (XReader/Evince/Atril)" [level=1] [ref=e194]':
+              - 'link "CVE-2026-46529: 10-year-old RCE in Linux PDF Viewer (XReader/Evince/Atril)" [ref=e195] [cursor=pointer]':
+                - /url: https://medeiros.zip/posts/CVE-2026-46529-evince
+            - generic [ref=e196]:
+              - link "linux" [ref=e197] [cursor=pointer]:
+                - /url: /t/linux
+              - link "security" [ref=e198] [cursor=pointer]:
+                - /url: /t/security
+            - link "medeiros.zip" [ref=e199] [cursor=pointer]:
+              - /url: /domains/medeiros.zip
+            - generic [ref=e200]:
+              - link [ref=e201] [cursor=pointer]:
+                - /url: /~commanderk
+                - img [ref=e202]
+              - text: via
+              - link "commanderk - New user" [ref=e203] [cursor=pointer]:
+                - /url: /~commanderk
+                - text: commanderk
+              - time [ref=e204]: 8 hours ago
+              - text: "|"
+              - group [ref=e205]:
+                - generic "caches" [ref=e206] [cursor=pointer]
+              - generic [ref=e207]:
+                - text: "|"
+                - heading "1 comment" [level=2] [ref=e208] [cursor=pointer]
+      - listitem [ref=e209]:
+        - generic [ref=e210]:
+          - link "△ 2" [ref=e212] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e213]:
+            - heading "sp.h is the standard library that C deserves" [level=1] [ref=e214]:
+              - link "sp.h is the standard library that C deserves" [ref=e215] [cursor=pointer]:
+                - /url: https://spader.zone/sp/
+            - link "c" [ref=e217] [cursor=pointer]:
+              - /url: /t/c
+            - link "spader.zone" [ref=e218] [cursor=pointer]:
+              - /url: /domains/spader.zone
+            - generic [ref=e219]:
+              - link [ref=e220] [cursor=pointer]:
+                - /url: /~winter
+                - img [ref=e221]
+              - text: via
+              - link "winter" [ref=e222] [cursor=pointer]:
+                - /url: /~winter
+              - time [ref=e223]: 59 minutes ago
+              - text: "|"
+              - group [ref=e224]:
+                - generic "caches" [ref=e225] [cursor=pointer]
+              - generic [ref=e226]:
+                - text: "|"
+                - heading "1 comment" [level=2] [ref=e227] [cursor=pointer]
+      - listitem [ref=e228]:
+        - generic [ref=e229]:
+          - link "△ 22" [ref=e231] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e232]:
+            - heading "This blog ran on Ubuntu 16.04 for 10 years. I migrated it to FreeBSD" [level=1] [ref=e233]:
+              - link "This blog ran on Ubuntu 16.04 for 10 years. I migrated it to FreeBSD" [ref=e234] [cursor=pointer]:
+                - /url: https://crocidb.com/post/this-blog-ran-on-ubuntu-16-04-for-10-years-i-migrated-it-to-freebsd/
+            - link "freebsd" [ref=e236] [cursor=pointer]:
+              - /url: /t/freebsd
+            - link "crocidb.com" [ref=e237] [cursor=pointer]:
+              - /url: /domains/crocidb.com
+            - generic [ref=e238]:
+              - link [ref=e239] [cursor=pointer]:
+                - /url: /~eduard
+                - img [ref=e240]
+              - text: via
+              - link "eduard" [ref=e241] [cursor=pointer]:
+                - /url: /~eduard
+              - time [ref=e242]: 21 hours ago
+              - text: "|"
+              - group [ref=e243]:
+                - generic "caches" [ref=e244] [cursor=pointer]
+              - generic [ref=e245]:
+                - text: "|"
+                - heading "7 comments" [level=2] [ref=e246] [cursor=pointer]
+      - listitem [ref=e247]:
+        - generic [ref=e248]:
+          - link "△ 6" [ref=e250] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e251]:
+            - heading "Announcing Isabelle support for SAW" [level=1] [ref=e252]:
+              - link "Announcing Isabelle support for SAW" [ref=e253] [cursor=pointer]:
+                - /url: https://www.galois.com/articles/announcing-isabelle-support-for-saw
+            - generic [ref=e254]:
+              - link "cryptography" [ref=e255] [cursor=pointer]:
+                - /url: /t/cryptography
+              - link "formalmethods" [ref=e256] [cursor=pointer]:
+                - /url: /t/formalmethods
+            - link "galois.com" [ref=e257] [cursor=pointer]:
+              - /url: /domains/galois.com
+            - generic [ref=e258]:
+              - link [ref=e259] [cursor=pointer]:
+                - /url: /~olliej
+                - img [ref=e260]
+              - text: via
+              - link "olliej" [ref=e261] [cursor=pointer]:
+                - /url: /~olliej
+              - time [ref=e262]: 8 hours ago
+              - text: "|"
+              - group [ref=e263]:
+                - generic "caches" [ref=e264] [cursor=pointer]
+              - generic [ref=e265]:
+                - text: "|"
+                - heading "2 comments" [level=2] [ref=e266] [cursor=pointer]
+      - listitem [ref=e267]:
+        - generic [ref=e268]:
+          - link "△ 27" [ref=e270] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e271]:
+            - 'heading "Megalodon: Mass GitHub Repo Backdooring via CI Workflows" [level=1] [ref=e272]':
+              - 'link "Megalodon: Mass GitHub Repo Backdooring via CI Workflows" [ref=e273] [cursor=pointer]':
+                - /url: https://safedep.io/megalodon-mass-github-repo-backdooring-ci-workflows
+            - link "security" [ref=e275] [cursor=pointer]:
+              - /url: /t/security
+            - link "safedep.io" [ref=e276] [cursor=pointer]:
+              - /url: /domains/safedep.io
+            - generic [ref=e277]:
+              - link [ref=e278] [cursor=pointer]:
+                - /url: /~hauleth
+                - img [ref=e279]
+              - text: via
+              - link "hauleth" [ref=e280] [cursor=pointer]:
+                - /url: /~hauleth
+              - time [ref=e281]: 21 hours ago
+              - text: "|"
+              - group [ref=e282]:
+                - generic "caches" [ref=e283] [cursor=pointer]
+              - generic [ref=e284]:
+                - text: "|"
+                - heading "no comments" [level=2] [ref=e285] [cursor=pointer]
+      - listitem [ref=e286]:
+        - generic [ref=e287]:
+          - link "△ 31" [ref=e289] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e290]:
+            - heading "FTC to Require Cox Media Group to Pay Nearly $1million to Settle Charges They Deceived Customers About “Active Listening” AI-Powered Marketing Service" [level=1] [ref=e291]:
+              - link "FTC to Require Cox Media Group to Pay Nearly $1million to Settle Charges They Deceived Customers About “Active Listening” AI-Powered Marketing Service" [ref=e292] [cursor=pointer]:
+                - /url: https://www.ftc.gov/news-events/news/press-releases/2026/05/ftc-require-cox-media-group-two-other-firms-pay-nearly-1-million-settle-charges-they-deceived
+            - link "privacy" [ref=e294] [cursor=pointer]:
+              - /url: /t/privacy
+            - link "ftc.gov" [ref=e295] [cursor=pointer]:
+              - /url: /domains/ftc.gov
+            - generic [ref=e296]:
+              - link [ref=e297] [cursor=pointer]:
+                - /url: /~simonw
+                - img [ref=e298]
+              - text: via
+              - link "simonw" [ref=e299] [cursor=pointer]:
+                - /url: /~simonw
+              - time [ref=e300]: 25 hours ago
+              - text: "|"
+              - group [ref=e301]:
+                - generic "caches" [ref=e302] [cursor=pointer]
+              - generic [ref=e303]:
+                - text: "|"
+                - heading "7 comments" [level=2] [ref=e304] [cursor=pointer]
+      - listitem [ref=e305]:
+        - generic [ref=e306]:
+          - link "△ 10" [ref=e308] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e309]:
+            - heading "End-to-End Procedural Generation in Caves of Qud (2019)" [level=1] [ref=e310]:
+              - link "End-to-End Procedural Generation in Caves of Qud (2019)" [ref=e311] [cursor=pointer]:
+                - /url: https://www.youtube.com/watch?v=jV-DZqdKlnE
+            - 'link "Description text for: End-to-End Procedural Generation in Caves of Qud (2019)" [ref=e312] [cursor=pointer]':
+              - /url: /s/zevrur/end_end_procedural_generation_caves_qud
+              - text: ☶
+            - generic [ref=e313]:
+              - link "video" [ref=e314] [cursor=pointer]:
+                - /url: /t/video
+              - link "games" [ref=e315] [cursor=pointer]:
+                - /url: /t/games
+            - link "youtube.com" [ref=e316] [cursor=pointer]:
+              - /url: /domains/youtube.com
+            - generic [ref=e317]:
+              - link [ref=e318] [cursor=pointer]:
+                - /url: /~matt-y
+                - img [ref=e319]
+              - text: via
+              - link "matt-y - New user" [ref=e320] [cursor=pointer]:
+                - /url: /~matt-y
+                - text: matt-y
+              - time [ref=e321]: 12 hours ago
+              - text: "|"
+              - group [ref=e322]:
+                - generic "caches" [ref=e323] [cursor=pointer]
+              - generic [ref=e324]:
+                - text: "|"
+                - heading "no comments" [level=2] [ref=e325] [cursor=pointer]
+      - listitem [ref=e326]:
+        - generic [ref=e327]:
+          - link "△ 2" [ref=e329] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e330]:
+            - 'heading "SPy: an interpreter and a compiler for a statically typed variant of Python" [level=1] [ref=e331]':
+              - 'link "SPy: an interpreter and a compiler for a statically typed variant of Python" [ref=e332] [cursor=pointer]':
+                - /url: https://github.com/spylang/spy
+            - generic [ref=e333]:
+              - link "programming" [ref=e334] [cursor=pointer]:
+                - /url: /t/programming
+              - link "python" [ref=e335] [cursor=pointer]:
+                - /url: /t/python
+            - link "github.com/spylang" [ref=e336] [cursor=pointer]:
+              - /url: /origins/github.com%2Fspylang
+            - generic [ref=e337]:
+              - link [ref=e338] [cursor=pointer]:
+                - /url: /~shalabh
+                - img [ref=e339]
+              - text: via
+              - link "shalabh" [ref=e340] [cursor=pointer]:
+                - /url: /~shalabh
+              - time [ref=e341]: 38 minutes ago
+              - text: "|"
+              - group [ref=e342]:
+                - generic "caches" [ref=e343] [cursor=pointer]
+              - generic [ref=e344]:
+                - text: "|"
+                - heading "no comments" [level=2] [ref=e345] [cursor=pointer]
+      - listitem [ref=e346]:
+        - generic [ref=e347]:
+          - link "△ 6" [ref=e349] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e350]:
+            - 'heading "Noroboto: Lying fonts and mitigation in Rust" [level=1] [ref=e351]':
+              - 'link "Noroboto: Lying fonts and mitigation in Rust" [ref=e352] [cursor=pointer]':
+                - /url: https://tritium.legal/blog/noroboto
+            - generic [ref=e353]:
+              - link "law" [ref=e354] [cursor=pointer]:
+                - /url: /t/law
+              - link "rust" [ref=e355] [cursor=pointer]:
+                - /url: /t/rust
+              - link "security" [ref=e356] [cursor=pointer]:
+                - /url: /t/security
+            - link "tritium.legal" [ref=e357] [cursor=pointer]:
+              - /url: /domains/tritium.legal
+            - generic [ref=e358]:
+              - link [ref=e359] [cursor=pointer]:
+                - /url: /~jmillikin
+                - img [ref=e360]
+              - text: via
+              - link "jmillikin" [ref=e361] [cursor=pointer]:
+                - /url: /~jmillikin
+              - time [ref=e362]: 9 hours ago
+              - text: "|"
+              - group [ref=e363]:
+                - generic "caches" [ref=e364] [cursor=pointer]
+              - generic [ref=e365]:
+                - text: "|"
+                - heading "1 comment" [level=2] [ref=e366] [cursor=pointer]
+      - listitem [ref=e367]:
+        - generic [ref=e368]:
+          - link "△ 3" [ref=e370] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e371]:
+            - 'heading "Planescape: Torment, Part 1: From the Tabletop" [level=1] [ref=e372]':
+              - 'link "Planescape: Torment, Part 1: From the Tabletop" [ref=e373] [cursor=pointer]':
+                - /url: https://www.filfre.net/2026/05/planescape-torment-part-1-from-the-tabletop/
+            - generic [ref=e374]:
+              - link "games" [ref=e375] [cursor=pointer]:
+                - /url: /t/games
+              - link "historical" [ref=e376] [cursor=pointer]:
+                - /url: /t/historical
+            - link "filfre.net" [ref=e377] [cursor=pointer]:
+              - /url: /domains/filfre.net
+            - generic [ref=e378]:
+              - link [ref=e379] [cursor=pointer]:
+                - /url: /~sinclairtarget
+                - img [ref=e380]
+              - text: via
+              - link "sinclairtarget" [ref=e381] [cursor=pointer]:
+                - /url: /~sinclairtarget
+              - time [ref=e382]: 4 hours ago
+              - text: "|"
+              - group [ref=e383]:
+                - generic "caches" [ref=e384] [cursor=pointer]
+              - generic [ref=e385]:
+                - text: "|"
+                - heading "no comments" [level=2] [ref=e386] [cursor=pointer]
+      - listitem [ref=e387]:
+        - generic [ref=e388]:
+          - link "△ 11" [ref=e390] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e391]:
+            - heading "What are you doing this weekend?" [level=1] [ref=e392]:
+              - link "What are you doing this weekend?" [ref=e393] [cursor=pointer]:
+                - /url: /s/hwyrwd/what_are_you_doing_this_weekend
+            - 'link "Description text for: What are you doing this weekend?" [ref=e394] [cursor=pointer]':
+              - /url: /s/hwyrwd/what_are_you_doing_this_weekend
+              - text: ☶
+            - generic [ref=e395]:
+              - link "ask" [ref=e396] [cursor=pointer]:
+                - /url: /t/ask
+              - link "programming" [ref=e397] [cursor=pointer]:
+                - /url: /t/programming
+            - generic [ref=e398]:
+              - link [ref=e399] [cursor=pointer]:
+                - /url: /~caius
+                - img [ref=e400]
+              - text: authored by
+              - link "caius" [ref=e401] [cursor=pointer]:
+                - /url: /~caius
+              - time [ref=e402]: 21 hours ago
+              - generic [ref=e403]:
+                - text: "|"
+                - heading "36 comments" [level=2] [ref=e404] [cursor=pointer]
+      - listitem [ref=e405]:
+        - generic [ref=e406]:
+          - link "△ 16" [ref=e408] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e409]:
+            - heading "Secure Boot and CA Rollover - a heads-up for distributions" [level=1] [ref=e410]:
+              - link "Secure Boot and CA Rollover - a heads-up for distributions" [ref=e411] [cursor=pointer]:
+                - /url: https://blog.einval.com/2026/05/22#secure_boot_ca_rollover
+            - generic [ref=e412]:
+              - link "linux" [ref=e413] [cursor=pointer]:
+                - /url: /t/linux
+              - link "security" [ref=e414] [cursor=pointer]:
+                - /url: /t/security
+            - link "blog.einval.com" [ref=e415] [cursor=pointer]:
+              - /url: /domains/blog.einval.com
+            - generic [ref=e416]:
+              - link [ref=e417] [cursor=pointer]:
+                - /url: /~Foxboron
+                - img [ref=e418]
+              - text: via
+              - link "Foxboron" [ref=e419] [cursor=pointer]:
+                - /url: /~Foxboron
+              - time [ref=e420]: 20 hours ago
+              - text: "|"
+              - group [ref=e421]:
+                - generic "caches" [ref=e422] [cursor=pointer]
+              - generic [ref=e423]:
+                - text: "|"
+                - heading "2 comments" [level=2] [ref=e424] [cursor=pointer]
+      - listitem [ref=e425]:
+        - generic [ref=e426]:
+          - link "△ 2" [ref=e428] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e429]:
+            - heading "Comparing an LZ4 Decompressor on four legacy CPUs" [level=1] [ref=e430]:
+              - link "Comparing an LZ4 Decompressor on four legacy CPUs" [ref=e431] [cursor=pointer]:
+                - /url: https://bumbershootsoft.wordpress.com/2026/05/09/comparing-an-lz4-decompressor-on-four-legacy-cpus/
+            - generic [ref=e432]:
+              - link "performance" [ref=e433] [cursor=pointer]:
+                - /url: /t/performance
+              - link "retrocomputing" [ref=e434] [cursor=pointer]:
+                - /url: /t/retrocomputing
+            - link "bumbershootsoft.wordpress.com" [ref=e435] [cursor=pointer]:
+              - /url: /domains/bumbershootsoft.wordpress.com
+            - generic [ref=e436]:
+              - link [ref=e437] [cursor=pointer]:
+                - /url: /~jmillikin
+                - img [ref=e438]
+              - text: via
+              - link "jmillikin" [ref=e439] [cursor=pointer]:
+                - /url: /~jmillikin
+              - time [ref=e440]: 3 hours ago
+              - text: "|"
+              - group [ref=e441]:
+                - generic "caches" [ref=e442] [cursor=pointer]
+              - generic [ref=e443]:
+                - text: "|"
+                - heading "no comments" [level=2] [ref=e444] [cursor=pointer]
+      - listitem [ref=e445]:
+        - generic [ref=e446]:
+          - link "△ 4" [ref=e448] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e449]:
+            - heading "Only 17% of all 64-bit Integers are products of two 32-bit integers" [level=1] [ref=e450]:
+              - link "Only 17% of all 64-bit Integers are products of two 32-bit integers" [ref=e451] [cursor=pointer]:
+                - /url: https://lemire.me/blog/2026/05/22/only-17-of-all-64-bit-integers-are-products-of-two-32-bit-integers/
+            - link "compsci" [ref=e453] [cursor=pointer]:
+              - /url: /t/compsci
+            - link "lemire.me" [ref=e454] [cursor=pointer]:
+              - /url: /domains/lemire.me
+            - generic [ref=e455]:
+              - link [ref=e456] [cursor=pointer]:
+                - /url: /~rbr
+                - img [ref=e457]
+              - text: via
+              - link "rbr" [ref=e458] [cursor=pointer]:
+                - /url: /~rbr
+              - time [ref=e459]: 10 hours ago
+              - text: "|"
+              - group [ref=e460]:
+                - generic "caches" [ref=e461] [cursor=pointer]
+              - generic [ref=e462]:
+                - text: "|"
+                - heading "1 comment" [level=2] [ref=e463] [cursor=pointer]
+      - listitem [ref=e464]:
+        - generic [ref=e465]:
+          - link "△ 1" [ref=e467] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e468]:
+            - heading "Staged publishing and new install-time controls for NPM" [level=1] [ref=e469]:
+              - link "Staged publishing and new install-time controls for NPM" [ref=e470] [cursor=pointer]:
+                - /url: https://github.blog/changelog/2026-05-22-staged-publishing-and-new-install-time-controls-for-npm/
+            - generic [ref=e471]:
+              - link "nodejs" [ref=e472] [cursor=pointer]:
+                - /url: /t/nodejs
+              - link "security" [ref=e473] [cursor=pointer]:
+                - /url: /t/security
+            - link "github.blog" [ref=e474] [cursor=pointer]:
+              - /url: /domains/github.blog
+            - generic [ref=e475]:
+              - link [ref=e476] [cursor=pointer]:
+                - /url: /~alemi
+                - img [ref=e477]
+              - text: via
+              - link "alemi - New user" [ref=e478] [cursor=pointer]:
+                - /url: /~alemi
+                - text: alemi
+              - time [ref=e479]: 23 minutes ago
+              - text: "|"
+              - group [ref=e480]:
+                - generic "caches" [ref=e481] [cursor=pointer]
+              - generic [ref=e482]:
+                - text: "|"
+                - heading "no comments" [level=2] [ref=e483] [cursor=pointer]
+      - listitem [ref=e484]:
+        - generic [ref=e485]:
+          - link "△ 1" [ref=e487] [cursor=pointer]:
+            - /url: /login
+          - generic [ref=e488]:
+            - heading "The price of humans" [level=1] [ref=e489]:
+              - link "The price of humans" [ref=e490] [cursor=pointer]:
+                - /url: https://blog.umangsurana.com/blog/price_of_humans/
+            - link "vibecoding" [ref=e492] [cursor=pointer]:
+              - /url: /t/vibecoding
+            - link "blog.umangsurana.com" [ref=e493] [cursor=pointer]:
+              - /url: /domains/blog.umangsurana.com
+            - generic [ref=e494]:
+              - link [ref=e495] [cursor=pointer]:
+                - /url: /~juliethefoxcoon
+                - img [ref=e496]
+              - text: via
+              - link "juliethefoxcoon" [ref=e497] [cursor=pointer]:
+                - /url: /~juliethefoxcoon
+              - time [ref=e498]: 25 minutes ago
+              - text: "|"
+              - group [ref=e499]:
+                - generic "caches" [ref=e500] [cursor=pointer]
+              - generic [ref=e501]:
+                - text: "|"
+                - heading "no comments" [level=2] [ref=e502] [cursor=pointer]
+    - navigation [ref=e503]:
+      - link "Page 2" [ref=e504] [cursor=pointer]:
+        - /url: /page/2
+  - contentinfo [ref=e505]:
+    - navigation [ref=e506]:
+      - link "About" [ref=e507] [cursor=pointer]:
+        - /url: /about
+      - link "Tags" [ref=e508] [cursor=pointer]:
+        - /url: /tags
+      - link "Filter" [ref=e509] [cursor=pointer]:
+        - /url: /filters
+      - link "Moderation Log" [ref=e510] [cursor=pointer]:
+        - /url: /moderations

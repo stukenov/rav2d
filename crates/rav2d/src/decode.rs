@@ -2165,6 +2165,58 @@ pub fn decode_frame(
     Ok(())
 }
 
+/// Build a `FrameContext` from the decoder context's parsed headers and tile
+/// data, then run the single-threaded decode.
+///
+/// Port of the frame-setup portion of `dav2d_submit_frame` (decode.c:5282) for
+/// the n_fc == 1 path, covering frame geometry derivation (decode.c:5517-5530)
+/// and dispatch to `decode_frame`. Picture allocation, reference-frame setup and
+/// output queueing are added with reconstruction (M1) and inter support (M3);
+/// this currently exercises the entropy/parse pass end-to-end.
+pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Result<(), ()> {
+    use crate::headers::PixelLayout;
+
+    let seq_hdr = c.seq_hdr.clone().ok_or(())?;
+    let frame_hdr = c.frame_hdr.clone().ok_or(())?;
+
+    let mut fc = crate::internal::FrameContext::default();
+
+    let sb128 = frame_hdr.sb128 as i32;
+    let layout = seq_hdr.layout;
+    fc.ss_ver = (layout == PixelLayout::I420) as i32;
+    fc.ss_hor = matches!(layout, PixelLayout::I420 | PixelLayout::I422) as i32;
+    fc.root_bs = match sb128 {
+        0 => BlockSize::Bs64x64,
+        1 => BlockSize::Bs128x128,
+        _ => BlockSize::Bs256x256,
+    };
+    fc.bw = ((frame_hdr.width + 7) >> 3) << 1;
+    fc.bh = ((frame_hdr.height + 7) >> 3) << 1;
+    fc.sb256w = (fc.bw + 63) >> 6;
+    fc.sb256h = (fc.bh + 63) >> 6;
+    fc.sb_shift = 4 + sb128;
+    fc.sb_step = 16 << sb128;
+    fc.sbh = (fc.bh + fc.sb_step - 1) >> fc.sb_shift;
+    fc.b4_stride = ((fc.bw + 63) & !63) as isize;
+    let bpc = 8 + seq_hdr.hbd as i32 * 2;
+    fc.bitdepth_max = (1 << bpc) - 1;
+
+    fc.dsp = c.dsp.clone();
+    fc.tile = std::mem::take(&mut c.tile);
+    fc.n_tile_data = c.n_tile_data;
+
+    let qcat = crate::cdf::cdf_thread_init_static_qcat(frame_hdr.quant.yac as u32) as usize;
+
+    fc.seq_hdr = seq_hdr;
+    fc.frame_hdr = frame_hdr;
+
+    // Keyframes / intra frames with no primary reference use the static CDF.
+    // Inter-frame CDF reference selection lands with M3.
+    let in_cdf = None;
+
+    decode_frame(&mut fc, n_tc, 1, in_cdf, qcat)
+}
+
 fn get_snglref_ctx(
     a: &BlockContext,
     l: &BlockContext,

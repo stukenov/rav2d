@@ -1,0 +1,62 @@
+- generic [ref=e6]:
+  - generic [ref=e7]:
+    - link "DEV Community" [ref=e8] [cursor=pointer]:
+      - /url: /
+      - img "DEV Community" [ref=e9]
+    - heading "Join the DEV Community" [level=1] [ref=e10]
+    - paragraph [ref=e11]: DEV Community is a community of 3,916,744 amazing developers
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - button "Continue with Apple" [ref=e15] [cursor=pointer]:
+        - img [ref=e16]
+        - generic [ref=e18]: Continue with Apple
+      - button "Continue with Facebook" [ref=e20] [cursor=pointer]:
+        - img [ref=e21]
+        - generic [ref=e24]: Continue with Facebook
+      - button "Continue with GitHub" [ref=e26] [cursor=pointer]:
+        - img [ref=e27]
+        - generic [ref=e29]: Continue with GitHub
+      - button "Continue with Google" [ref=e31] [cursor=pointer]:
+        - img [ref=e32]
+        - generic [ref=e37]: Continue with Google
+      - button "Continue with MyMLH" [ref=e39] [cursor=pointer]:
+        - img [ref=e40]
+        - generic [ref=e69]: Continue with MyMLH
+      - button "Continue with Twitter (X)" [ref=e71] [cursor=pointer]:
+        - img [ref=e72]
+        - generic [ref=e74]: Continue with Twitter (X)
+    - generic [ref=e75]:
+      - generic [ref=e76]:
+        - separator [ref=e77]
+        - generic [ref=e78]: OR
+      - generic [ref=e79]:
+        - generic [ref=e80]:
+          - generic [ref=e81]: Email
+          - textbox "Email" [ref=e82]
+        - generic [ref=e83]:
+          - generic [ref=e84]: Password
+          - textbox "Password" [ref=e85]
+        - generic [ref=e86]:
+          - generic [ref=e87]:
+            - checkbox "Remember me" [checked] [ref=e88] [cursor=pointer]
+            - text: Remember me
+          - link "Forgot password?" [ref=e89] [cursor=pointer]:
+            - /url: /users/password/new
+        - button "Log in" [ref=e91] [cursor=pointer]
+      - generic [ref=e92]:
+        - text: By signing in, you are agreeing to our
+        - link "privacy policy" [ref=e93] [cursor=pointer]:
+          - /url: /privacy
+        - text: ","
+        - link "terms of use" [ref=e94] [cursor=pointer]:
+          - /url: /terms
+        - text: and
+        - link "code of conduct" [ref=e95] [cursor=pointer]:
+          - /url: /code-of-conduct
+        - text: .
+      - separator [ref=e96]
+      - generic [ref=e97]:
+        - text: New to DEV Community?
+        - link "Create account" [ref=e98] [cursor=pointer]:
+          - /url: https://dev.to/enter?signup_subforem=1&state=new-user
+        - text: .
