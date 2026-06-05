@@ -614,7 +614,12 @@ pub fn cdef_brow_8bpc(
         }
 
         // Back up pre-filter bottom 2 rows of this band for the next band's top.
-        if (sbrow_start || by + 2 < by_end) && (edges & CDEF_HAVE_BOTTOM) != 0 {
+        // dav2d's gate is `(!have_tt || sbrow_start || by+2 < by_end)`; for the
+        // single-thread (have_tt == 0) path the `!have_tt` term always holds, so
+        // every band with HAVE_BOTTOM backs up (needed so the next superblock-
+        // row's CDEF seam re-filter reads the correct top line).
+        let _ = (sbrow_start, by_end);
+        if (edges & CDEF_HAVE_BOTTOM) != 0 {
             let other = 1 - tf;
             cdef_backup2lines_bank(
                 &mut cdef_line[other],
