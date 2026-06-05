@@ -7641,6 +7641,31 @@ fn decode_b(
                         b.data.inter.mv[n] = Mv { c: mv };
                     }
                 }
+                // Per-ref warp model fit for compound WARP_CAUSAL
+                // (decode.c:1287-1291): derive a warp matrix for each reference
+                // from its neighbour samples so recon can do warp-affine MC.
+                if unsafe { b.data.inter.motion_mode } == MotionMode::WarpCausal as u8 {
+                    let w4 = imin(bw4, fi.bw - bx);
+                    let h4 = imin(bh4, fi.bh - by);
+                    for i in 0..2 {
+                        derive_warpmv(
+                            recon.rt,
+                            bx,
+                            by,
+                            have_top,
+                            have_left,
+                            bw4,
+                            bh4,
+                            w4,
+                            h4,
+                            refs[i],
+                            unsafe { b.data.inter.mv[i] },
+                            &mut recon.warpmv[i],
+                            fi.sb_step,
+                            fi.tile_col_end,
+                        );
+                    }
+                }
             }
 
             // refmv bank add + tworef splat (decode.c:1307-1319).
@@ -8481,6 +8506,238 @@ fn ext_warp_plane_8bpc(
                     crate::mc::put_8tap_8bpc(
                         &mut dst[dst_sub..],
                         dst_stride,
+                        src,
+                        src_off,
+                        src_stride,
+                        4,
+                        4,
+                        mx,
+                        my,
+                        -1,
+                    );
+                    xx += 4;
+                }
+                yy += 4;
+            }
+            x += sw;
+        }
+        y += sh;
+    }
+}
+
+/// i16-prep variant of `warp_affine_plane_8bpc` (dav2d `warp_affine`'s `dst16`
+/// branch, recon_tmpl.c:1857-1865). Emits the warp prediction into an i16 `tmp`
+/// buffer (stride `bw4*4`) for compound blending instead of writing u8 pixels.
+/// Identical addressing/emu-edge logic; only the per-8x8 kernel differs
+/// (`warp8x8t` vs `warp8x8`). Falls back to the ext-warp prep for non-affine /
+/// sub-8px (after subsampling) blocks.
+#[allow(clippy::too_many_arguments)]
+fn warp_affine_plane_prep_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    ref_pic: &crate::picture::Picture,
+    pl: usize,
+    bx: i32,
+    by: i32,
+    b_dim: &[u8],
+    wmp: &crate::headers::WarpedMotionParams,
+    ss_hor: i32,
+    ss_ver: i32,
+    frame_bw: i32,
+    frame_bh: i32,
+) {
+    let plss_ver = if pl != 0 { ss_ver } else { 0 };
+    let plss_hor = if pl != 0 { ss_hor } else { 0 };
+    let h_mul = 4 >> plss_hor;
+    let v_mul = 4 >> plss_ver;
+    if wmp.affine == 0 || imin(b_dim[0] as i32 * h_mul, b_dim[1] as i32 * v_mul) < 8 {
+        ext_warp_plane_prep_8bpc(
+            tmp, tmp_stride, ref_pic, pl, bx, by, b_dim, wmp, ss_hor, ss_ver, frame_bw, frame_bh,
+        );
+        return;
+    }
+    let mat = &wmp.matrix;
+    let width = frame_bw * 4 >> plss_hor;
+    let height = frame_bh * 4 >> plss_ver;
+    let ref_stride = ref_pic.stride[(pl != 0) as usize].unsigned_abs();
+    let ref_data: &[u8] = match ref_pic.data[pl] {
+        Some(p) => {
+            let ph = if pl == 0 {
+                ref_pic.p.h
+            } else {
+                (ref_pic.p.h + ss_ver) >> ss_ver
+            };
+            unsafe { std::slice::from_raw_parts(p.as_ptr(), ref_stride * ph as usize) }
+        }
+        None => return,
+    };
+
+    let blk_w = b_dim[0] as i32 * h_mul;
+    let blk_h = b_dim[1] as i32 * v_mul;
+    let abcd: [i16; 4] = wmp.abcd;
+
+    let mut emu = [0u8; 32 * 32];
+    let mut y = 0;
+    while y < blk_h {
+        let src_y = by * 4 + ((y + 4) << plss_ver);
+        let mat3_y = mat[3] as i64 * src_y as i64 + mat[0] as i64;
+        let mat5_y = mat[5] as i64 * src_y as i64 + mat[1] as i64;
+        let mut x = 0;
+        while x < blk_w {
+            let src_x = bx * 4 + ((x + 4) << plss_hor);
+            let mvx = (mat[2] as i64 * src_x as i64 + mat3_y) >> plss_hor;
+            let mvy = (mat[4] as i64 * src_x as i64 + mat5_y) >> plss_ver;
+
+            let dx = (mvx >> 16) as i32 - 4;
+            let mx =
+                (((mvx as i32) & 0xffff) - wmp.abcd[0] as i32 * 4 - wmp.abcd[1] as i32 * 7) & !0x3f;
+            let dy = (mvy >> 16) as i32 - 4;
+            let my =
+                (((mvy as i32) & 0xffff) - wmp.abcd[2] as i32 * 4 - wmp.abcd[3] as i32 * 4) & !0x3f;
+
+            let (src, src_off, src_stride): (&[u8], usize, usize) =
+                if dx < 3 || dx + 8 + 4 > width || dy < 3 || dy + 8 + 4 > height {
+                    crate::mc::emu_edge_8bpc(
+                        15,
+                        15,
+                        width as usize,
+                        height as usize,
+                        (dx - 3) as isize,
+                        (dy - 3) as isize,
+                        &mut emu,
+                        32,
+                        ref_data,
+                        ref_stride,
+                    );
+                    (&emu[..], 32 * 3 + 3, 32)
+                } else {
+                    (ref_data, ref_stride * dy as usize + dx as usize, ref_stride)
+                };
+
+            let dst_sub = (y as usize) * tmp_stride + x as usize;
+            crate::mc::warp_affine_8x8t_8bpc(
+                &mut tmp[dst_sub..],
+                tmp_stride,
+                src,
+                src_stride,
+                src_off,
+                &abcd,
+                mx,
+                my,
+            );
+            x += 8;
+        }
+        y += 8;
+    }
+}
+
+/// i16-prep variant of `ext_warp_plane_8bpc` (dav2d `ext_warp`'s `dst16` branch,
+/// recon_tmpl.c:1788-1791). Same window/tile walk; the per-4x4 tile uses the
+/// 8-tap prep (i16) kernel (`ext_warp4x4t` = `prep_8tap(..., -1)`) instead of
+/// the u8 `put_8tap`.
+#[allow(clippy::too_many_arguments)]
+fn ext_warp_plane_prep_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    ref_pic: &crate::picture::Picture,
+    pl: usize,
+    bx: i32,
+    by: i32,
+    b_dim: &[u8],
+    wmp: &crate::headers::WarpedMotionParams,
+    ss_hor: i32,
+    ss_ver: i32,
+    frame_bw: i32,
+    frame_bh: i32,
+) {
+    let plss_ver = if pl != 0 { ss_ver } else { 0 };
+    let plss_hor = if pl != 0 { ss_hor } else { 0 };
+    let h_mul = 4 >> plss_hor;
+    let v_mul = 4 >> plss_ver;
+    let mat = &wmp.matrix;
+    let w = frame_bw * 4 >> plss_hor;
+    let h = frame_bh * 4 >> plss_ver;
+    let ref_stride = ref_pic.stride[(pl != 0) as usize].unsigned_abs();
+    let ref_data: &[u8] = match ref_pic.data[pl] {
+        Some(p) => {
+            let ph = if pl == 0 {
+                ref_pic.p.h
+            } else {
+                (ref_pic.p.h + ss_ver) >> ss_ver
+            };
+            unsafe { std::slice::from_raw_parts(p.as_ptr(), ref_stride * ph as usize) }
+        }
+        None => return,
+    };
+
+    let blk_w = b_dim[0] as i32 * h_mul;
+    let blk_h = b_dim[1] as i32 * v_mul;
+    let sw = imin(blk_w, 8);
+    let hsw = sw >> 1;
+    let sh = imin(blk_h, 8);
+    let hsh = sh >> 1;
+
+    let mut emu = [0u8; 32 * 32];
+    let mut y = 0;
+    while y < blk_h {
+        let src_y = by * 4 + ((y + hsh) << plss_ver);
+        let mat3_y = mat[3] as i64 * src_y as i64 + mat[0] as i64;
+        let mat5_y = mat[5] as i64 * src_y as i64 + mat[1] as i64;
+        let mut x = 0;
+        while x < blk_w {
+            let src_x = bx * 4 + ((x + hsw) << plss_hor);
+            let mvx = (mat[2] as i64 * src_x as i64 + mat3_y) >> plss_hor;
+            let mvy = (mat[4] as i64 * src_x as i64 + mat5_y) >> plss_ver;
+            let left_window = (mvx >> 16) as i32 - hsw - 3;
+            let top_window = (mvy >> 16) as i32 - hsh - 3;
+            let left = iclip(left_window, 0, w - 1);
+            let right = iclip(left_window + sw + 7, 1, w);
+            let top = iclip(top_window, 0, h - 1);
+            let bottom = iclip(top_window + sh + 7, 1, h);
+
+            let mut yy = y;
+            while yy < y + sh {
+                let src_y2 = by * 4 + ((yy + 2) << plss_ver);
+                let mat3_y2 = mat[3] as i64 * src_y2 as i64 + mat[0] as i64;
+                let mat5_y2 = mat[5] as i64 * src_y2 as i64 + mat[1] as i64;
+                let mut xx = x;
+                while xx < x + sw {
+                    let src_x2 = bx * 4 + ((xx + 2) << plss_hor);
+                    let mvx2 = ((mat[2] as i64 * src_x2 as i64 + mat3_y2) >> plss_hor) + 0x200;
+                    let mvy2 = ((mat[4] as i64 * src_x2 as i64 + mat5_y2) >> plss_ver) + 0x200;
+
+                    let dx = (mvx2 >> 16) as i32 - 2;
+                    let mx = ((mvx2 >> 10) & 63) as i32;
+                    let dy = (mvy2 >> 16) as i32 - 2;
+                    let my = ((mvy2 >> 10) & 63) as i32;
+
+                    let (src, src_off, src_stride): (&[u8], usize, usize) = if dx - 3 < left
+                        || dx + 4 + 4 > right
+                        || dy - 3 < top
+                        || dy + 4 + 4 > bottom
+                    {
+                        let region_off = left as usize + top as usize * ref_stride;
+                        crate::mc::emu_edge_8bpc(
+                            11,
+                            11,
+                            (right - left) as usize,
+                            (bottom - top) as usize,
+                            (dx - 3 - left) as isize,
+                            (dy - 3 - top) as isize,
+                            &mut emu,
+                            32,
+                            &ref_data[region_off..],
+                            ref_stride,
+                        );
+                        (&emu[..], 32 * 3 + 3, 32)
+                    } else {
+                        (ref_data, ref_stride * dy as usize + dx as usize, ref_stride)
+                    };
+
+                    let dst_sub = (yy as usize) * tmp_stride + xx as usize;
+                    crate::mc::prep_8tap_8bpc(
+                        &mut tmp[dst_sub..],
+                        tmp_stride,
                         src,
                         src_off,
                         src_stride,
@@ -9501,6 +9758,41 @@ fn recon_b_inter_compound(
     let is_opfl = inter_mode >= CompInterPredMode::OpflNearMvNearMv as u8
         || (refine_mv != 0 && comp_type == 1);
 
+    // Per-ref warp-affine MC dispatch (recon_tmpl.c:3199-3214). For each
+    // reference a block uses warp-affine prediction (into the i16 tmp buffer)
+    // when its inter mode is GLOBALMV_GLOBALMV with an affine-allowed global
+    // motion, or the block is WARP_CAUSAL with a valid per-ref warp matrix.
+    // Otherwise plain translational MC. `warp_use[i]` selects the path,
+    // `warp_mat[i]` the matrix (local warp for WARP_CAUSAL, frame global motion
+    // for GLOBALMV).
+    let force_integer_mv = recon.frm_hdr.force_integer_mv;
+    let mut warp_use = [false; 2];
+    let mut warp_mat = [crate::headers::WarpedMotionParams::default(); 2];
+    {
+        let bdim = &BLOCK_DIMENSIONS[lbs as u8 as usize];
+        let bw4d = bdim[0] as i32;
+        let bh4d = bdim[1] as i32;
+        for i in 0..2 {
+            let mut gmv = recon.frm_hdr.gmv.m[refs[i] as usize];
+            let gmv_warp_allowed = gmv.wm_type > crate::headers::WarpedMotionType::Translation
+                && force_integer_mv == 0
+                && crate::warpmv::get_shear_params(&mut gmv) == 0
+                && recon.svc[refs[i] as usize][0].scale == 0;
+            let warp = force_integer_mv == 0
+                && ((inter_mode == CompInterPredMode::GlobalMvGlobalMv as u8
+                    && imin(bw4d, bh4d) > 1
+                    && gmv_warp_allowed)
+                    || (motion_mode == MotionMode::WarpCausal as u8
+                        && recon.warpmv[i].wm_type > crate::headers::WarpedMotionType::Invalid));
+            warp_use[i] = warp;
+            warp_mat[i] = if motion_mode >= MotionMode::WarpCausal as u8 {
+                recon.warpmv[i]
+            } else {
+                recon.frm_hdr.gmv.m[refs[i] as usize]
+            };
+        }
+    }
+
     // ---- luma ----
     let mut luma_bacp = 0i32; // shared with chroma AVG path (bacpu)
     let mut seg_mask = vec![0u8; 128 * 128];
@@ -9534,22 +9826,39 @@ fn recon_b_inter_compound(
             );
         } else {
             for i in 0..2 {
-                inter_mc_plane_prep_8bpc(
-                    &mut tmp[i],
-                    refp[i],
-                    0,
-                    bx,
-                    by,
-                    bw4,
-                    bh4,
-                    mvs[i].x,
-                    mvs[i].y,
-                    filter,
-                    ss_hor,
-                    ss_ver,
-                    fi.bw,
-                    fi.bh,
-                );
+                if warp_use[i] {
+                    warp_affine_plane_prep_8bpc(
+                        &mut tmp[i],
+                        w,
+                        refp[i],
+                        0,
+                        bx,
+                        by,
+                        b_dim,
+                        &warp_mat[i],
+                        ss_hor,
+                        ss_ver,
+                        fi.bw,
+                        fi.bh,
+                    );
+                } else {
+                    inter_mc_plane_prep_8bpc(
+                        &mut tmp[i],
+                        refp[i],
+                        0,
+                        bx,
+                        by,
+                        bw4,
+                        bh4,
+                        mvs[i].x,
+                        mvs[i].y,
+                        filter,
+                        ss_hor,
+                        ss_ver,
+                        fi.bw,
+                        fi.bh,
+                    );
+                }
             }
         }
 
@@ -9746,22 +10055,39 @@ fn recon_b_inter_compound(
                 }
             } else {
                 for i in 0..2 {
-                    inter_mc_plane_prep_8bpc(
-                        &mut tmp[i],
-                        refp[i],
-                        pl,
-                        cbx,
-                        cby,
-                        cbw4,
-                        cbh4,
-                        mvs[i].x,
-                        mvs[i].y,
-                        filter,
-                        ss_hor,
-                        ss_ver,
-                        fi.bw,
-                        fi.bh,
-                    );
+                    if warp_use[i] {
+                        warp_affine_plane_prep_8bpc(
+                            &mut tmp[i],
+                            cw,
+                            refp[i],
+                            pl,
+                            cbx,
+                            cby,
+                            cb_dim,
+                            &warp_mat[i],
+                            ss_hor,
+                            ss_ver,
+                            fi.bw,
+                            fi.bh,
+                        );
+                    } else {
+                        inter_mc_plane_prep_8bpc(
+                            &mut tmp[i],
+                            refp[i],
+                            pl,
+                            cbx,
+                            cby,
+                            cbw4,
+                            cbh4,
+                            mvs[i].x,
+                            mvs[i].y,
+                            filter,
+                            ss_hor,
+                            ss_ver,
+                            fi.bw,
+                            fi.bh,
+                        );
+                    }
                 }
             }
             let dst: &mut [u8] = if pl == 1 {
