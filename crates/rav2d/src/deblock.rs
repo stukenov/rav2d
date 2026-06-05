@@ -2067,60 +2067,65 @@ pub fn copy_db_8bpc(
     ss_ver: bool,
     lr_backup: bool,
 ) {
-    let sb_size = if sb128 { 128 } else { 64 };
-    let row = sby as usize * sb_size;
-    let row_h = (row + sb_size).min(bh * 4);
-
-    if row >= row_h {
-        return;
-    }
-
+    // dav2d copy_db (db_apply_tmpl.c:130): the source is the sbrow base shifted
+    // up by `offset` rows (8 luma rows for sby > 0), and `row`/`row_h` are the
+    // offset-adjusted stripe extent. The previous code used the raw sbrow row and
+    // an un-offset plane base, so it read the wrong rows for sby > 0.
+    let h = (bh * 4) as i32;
     let w = bw * 4;
-    let h = bh * 4;
-
-    backup_db(
-        &mut lr_db[0],
-        src[0],
-        strides[0] as usize,
-        0,
-        sb128,
-        row as i32,
-        row_h as i32,
-        w,
-        lr_backup,
-        1,
-    );
+    let offset = 8 * (sby != 0) as i32;
+    let y_stripe = (sby << (6 + sb128 as i32)) - offset;
+    let row_h = imin((sby + 1) << (6 + sb128 as i32), h - 1);
+    if y_stripe < row_h {
+        let ys_off = (y_stripe as isize * strides[0]) as usize;
+        backup_db(
+            &mut lr_db[0],
+            &src[0][ys_off..],
+            strides[0].unsigned_abs(),
+            0,
+            sb128,
+            y_stripe,
+            row_h,
+            w,
+            lr_backup,
+            1,
+        );
+    }
 
     if strides[1] != 0 {
         let cw = w >> (ss_hor as usize);
-        let _ch = h >> (ss_ver as usize);
-        let crow = row >> (ss_ver as usize);
-        let crow_h = row_h >> (ss_ver as usize);
-
-        backup_db(
-            &mut lr_db[1],
-            src[1],
-            strides[1] as usize,
-            ss_ver as i32,
-            sb128,
-            crow as i32,
-            crow_h as i32,
-            cw,
-            lr_backup,
-            1,
-        );
-        backup_db(
-            &mut lr_db[2],
-            src[2],
-            strides[1] as usize,
-            ss_ver as i32,
-            sb128,
-            crow as i32,
-            crow_h as i32,
-            cw,
-            lr_backup,
-            1,
-        );
+        let ch = (bh * 4 >> ss_ver as i32) as i32;
+        let ss_ver_i = ss_ver as i32;
+        let offset_uv = offset >> ss_ver_i;
+        let cy_stripe = (sby << ((6 - ss_ver_i) + sb128 as i32)) - offset_uv;
+        let crow_h = imin((sby + 1) << ((6 - ss_ver_i) + sb128 as i32), ch - 1);
+        if cy_stripe < crow_h {
+            let cys_off = (cy_stripe as isize * strides[1]) as usize;
+            backup_db(
+                &mut lr_db[1],
+                &src[1][cys_off..],
+                strides[1].unsigned_abs(),
+                ss_ver_i,
+                sb128,
+                cy_stripe,
+                crow_h,
+                cw,
+                lr_backup,
+                1,
+            );
+            backup_db(
+                &mut lr_db[2],
+                &src[2][cys_off..],
+                strides[1].unsigned_abs(),
+                ss_ver_i,
+                sb128,
+                cy_stripe,
+                crow_h,
+                cw,
+                lr_backup,
+                1,
+            );
+        }
     }
 }
 

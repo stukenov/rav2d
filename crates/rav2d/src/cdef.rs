@@ -623,7 +623,6 @@ pub fn cdef_brow_8bpc(
             } else {
                 -1
             };
-
             if cdef_idx == -1
                 || !p.cdef_on
                 || ((p.y_strength.get(cdef_idx as usize).copied().unwrap_or(0) == 0)

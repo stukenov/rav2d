@@ -1527,7 +1527,7 @@ type GdfAddFn = unsafe extern "C" fn(
     ll_mask: *const [u16; 4],
 );
 
-use crate::dsp::{LoopRestorationDSPContext, PixelFn};
+use crate::dsp::LoopRestorationDSPContext;
 use crate::headers::{FhRestorationPlane, PixelLayout};
 use crate::lf_mask::{Av2Filter, Av2Restoration};
 
@@ -1547,7 +1547,10 @@ pub struct LrContext<'a> {
     pub lr_mask: &'a [Av2Restoration],
     pub lr_db_line: &'a [Vec<u8>; 3],
     pub lr_cdef_line: &'a [Vec<u8>; 3],
-    pub lf_p: &'a [Vec<u8>; 3],
+    /// Luma plane (read-only) for chroma cross-component single-Wiener; dav2d's
+    /// `f->lf.p[0]`. The deferred filter pass processes chroma before luma, so
+    /// this is the pre-luma-LR luma for the current sbrow.
+    pub lf_p_luma: &'a [u8],
     pub base_q: i32,
     pub gdf_ref_dst_idx: i32,
     pub start_of_tile_row: &'a [u8],
@@ -1628,27 +1631,38 @@ fn lr_stripe_8bpc(
         0 // RestorationType::None
     };
 
-    let mut wiener_fn: Option<PixelFn> = Option::None;
+    // Rust-native LR kernel selection (replaces the dav2d fn-pointer dispatch:
+    // the asm/dsp_lr pointers are all None, so we call the slice kernels directly,
+    // mirroring lr_apply_tmpl.c:79-101).
+    #[derive(PartialEq)]
+    enum WKind {
+        None,
+        NsSingle,
+        NsMulti,
+        PcWiener,
+    }
     let mut multi_wiener = false;
     let mut noskip_mask = [0u16; 66];
 
     let pd = &ctx.restoration_p[plane as usize].ns;
 
-    if wiener_type == RestorationType::NsWiener as u8 {
+    let wkind = if wiener_type == RestorationType::NsWiener as u8 {
         if pd.frame_filters_on != 0 {
             if pd.num_classes == 1 {
-                wiener_fn = ctx.dsp_lr.ns_wiener_single[chroma as usize];
+                WKind::NsSingle
             } else {
                 multi_wiener = true;
-                wiener_fn = ctx.dsp_lr.ns_wiener_multi;
+                WKind::NsMulti
             }
         } else {
-            wiener_fn = ctx.dsp_lr.ns_wiener_single[chroma as usize];
+            WKind::NsSingle
         }
     } else if wiener_type == RestorationType::PcWiener as u8 {
         multi_wiener = true;
-        wiener_fn = ctx.dsp_lr.pc_wiener;
-    }
+        WKind::PcWiener
+    } else {
+        WKind::None
+    };
 
     if multi_wiener {
         let mut r = 0usize;
@@ -1672,11 +1686,26 @@ fn lr_stripe_8bpc(
     }
 
     let lstride = ctx.cur_stride[0];
-    let _shift_hor = 8 - ss_hor;
+    let lstride_u = lstride.unsigned_abs();
+    let stride_u = abs_stride;
 
     let mut gdf_err = [0i8; 64 * 64];
     let mut left_idx = 0usize;
     let mut noskip_offset = 0usize;
+    // Running pixel offset of the current stripe's first row (dav2d advances `p`
+    // by `stripe_h * stride` each iteration). The slice kernels index `p` with a
+    // local stripe-relative `y`, so this must track the stripe origin.
+    let mut cur_off = p_off;
+    // Running deblocked-line (lpf) offset. dav2d advances lpf by 4*stride per
+    // stripe (lr_apply_tmpl.c:188); the single-thread base term is just `x`.
+    let mut lpf_off = (have_tt as isize
+        * (sby as isize * (4 << ctx.sb128 as i32) - 4)
+        * stride_u as isize
+        + x as isize) as usize;
+    let mut llpf_off = (have_tt as isize
+        * (sby as isize * (4 << ctx.sb128 as i32) - 4)
+        * lstride_u as isize
+        + (x * 2) as isize) as usize;
 
     while y + stripe_h <= row_h {
         edges ^= ((-(((sby + 1) != ctx.sbh) as i32 | (y + stripe_h != row_h) as i32)) as u8
@@ -1700,200 +1729,229 @@ fn lr_stripe_8bpc(
             && sb256_idx < ctx.mask.len()
             && ctx.mask[sb256_idx].gdf[((((y + inc) >> 4) & 12) + sb64x_idx) as usize] != 0;
 
-        if gdf_enabled && let Some(gdf_prep) = ctx.dsp_lr.gdf_prep {
-            // SAFETY: gdf_prep is an FFI function pointer with matching calling convention and signature.
-            let gdf_prep_fn: GdfPrepFn = unsafe { std::mem::transmute(gdf_prep) };
-            let lpf_off =
-                have_tt as usize * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
-                    + x as usize;
-            let lpf_bottom_off = lpf_off + 6 * abs_stride;
-            let plane_u = plane as usize;
-            unsafe {
-                gdf_prep_fn(
-                    gdf_err.as_mut_ptr(),
-                    64,
-                    p.as_ptr().add(p_off),
-                    stride,
-                    left.as_ptr().add(left_idx),
-                    ctx.lr_db_line[plane_u].as_ptr().add(lpf_off),
-                    ctx.lr_db_line[plane_u].as_ptr().add(lpf_bottom_off),
-                    w,
-                    stripe_h,
-                    ref_dst_idx,
-                    qp_idx,
-                    edges,
-                );
+        let plane_u = plane as usize;
+        let stripe_u = stripe_h as usize;
+        let w_u = w as usize;
+
+        // `top` source: the cross-tile-row CDEF line when both HAVE_TOP and
+        // HAVE_TOP_INTEGRATED are set; otherwise the deblocked-line store.
+        let cdef_top: Option<usize> = if (edges & (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED))
+            == (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED)
+        {
+            let cdef_off =
+                tile_row_m1 as usize * (6 - 4 * chroma as usize) * stride_u + x as usize;
+            let off = cdef_off + (2 * (1 - chroma) as usize) * stride_u;
+            if off < ctx.lr_cdef_line[plane_u].len() {
+                Some(off)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        // GDF prep: compute the per-pixel error into gdf_err.
+        if gdf_enabled {
+            let (top_slice, top_off): (&[u8], usize) = match cdef_top {
+                Some(off) => (&ctx.lr_cdef_line[plane_u], off),
+                None => (&ctx.lr_db_line[plane_u], lpf_off),
+            };
+            gdf_prep_8bpc(
+                &mut gdf_err,
+                64,
+                &*p,
+                cur_off,
+                stride_u,
+                &left[left_idx..],
+                top_slice,
+                top_off,
+                &ctx.lr_db_line[plane_u],
+                lpf_off + 6 * stride_u,
+                w_u,
+                stripe_u,
+                ref_dst_idx as usize,
+                qp_idx as usize,
+                edges,
+            );
         }
 
         let y4 = (((y << ss_ver) & 255) >> 2) as usize;
 
-        if let Some(wfn) = wiener_fn {
-            // SAFETY: wfn is an FFI function pointer with matching calling convention and signature.
-            let wiener_fn_typed: WienerFilterFn = unsafe { std::mem::transmute(wfn) };
-            let lpf_off =
-                have_tt as usize * (sby as usize * (4 << ctx.sb128 as usize) - 4) * abs_stride
-                    + x as usize;
-
-            let top_ptr = if (edges & (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED))
-                == (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED)
-            {
-                let cdef_off =
-                    tile_row_m1 as usize * (6 - 4 * chroma as usize) * abs_stride + x as usize;
-                let plane_u = plane as usize;
-                if cdef_off < ctx.lr_cdef_line[plane_u].len() {
-                    unsafe {
-                        ctx.lr_cdef_line[plane_u]
-                            .as_ptr()
-                            .add(cdef_off)
-                            .add((2 * (1 - chroma) as usize) * abs_stride)
-                    }
+        // Build the lossless-mask slice for this stripe. dav2d packs the chroma
+        // mask (ss_hor) into a single byte per 4-row; for luma / non-ss_hor it is
+        // the raw lossless mask offset by sb64x_idx (lr_apply_tmpl.c:154-169).
+        let ll_rows = (stripe_h >> 2).max(1) as usize + 1;
+        let mut ll_mask_buf = vec![[0u16; 4]; ll_rows];
+        if sb256_idx < ctx.mask.len() {
+            let m = &ctx.mask[sb256_idx];
+            if plane == 0 || ss_hor == 0 {
+                let src = if plane == 0 {
+                    &m.lossless_mask_y
                 } else {
-                    unsafe { ctx.lr_db_line[plane as usize].as_ptr().add(lpf_off) }
-                }
-            } else {
-                unsafe { ctx.lr_db_line[plane as usize].as_ptr().add(lpf_off) }
-            };
-            let bottom_ptr = unsafe {
-                ctx.lr_db_line[plane as usize]
-                    .as_ptr()
-                    .add(lpf_off + 6 * abs_stride)
-            };
-
-            let ll_mask_ptr: *const [u16; 4] = if sb256_idx < ctx.mask.len() {
-                if plane == 0 {
-                    ctx.mask[sb256_idx].lossless_mask_y[y4][sb64x_idx as usize..].as_ptr()
-                        as *const [u16; 4]
-                } else {
-                    ctx.mask[sb256_idx].lossless_mask_uv[y4][sb64x_idx as usize..].as_ptr()
-                        as *const [u16; 4]
-                }
-            } else {
-                std::ptr::null()
-            };
-
-            let mut params = std::mem::MaybeUninit::<WienerParamsC>::zeroed();
-            if multi_wiener {
-                let mp = unsafe { &mut (*params.as_mut_ptr()).multi };
-                *mp = std::mem::ManuallyDrop::new(WienerParamsMulti {
-                    filters: if wiener_type == RestorationType::PcWiener as u8 {
-                        ctx.pc_filters.as_ptr() as *const u8
-                    } else if pd.frame_filters_on != 0 {
-                        pd.filter.as_ptr() as *const u8
-                    } else {
-                        lr.ns_filter.as_ptr() as *const u8
-                    },
-                    subclass_lut: if wiener_type == RestorationType::PcWiener as u8 {
-                        ctx.pc_subclass_lut.as_ptr()
-                    } else {
-                        ctx.ns_subclass_lut.as_ptr()
-                    },
-                    noskip_mask: noskip_mask[noskip_offset..].as_ptr(),
-                    base_q: ctx.base_q,
-                });
-            } else {
-                let sp = unsafe { &mut (*params.as_mut_ptr()).single };
-                let filter_ptr = if pd.frame_filters_on != 0 {
-                    pd.filter[0].as_ptr()
-                } else {
-                    lr.ns_filter[0].as_ptr()
+                    &m.lossless_mask_uv
                 };
-                *sp = std::mem::ManuallyDrop::new(WienerParamsSingle {
-                    filter: filter_ptr,
-                    luma: std::ptr::null(),
-                    luma_top: std::ptr::null(),
-                    luma_bottom: std::ptr::null(),
-                    stride: lstride,
-                    ss_ver,
-                    ss_hor,
-                    ds_flt: ctx.cfl_ds_filter_index,
-                });
-                if chroma != 0 {
-                    let luma_off =
-                        (x << ss_hor) as usize + (y << ss_ver) as usize * lstride.unsigned_abs();
-                    let sp = unsafe { &mut (*params.as_mut_ptr()).single };
-                    sp.luma = if luma_off < ctx.lf_p[0].len() {
-                        unsafe { ctx.lf_p[0].as_ptr().add(luma_off) }
-                    } else {
-                        std::ptr::null()
-                    };
-                    let llpf_off = have_tt as usize
-                        * (sby as usize * (4 << ctx.sb128 as usize) - 4)
-                        * lstride.unsigned_abs()
-                        + (x * 2) as usize;
-                    sp.luma_top = if llpf_off < ctx.lr_db_line[0].len() {
-                        unsafe { ctx.lr_db_line[0].as_ptr().add(llpf_off) }
-                    } else {
-                        std::ptr::null()
-                    };
-                    sp.luma_bottom =
-                        if llpf_off + 6 * lstride.unsigned_abs() < ctx.lr_db_line[0].len() {
-                            unsafe {
-                                ctx.lr_db_line[0]
-                                    .as_ptr()
-                                    .add(llpf_off + 6 * lstride.unsigned_abs())
+                for (r, slot) in ll_mask_buf.iter_mut().enumerate() {
+                    let yy = y4 + r;
+                    if yy < 64 {
+                        let row = &src[yy];
+                        for k in 0..4 {
+                            if sb64x_idx as usize + k < 4 {
+                                slot[k] = row[sb64x_idx as usize + k];
                             }
-                        } else {
-                            std::ptr::null()
-                        };
+                        }
+                    }
                 }
-            }
-
-            unsafe {
-                wiener_fn_typed(
-                    p.as_mut_ptr().add(p_off),
-                    stride,
-                    left.as_ptr().add(left_idx),
-                    top_ptr,
-                    bottom_ptr,
-                    w,
-                    stripe_h,
-                    params.as_ptr(),
-                    edges,
-                    ll_mask_ptr,
-                );
-            }
-            if multi_wiener {
-                noskip_offset += (stripe_h >> 2) as usize;
+            } else {
+                // chroma, ss_hor: pack two adjacent columns into the low/high byte.
+                let init_y = (y >> 2) as usize;
+                let end_y = ((y + stripe_h) >> 2) as usize;
+                let base = (y4 >> ss_ver) as usize;
+                for (r, yy) in (init_y..end_y).enumerate() {
+                    let src_y = base + (yy - init_y);
+                    if src_y < 64 && r < ll_mask_buf.len() {
+                        let row = &m.lossless_mask_uv[src_y];
+                        let lo = row[sb64x_idx as usize];
+                        let hi = if sb64x_idx as usize + 1 < 4 {
+                            row[sb64x_idx as usize + 1]
+                        } else {
+                            0
+                        };
+                        ll_mask_buf[r][0] = (lo & 0xff) | ((hi & 0xff) << 8);
+                    }
+                }
             }
         }
 
-        if gdf_enabled && let Some(gdf_add) = ctx.dsp_lr.gdf_add {
-            // SAFETY: gdf_add is an FFI function pointer with matching calling convention and signature.
-            let gdf_add_fn: GdfAddFn = unsafe { std::mem::transmute(gdf_add) };
-            let ll_mask_ptr: *const [u16; 4] = if sb256_idx < ctx.mask.len() {
-                if plane == 0 {
-                    ctx.mask[sb256_idx].lossless_mask_y[y4][sb64x_idx as usize..].as_ptr()
-                        as *const [u16; 4]
-                } else {
-                    ctx.mask[sb256_idx].lossless_mask_uv[y4][sb64x_idx as usize..].as_ptr()
-                        as *const [u16; 4]
-                }
-            } else {
-                std::ptr::null()
+        if wkind != WKind::None {
+            let (top_slice, top_off): (&[u8], usize) = match cdef_top {
+                Some(off) => (&ctx.lr_cdef_line[plane_u], off),
+                None => (&ctx.lr_db_line[plane_u], lpf_off),
             };
-            unsafe {
-                gdf_add_fn(
-                    p.as_mut_ptr().add(p_off),
-                    stride,
-                    gdf_err.as_ptr(),
-                    64,
-                    w,
-                    stripe_h,
-                    gdf_scale,
-                    ll_mask_ptr,
-                );
+            // Take read-only copies of the line stores so the kernel can borrow
+            // `p` mutably while reading lpf/luma (they are distinct allocations).
+            let db_line = ctx.lr_db_line[plane_u].clone();
+            let bottom_off = lpf_off + 6 * stride_u;
+            match wkind {
+                WKind::NsSingle if chroma == 0 => {
+                    let mut filter = [0i8; 16];
+                    let src = if pd.frame_filters_on != 0 {
+                        &pd.filter[0][..16]
+                    } else {
+                        &lr.ns_filter[0][..16]
+                    };
+                    filter.copy_from_slice(src);
+                    let top_owned = if cdef_top.is_some() {
+                        Some(top_slice.to_vec())
+                    } else {
+                        None
+                    };
+                    let (ts, to): (&[u8], usize) = match &top_owned {
+                        Some(v) => (v, top_off),
+                        None => (&db_line, lpf_off),
+                    };
+                    ns_wiener_single_y_8bpc(
+                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
+                        w_u, stripe_u, &filter, edges, &ll_mask_buf,
+                    );
+                }
+                WKind::NsSingle => {
+                    // chroma single wiener (uses luma for cross-component refine).
+                    let mut filter = [0i8; 18];
+                    let src = if pd.frame_filters_on != 0 {
+                        &pd.filter[0][..18]
+                    } else {
+                        &lr.ns_filter[0][..18]
+                    };
+                    filter.copy_from_slice(src);
+                    let luma = ctx.lf_p_luma.to_vec();
+                    let luma_off =
+                        (x << ss_hor) as usize + (y << ss_ver) as usize * lstride_u;
+                    let luma_db = ctx.lr_db_line[0].clone();
+                    let top_owned = if cdef_top.is_some() {
+                        Some(top_slice.to_vec())
+                    } else {
+                        None
+                    };
+                    let (ts, to): (&[u8], usize) = match &top_owned {
+                        Some(v) => (v, top_off),
+                        None => (&db_line, lpf_off),
+                    };
+                    ns_wiener_single_uv_8bpc(
+                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
+                        w_u, stripe_u, &filter, &luma, luma_off, lstride_u, &luma_db, llpf_off,
+                        &luma_db, llpf_off + 6 * lstride_u, ss_hor as usize, ss_ver as usize,
+                        ctx.cfl_ds_filter_index, edges, &ll_mask_buf,
+                    );
+                }
+                WKind::NsMulti => {
+                    let filters: &[[i8; 18]] = if pd.frame_filters_on != 0 {
+                        &pd.filter
+                    } else {
+                        // per-unit ns_filter is [i8;32]; the multi kernel reads the
+                        // first 18 taps per class.
+                        // SAFETY: reinterpret the [i8;32] rows as [i8;18] prefixes.
+                        unsafe {
+                            std::slice::from_raw_parts(
+                                lr.ns_filter.as_ptr() as *const [i8; 18],
+                                lr.ns_filter.len(),
+                            )
+                        }
+                    };
+                    let top_owned = if cdef_top.is_some() {
+                        Some(top_slice.to_vec())
+                    } else {
+                        None
+                    };
+                    let (ts, to): (&[u8], usize) = match &top_owned {
+                        Some(v) => (v, top_off),
+                        None => (&db_line, lpf_off),
+                    };
+                    ns_wiener_multi_8bpc(
+                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
+                        w_u, stripe_u, filters, ctx.ns_subclass_lut,
+                        &noskip_mask[noskip_offset..], ctx.base_q, edges, &ll_mask_buf,
+                    );
+                    noskip_offset += (stripe_h >> 2) as usize;
+                }
+                WKind::PcWiener => {
+                    let top_owned = if cdef_top.is_some() {
+                        Some(top_slice.to_vec())
+                    } else {
+                        None
+                    };
+                    let (ts, to): (&[u8], usize) = match &top_owned {
+                        Some(v) => (v, top_off),
+                        None => (&db_line, lpf_off),
+                    };
+                    pc_wiener_8bpc(
+                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
+                        w_u, stripe_u, ctx.pc_filters, ctx.pc_subclass_lut,
+                        &noskip_mask[noskip_offset..], ctx.base_q, edges, &ll_mask_buf,
+                    );
+                    noskip_offset += (stripe_h >> 2) as usize;
+                }
+                WKind::None => {}
             }
+        }
+
+        if gdf_enabled {
+            gdf_add_8bpc(
+                &mut p[cur_off..], stride_u, &gdf_err, 64, w_u, stripe_u, gdf_scale, &ll_mask_buf,
+            );
         }
 
         edges &= !(LR_HAVE_BOTTOM_INTEGRATED | LR_HAVE_TOP_INTEGRATED);
         left_idx += stripe_h as usize;
+        cur_off += stripe_u * stride_u;
         y += stripe_h;
         edges |= LR_HAVE_TOP;
         stripe_h = imin(64 >> ss_ver, row_h - y);
         if stripe_h == 0 {
             break;
         }
+        // dav2d advances lpf/llpf by 4 rows per stripe (lr_apply_tmpl.c:188-189).
+        lpf_off += 4 * stride_u;
+        llpf_off += 4 * lstride_u;
     }
 }
 
@@ -2041,7 +2099,7 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
         let w = (ctx.bw * 4) >> ss_hor;
         let next_row_y = (sby + 1) << ((6 - ss_ver) + ctx.sb128 as i32);
         let row_h = imin(next_row_y - (8 >> ss_ver) * not_last, h);
-        let mut offset_uv = (8 * (sby != 0) as i32) >> ss_ver;
+        let offset_uv = (8 * (sby != 0) as i32) >> ss_ver;
         let mut y_stripe = (sby << ((6 - ss_ver) + ctx.sb128 as i32)) - offset_uv;
 
         if sby != 0 && first_sby_in_tile_row_flag != 0 {
@@ -2052,15 +2110,10 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
             };
             if restore_planes & LR_RESTORE_U != 0 {
                 let abs_stride_uv = dst_stride[1].unsigned_abs();
-                let u_off = offset_uv as usize * abs_stride_uv;
                 lr_sbrow(
                     ctx,
                     dst[1],
-                    if u_off <= dst[1].len() {
-                        dst[1].len() - u_off
-                    } else {
-                        0
-                    },
+                    (y_stripe.max(0) as usize) * abs_stride_uv,
                     y_stripe,
                     w,
                     h,
@@ -2072,15 +2125,10 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
             }
             if restore_planes & LR_RESTORE_V != 0 {
                 let abs_stride_uv = dst_stride[1].unsigned_abs();
-                let v_off = offset_uv as usize * abs_stride_uv;
                 lr_sbrow(
                     ctx,
                     dst[2],
-                    if v_off <= dst[2].len() {
-                        dst[2].len() - v_off
-                    } else {
-                        0
-                    },
+                    (y_stripe.max(0) as usize) * abs_stride_uv,
                     y_stripe,
                     w,
                     h,
@@ -2090,7 +2138,6 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
                     tile_row - 1,
                 );
             }
-            offset_uv = 0;
             y_stripe += 8 >> ss_ver;
         }
 
@@ -2101,15 +2148,10 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
         };
         if restore_planes & LR_RESTORE_U != 0 {
             let abs_stride_uv = dst_stride[1].unsigned_abs();
-            let u_off = offset_uv as usize * abs_stride_uv;
             lr_sbrow(
                 ctx,
                 dst[1],
-                if u_off <= dst[1].len() {
-                    dst[1].len() - u_off
-                } else {
-                    0
-                },
+                (y_stripe.max(0) as usize) * abs_stride_uv,
                 y_stripe,
                 w,
                 h,
@@ -2121,15 +2163,10 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
         }
         if restore_planes & LR_RESTORE_V != 0 {
             let abs_stride_uv = dst_stride[1].unsigned_abs();
-            let v_off = offset_uv as usize * abs_stride_uv;
             lr_sbrow(
                 ctx,
                 dst[2],
-                if v_off <= dst[2].len() {
-                    dst[2].len() - v_off
-                } else {
-                    0
-                },
+                (y_stripe.max(0) as usize) * abs_stride_uv,
                 y_stripe,
                 w,
                 h,
@@ -2146,20 +2183,15 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
         let w = ctx.bw * 4;
         let next_row_y = (sby + 1) << (6 + ctx.sb128 as i32);
         let row_h = imin(next_row_y - 8 * not_last, h);
-        let mut offset_y = 8 * (sby != 0) as i32;
+        let offset_y = 8 * (sby != 0) as i32;
         let mut y_stripe = (sby << (6 + ctx.sb128 as i32)) - offset_y;
 
         if sby != 0 && first_sby_in_tile_row_flag != 0 {
             let abs_stride_y = dst_stride[0].unsigned_abs();
-            let y_off = offset_y as usize * abs_stride_y;
             lr_sbrow(
                 ctx,
                 dst[0],
-                if y_off <= dst[0].len() {
-                    dst[0].len() - y_off
-                } else {
-                    0
-                },
+                (y_stripe.max(0) as usize) * abs_stride_y,
                 y_stripe,
                 w,
                 h,
@@ -2168,19 +2200,13 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
                 FirstSbInTileRow::Top,
                 tile_row - 1,
             );
-            offset_y = 0;
             y_stripe += 8;
         }
         let abs_stride_y = dst_stride[0].unsigned_abs();
-        let y_off = offset_y as usize * abs_stride_y;
         lr_sbrow(
             ctx,
             dst[0],
-            if y_off <= dst[0].len() {
-                dst[0].len() - y_off
-            } else {
-                0
-            },
+            (y_stripe.max(0) as usize) * abs_stride_y,
             y_stripe,
             w,
             h,

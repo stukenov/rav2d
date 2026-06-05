@@ -2515,7 +2515,10 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     } = fc;
     let fc_sb256h = *sb256h;
     let fc_sbh = *sbh;
-    let fc_inloop_filters = *inloop_filters;
+    let fc_inloop_filters = std::env::var("RAV2D_FILT_OVERRIDE")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(*inloop_filters);
 
     let seq_hdr = &**seq_hdr;
     let frame_hdr = &**frame_hdr;
@@ -3063,44 +3066,15 @@ fn filter_sbrow(
             sby,
             start_of_tile_row,
         );
-        if std::env::var("RAV2D_DBCOLSTRACE").is_ok()
-            && sby <= 1
-            && frame_hdr.frame_type == crate::headers::FrameType::Key
-        {
-            let s = fp.uv_stride.unsigned_abs();
-            for gy in 26..40 {
-                for xx in 40..56 {
-                    let idx = gy as usize * s + xx as usize;
-                    if idx < dst_u.len() {
-                        eprintln!("DBCOLU {} {} {}", xx, gy, dst_u[idx]);
-                    }
-                }
-            }
-        }
-        if std::env::var("RAV2D_NO_DBROWS").is_err() {
-            crate::deblock::deblock_sbrow_rows(
-                &mut dctx,
-                dst_y,
-                y_off0 as usize,
-                dst_u,
-                dst_v,
-                uv_off0 as usize,
-                sby,
-            );
-        }
-        if std::env::var("RAV2D_DBTRACE").is_ok()
-            && frame_hdr.frame_type == crate::headers::FrameType::Key
-        {
-            let s = fp.uv_stride.unsigned_abs();
-            for gy in 26..40 {
-                for xx in 40..56 {
-                    let idx = gy as usize * s + xx as usize;
-                    if idx < dst_u.len() {
-                        eprintln!("DBPXU {} {} {}", xx, gy, dst_u[idx]);
-                    }
-                }
-            }
-        }
+        crate::deblock::deblock_sbrow_rows(
+            &mut dctx,
+            dst_y,
+            y_off0 as usize,
+            dst_u,
+            dst_v,
+            uv_off0 as usize,
+            sby,
+        );
     }
     // dav2d's gate also enables copy_db when CDEF is on, because the *multi*-
     // threaded CDEF path reads `lr_db_line` across the sbrow/tile-row seam. In
@@ -3229,10 +3203,58 @@ fn filter_sbrow(
         );
     }
 
-    // (4) Loop restoration (Wiener / GDF). Gated by restore_planes; the M2 clip
-    // disables restoration so this branch is inert. Full LR dispatch (the
-    // Rust-native kernel selection) lands with the LR ABI work.
-    let _ = (INLOOPFILTER_WIENER, INLOOPFILTER_GDF);
+    // (4) Loop restoration (Wiener / GDF). dav2d gates on restore_planes plus the
+    // WIENER|GDF inloop bits (recon_tmpl.c:4033-4034 / lr_apply_tmpl.c). The
+    // dispatch calls the Rust-native slice kernels directly (the asm dsp_lr
+    // pointers are unavailable).
+    if lf.restore_planes != 0 && inloop & (INLOOPFILTER_WIENER | INLOOPFILTER_GDF) != 0 {
+        // Snapshot the (pre-luma-LR) luma plane: the LR pass processes chroma
+        // before luma, and the chroma single-Wiener reads luma cross-component
+        // (dav2d's f->lf.p[0]).
+        let luma_snapshot = dst_y.to_vec();
+        let dsp_lr = crate::dsp::LoopRestorationDSPContext::default();
+        // PC/NS wiener tables, selected by the qidx bucket computed in init_wiener
+        // (dav2d decode.c:82-99). Empty slices when the corresponding filter type
+        // is unused; the kernels only index them for their own filter family.
+        let widx = lf.wiener_idx;
+        let pc_subclass_lut: &[u8] = &crate::tables::PC_WIENER_SUB_CLASSIFY[widx];
+        let pc_filters: &[[i16; 13]] = &crate::tables::PC_WIENER_FILTERS[widx];
+        let ns_subclass_lut: &[u8] = match lf.ns_subclass_class_idx {
+            Some(ci) => &crate::tables::PC_WIENER_SUB_CLASSIFY_NS[widx][ci],
+            None => &[],
+        };
+        let ctx = crate::looprestoration::LrContext {
+            dsp_lr: &dsp_lr,
+            restoration_p: &frame_hdr.restoration.p,
+            gdf_qp_idx: frame_hdr.gdf.qp_idx as i32,
+            gdf_scale: frame_hdr.gdf.scale as i32,
+            sb128: frame_hdr.sb128 != 0,
+            cfl_ds_filter_index: seq_hdr.cfl_ds_filter_index as i32,
+            layout: seq_hdr.layout,
+            bw,
+            bh,
+            sb256w,
+            sbh,
+            mask: &lf.mask,
+            lr_mask: &lf.lr_mask,
+            lr_db_line: &lf.lr_db_line,
+            lr_cdef_line: &lf.lr_cdef_line,
+            lf_p_luma: &luma_snapshot,
+            base_q: lf.base_q,
+            gdf_ref_dst_idx: lf.gdf_ref_dst_idx,
+            start_of_tile_row: &lf.start_of_tile_row,
+            ns_subclass_lut,
+            pc_subclass_lut,
+            pc_filters,
+            n_tc: 1,
+            inloop_filters: inloop,
+            cur_stride: [fp.y_stride, fp.uv_stride],
+            unit_size: frame_hdr.restoration.unit_size,
+            restore_planes: lf.restore_planes,
+        };
+        let mut dst: [&mut [u8]; 3] = [dst_y, dst_u, dst_v];
+        crate::looprestoration::lr_sbrow_8bpc(&ctx, &mut dst, sby);
+    }
 }
 
 /// Extract the per-SB256 `cdef_idx` arrays for one mask row into a contiguous
@@ -3406,13 +3428,6 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
             frame_hdr.skip_mode_enabled, frame_hdr.warp_motion, seq_hdr.masked_compound,
             frame_hdr.motion_modes, frame_hdr.tip.frame_mode, frame_hdr.show_immediate,
             frame_hdr.disable_cdf_update, frame_hdr.subpel_filter_mode,
-        );
-        eprintln!(
-            "FINFO2 sb128={} sbh={} sb256w={} bw={} bh={} w={} h={} cdef={} restore_planes_hdr lr={:?} ccso={:?}",
-            frame_hdr.sb128, fc.sbh, fc.sb256w, fc.bw, fc.bh,
-            frame_hdr.width, frame_hdr.height, seq_hdr.cdef,
-            [frame_hdr.restoration.p[0].restoration_type, frame_hdr.restoration.p[1].restoration_type, frame_hdr.restoration.p[2].restoration_type],
-            [frame_hdr.ccso.p[0].enabled, frame_hdr.ccso.p[1].enabled, frame_hdr.ccso.p[2].enabled],
         );
     }
 
@@ -8420,6 +8435,20 @@ fn inter_residual_tx_8bpc(
                 recon.scratch.is_coded[0][row] |= mask;
             }
         }
+        // LR no-skip mask (luma): set per coded luma TX block, used by the
+        // PC/NS-Wiener classifier (dav2d recon_tmpl.c:2605-2609). Only when the
+        // block has coefficients (eob != -1).
+        if eob != -1 {
+            let m = &mut recon.lf_mask[recon.lf_idx];
+            let mask_idx = (bx4 >> 4) as usize;
+            let lr_mask: u16 = (((1u32 << tw4) - 1) << ((bx4 & 0xf) as u32)) as u16;
+            for y in 0..th4 as usize {
+                let row = by4 + y;
+                if row < 64 && mask_idx < 4 {
+                    m.lr_noskip_mask[row][mask_idx] |= lr_mask;
+                }
+            }
+        }
     } else if pl == 1 {
         // Chroma `is_coded` is marked once per chroma TX (pl==1 only, mirroring
         // recon_tmpl.c:4017 where U and V share a single grid update).
@@ -11778,6 +11807,20 @@ fn recon_b_luma_tx(
             let row = by4 + y as usize;
             if row < 64 {
                 recon.scratch.is_coded[0][row] |= mask;
+            }
+        }
+    }
+
+    // LR no-skip mask (luma): set per coded luma TX block for the PC/NS-Wiener
+    // classifier (dav2d recon_tmpl.c:2605-2609). Only when eob != -1.
+    if eob != -1 {
+        let m = &mut recon.lf_mask[recon.lf_idx];
+        let mask_idx = (bx4 >> 4) as usize;
+        let lr_mask: u16 = (((1u32 << tw4) - 1) << ((bx4 & 0xf) as u32)) as u16;
+        for y in 0..th4 as usize {
+            let row = by4 + y;
+            if row < 64 && mask_idx < 4 {
+                m.lr_noskip_mask[row][mask_idx] |= lr_mask;
             }
         }
     }
