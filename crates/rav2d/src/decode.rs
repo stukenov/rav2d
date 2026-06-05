@@ -6696,6 +6696,18 @@ fn decode_b(
                     &b,
                 );
             }
+            // refmvs_warp_add for warp motion modes (decode.c:1320-1328): add the
+            // derived warp matrix to the per-ref warp bank so later WARP_DELTA /
+            // WARP_MV blocks can use it as a base candidate.
+            if motion_mode > MotionMode::InterIntra as u8
+                && recon.warpmv[0].wm_type != crate::headers::WarpedMotionType::Invalid
+            {
+                crate::refmvs::warp_bank_add(
+                    &mut recon.rt.warp,
+                    &recon.warpmv[0],
+                    refs[0] as usize,
+                );
+            }
             // splat_oneref_mv (decode.c:545-597), translational path. Warp/
             // global-affine splat (mf==2 / mf==1 with warp) is deferred.
             let blk_mv = unsafe { b.data.inter.mv[0] };
@@ -6963,23 +6975,6 @@ fn decode_b(
     // (recon_tmpl.c:3482-3942). Inter, IntraBC and palette are NOT handled here.
     if trace_blk {
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
-    }
-    if std::env::var("RAV2D_MV").is_ok() && b.is_intra == 0 && !intrabc {
-        let r = unsafe { b.ref_pair.r };
-        let m0 = unsafe { b.data.inter.mv[0].c };
-        let is_comp = r[1] >= 0;
-        let m1 = if is_comp {
-            unsafe { b.data.inter.mv[1].c }
-        } else {
-            crate::levels::MvXY { y: 0, x: 0 }
-        };
-        eprintln!(
-            "RZMV by={} bx={} ref=[{},{}] mm={} im={} mv0=({},{}) mv1=({},{})",
-            by, bx, r[0], r[1],
-            unsafe { b.data.inter.motion_mode },
-            unsafe { b.data.inter.inter_mode },
-            m0.y, m0.x, m1.y, m1.x
-        );
     }
     if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
         recon_b_intra(
