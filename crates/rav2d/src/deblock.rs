@@ -1590,13 +1590,22 @@ fn deblock64_cols(
                     continue;
                 }
                 let hmask = &col_lflvl.filter_y[0][bx4_base + x];
+                // dav2d indexes the vmask by the sb64 row `y64 & 3`, not by the
+                // packed `y64idx` (which is `(y64 & 3) << 2`, whose low 2 bits are
+                // always 0). For multi-y64 superblock rows this read must select
+                // the correct sb64 sub-row.
+                let sb64y = (y64 & 3) as usize;
                 let vmask = [
-                    hmask[0][y64idx & 3],
-                    hmask[1][y64idx & 3],
-                    hmask[2][y64idx & 3],
-                    hmask[3][y64idx & 3],
+                    hmask[0][sb64y],
+                    hmask[1][sb64y],
+                    hmask[2][sb64y],
+                    hmask[3][sb64y],
                 ];
                 let llm = [ll_mask[x], ll_mask[x + 1]];
+                // dav2d's `tile_edge` (= tile_end == x64*16) is only set for the
+                // first column of an x64 that begins a new tile; for single-tile
+                // frames it is always false. Passing `x == 0` here would wrongly
+                // clamp max_width_neg at every superblock-column's left edge.
                 deblock_h_sb64y_8bpc(
                     p_y,
                     cur_off + x * 4,
@@ -1605,7 +1614,7 @@ fn deblock64_cols(
                     &llm,
                     &q_thr[x * 16..],
                     &side_thr[x * 16..],
-                    x == 0,
+                    false,
                 );
             }
         }
@@ -1699,6 +1708,7 @@ fn deblock64_cols(
                 ((hmask[2][mask_idx] as u32 >> mask_shift) & bytes_mask) as u16,
             ];
             let llm = [ll_mask[x], ll_mask[x + 1]];
+            // Single-tile: tile_edge is always false (see luma above).
             if apply_u {
                 deblock_h_sb64uv_8bpc(
                     p_u,
@@ -1708,7 +1718,7 @@ fn deblock64_cols(
                     &llm,
                     &q_thr[0][x * 16..],
                     &side_thr[0][x * 16..],
-                    x == 0,
+                    false,
                 );
             }
             if apply_v {
@@ -1720,7 +1730,7 @@ fn deblock64_cols(
                     &llm,
                     &q_thr[1][x * 16..],
                     &side_thr[1][x * 16..],
-                    x == 0,
+                    false,
                 );
             }
         }
