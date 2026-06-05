@@ -667,11 +667,7 @@ pub fn cdef_brow_8bpc(
             // dav2d cdef_apply_tmpl.c:153-210. Runs for every SB (independent of
             // CDEF), computing the per-pixel LUT index used by ccso_add later.
             if let Some(cc) = &p.ccso {
-                let ccm = cc
-                    .mask_ccso
-                    .get(sb256x)
-                    .copied()
-                    .unwrap_or([0; 3]);
+                let ccm = cc.mask_ccso.get(sb256x).copied().unwrap_or([0; 3]);
                 let flag = ccm[0] | ccm[1] | ccm[2];
                 let do_left = flag & !prev_flag;
                 prev_flag |= flag;
@@ -729,123 +725,152 @@ pub fn cdef_brow_8bpc(
 
             let cdef_active = !(cdef_idx == -1
                 || !p.cdef_on
-                || ((p.y_strength.get(cdef_idx.max(0) as usize).copied().unwrap_or(0) == 0)
-                    && (p.uv_strength.get(cdef_idx.max(0) as usize).copied().unwrap_or(0) == 0)));
+                || ((p
+                    .y_strength
+                    .get(cdef_idx.max(0) as usize)
+                    .copied()
+                    .unwrap_or(0)
+                    == 0)
+                    && (p
+                        .uv_strength
+                        .get(cdef_idx.max(0) as usize)
+                        .copied()
+                        .unwrap_or(0)
+                        == 0)));
 
             if cdef_active {
-            let noskip_full = if p.on_skip_tx {
-                !0u16
-            } else if sb256x < p.mask_noskip.len() && by_idx < 32 && sb64x_idx < 4 {
-                p.mask_noskip[mask_i][by_idx][sb64x_idx]
-            } else {
-                0
-            };
-
-            let y_lvl = p.y_strength[cdef_idx as usize] as i32;
-            let uv_lvl = p.uv_strength[cdef_idx as usize] as i32;
-            let flag = (y_lvl != 0) as u8 + (((uv_lvl != 0) as u8) << 1);
-
-            let y_pri_lvl = (y_lvl >> 2) << bitdepth_min_8;
-            let mut y_sec_lvl = y_lvl & 3;
-            y_sec_lvl += (y_sec_lvl == 3) as i32;
-            y_sec_lvl <<= bitdepth_min_8;
-
-            let uv_pri_lvl = (uv_lvl >> 2) << bitdepth_min_8;
-            let mut uv_sec_lvl = uv_lvl & 3;
-            uv_sec_lvl += (uv_sec_lvl == 3) as i32;
-            uv_sec_lvl <<= bitdepth_min_8;
-
-            // Per-SB lossless mask rows (dav2d cdef_apply_tmpl.c:213-222): two
-            // adjacent 4px rows at column sb64x_idx for luma, subsampled for uv.
-            // Zero unless the frame is segmented-lossless.
-            let (y_ll0, y_ll1, uv_ll0, uv_ll1) = if p.any_lossless {
-                let yr = (2 * by_idx).min(63);
-                let yl = p.mask_ll_y.get(sb256x);
-                let ul = p.mask_ll_uv.get(sb256x);
-                let y0 = yl.map(|m| m[yr][sb64x_idx]).unwrap_or(0);
-                let y1 = yl.map(|m| m[(yr + 1).min(63)][sb64x_idx]).unwrap_or(0);
-                let uvr = ((2 * by_idx) >> ss_ver).min(63);
-                let u0 = ul.map(|m| m[uvr][sb64x_idx]).unwrap_or(0);
-                let u1 = ul
-                    .map(|m| m[(uvr + (1 - ss_ver)).min(63)][sb64x_idx])
-                    .unwrap_or(0);
-                (y0, y1, u0, u1)
-            } else {
-                (0, 0, 0, 0)
-            };
-
-            let mut b_y = sb_y;
-            let mut b_uv = sb_uv;
-            let mut bx = sbx * sbsz;
-            let sb_bx_end = imin((sbx + 1) * sbsz, p.bw);
-            while bx < sb_bx_end {
-                if bx + 2 >= p.bw {
-                    edges &= !CDEF_HAVE_RIGHT;
-                }
-
-                let bx_mask = 3u16 << (bx & 14);
-                let y_lossless = ((y_ll0 | y_ll1) & bx_mask) != 0;
-                let uvbx_mask = (3u16 >> ss_hor) << ((bx & 14) >> ss_hor);
-                let uv_lossless = ((uv_ll0 | uv_ll1) & uvbx_mask) != 0;
-                if (noskip_full & bx_mask) == 0 || (y_lossless && uv_lossless) {
-                    prev_flag = 0;
-                    edges |= CDEF_HAVE_LEFT;
-                    b_y += 8;
-                    b_uv += 8 >> ss_hor;
-                    bx += 2;
-                    continue;
-                }
-
-                let do_left = flag & !prev_flag;
-                prev_flag = flag;
-                if do_left != 0 && (edges & CDEF_HAVE_LEFT) != 0 {
-                    if do_left & BACKUP_2X8_Y != 0 {
-                        cdef_backup2x8(&mut lr_bak[bit][0], y, b_y, y_ls, 0, 8);
-                    }
-                    if have_chroma && do_left & BACKUP_2X8_UV != 0 {
-                        cdef_backup2x8(&mut lr_bak[bit][1], u, b_uv, uv_ls, 0, 8 >> ss_ver);
-                        cdef_backup2x8(&mut lr_bak[bit][2], v, b_uv, uv_ls, 0, 8 >> ss_ver);
-                    }
-                }
-                if (edges & CDEF_HAVE_RIGHT) != 0 {
-                    let other = 1 - bit;
-                    if flag & BACKUP_2X8_Y != 0 {
-                        cdef_backup2x8(&mut lr_bak[other][0], y, b_y, y_ls, 8, 8);
-                    }
-                    if have_chroma && flag & BACKUP_2X8_UV != 0 {
-                        cdef_backup2x8(
-                            &mut lr_bak[other][1],
-                            u,
-                            b_uv,
-                            uv_ls,
-                            8 >> ss_hor,
-                            8 >> ss_ver,
-                        );
-                        cdef_backup2x8(
-                            &mut lr_bak[other][2],
-                            v,
-                            b_uv,
-                            uv_ls,
-                            8 >> ss_hor,
-                            8 >> ss_ver,
-                        );
-                    }
-                }
-
-                let mut variance = 0u32;
-                let dir = if y_pri_lvl != 0 || uv_pri_lvl != 0 {
-                    cdef_find_dir(&y[b_y..], y_ls, &mut variance) as usize
+                let noskip_full = if p.on_skip_tx {
+                    !0u16
+                } else if sb256x < p.mask_noskip.len() && by_idx < 32 && sb64x_idx < 4 {
+                    p.mask_noskip[mask_i][by_idx][sb64x_idx]
                 } else {
                     0
                 };
 
-                // Luma top/bottom: top from the toggled pre-CDEF line bank, bottom
-                // in-place (rows below not yet filtered).
-                let top_col = bx as usize * 4;
-                let bot_y = b_y + 8 * y_ls;
-                if y_pri_lvl != 0 {
-                    let adj = adjust_strength(y_pri_lvl, variance);
-                    if (adj != 0 || y_sec_lvl != 0) && !y_lossless {
+                let y_lvl = p.y_strength[cdef_idx as usize] as i32;
+                let uv_lvl = p.uv_strength[cdef_idx as usize] as i32;
+                let flag = (y_lvl != 0) as u8 + (((uv_lvl != 0) as u8) << 1);
+
+                let y_pri_lvl = (y_lvl >> 2) << bitdepth_min_8;
+                let mut y_sec_lvl = y_lvl & 3;
+                y_sec_lvl += (y_sec_lvl == 3) as i32;
+                y_sec_lvl <<= bitdepth_min_8;
+
+                let uv_pri_lvl = (uv_lvl >> 2) << bitdepth_min_8;
+                let mut uv_sec_lvl = uv_lvl & 3;
+                uv_sec_lvl += (uv_sec_lvl == 3) as i32;
+                uv_sec_lvl <<= bitdepth_min_8;
+
+                // Per-SB lossless mask rows (dav2d cdef_apply_tmpl.c:213-222): two
+                // adjacent 4px rows at column sb64x_idx for luma, subsampled for uv.
+                // Zero unless the frame is segmented-lossless.
+                let (y_ll0, y_ll1, uv_ll0, uv_ll1) = if p.any_lossless {
+                    let yr = (2 * by_idx).min(63);
+                    let yl = p.mask_ll_y.get(sb256x);
+                    let ul = p.mask_ll_uv.get(sb256x);
+                    let y0 = yl.map(|m| m[yr][sb64x_idx]).unwrap_or(0);
+                    let y1 = yl.map(|m| m[(yr + 1).min(63)][sb64x_idx]).unwrap_or(0);
+                    let uvr = ((2 * by_idx) >> ss_ver).min(63);
+                    let u0 = ul.map(|m| m[uvr][sb64x_idx]).unwrap_or(0);
+                    let u1 = ul
+                        .map(|m| m[(uvr + (1 - ss_ver)).min(63)][sb64x_idx])
+                        .unwrap_or(0);
+                    (y0, y1, u0, u1)
+                } else {
+                    (0, 0, 0, 0)
+                };
+
+                let mut b_y = sb_y;
+                let mut b_uv = sb_uv;
+                let mut bx = sbx * sbsz;
+                let sb_bx_end = imin((sbx + 1) * sbsz, p.bw);
+                while bx < sb_bx_end {
+                    if bx + 2 >= p.bw {
+                        edges &= !CDEF_HAVE_RIGHT;
+                    }
+
+                    let bx_mask = 3u16 << (bx & 14);
+                    let y_lossless = ((y_ll0 | y_ll1) & bx_mask) != 0;
+                    let uvbx_mask = (3u16 >> ss_hor) << ((bx & 14) >> ss_hor);
+                    let uv_lossless = ((uv_ll0 | uv_ll1) & uvbx_mask) != 0;
+                    if (noskip_full & bx_mask) == 0 || (y_lossless && uv_lossless) {
+                        prev_flag = 0;
+                        edges |= CDEF_HAVE_LEFT;
+                        b_y += 8;
+                        b_uv += 8 >> ss_hor;
+                        bx += 2;
+                        continue;
+                    }
+
+                    let do_left = flag & !prev_flag;
+                    prev_flag = flag;
+                    if do_left != 0 && (edges & CDEF_HAVE_LEFT) != 0 {
+                        if do_left & BACKUP_2X8_Y != 0 {
+                            cdef_backup2x8(&mut lr_bak[bit][0], y, b_y, y_ls, 0, 8);
+                        }
+                        if have_chroma && do_left & BACKUP_2X8_UV != 0 {
+                            cdef_backup2x8(&mut lr_bak[bit][1], u, b_uv, uv_ls, 0, 8 >> ss_ver);
+                            cdef_backup2x8(&mut lr_bak[bit][2], v, b_uv, uv_ls, 0, 8 >> ss_ver);
+                        }
+                    }
+                    if (edges & CDEF_HAVE_RIGHT) != 0 {
+                        let other = 1 - bit;
+                        if flag & BACKUP_2X8_Y != 0 {
+                            cdef_backup2x8(&mut lr_bak[other][0], y, b_y, y_ls, 8, 8);
+                        }
+                        if have_chroma && flag & BACKUP_2X8_UV != 0 {
+                            cdef_backup2x8(
+                                &mut lr_bak[other][1],
+                                u,
+                                b_uv,
+                                uv_ls,
+                                8 >> ss_hor,
+                                8 >> ss_ver,
+                            );
+                            cdef_backup2x8(
+                                &mut lr_bak[other][2],
+                                v,
+                                b_uv,
+                                uv_ls,
+                                8 >> ss_hor,
+                                8 >> ss_ver,
+                            );
+                        }
+                    }
+
+                    let mut variance = 0u32;
+                    let dir = if y_pri_lvl != 0 || uv_pri_lvl != 0 {
+                        cdef_find_dir(&y[b_y..], y_ls, &mut variance) as usize
+                    } else {
+                        0
+                    };
+
+                    // Luma top/bottom: top from the toggled pre-CDEF line bank, bottom
+                    // in-place (rows below not yet filtered).
+                    let top_col = bx as usize * 4;
+                    let bot_y = b_y + 8 * y_ls;
+                    if y_pri_lvl != 0 {
+                        let adj = adjust_strength(y_pri_lvl, variance);
+                        if (adj != 0 || y_sec_lvl != 0) && !y_lossless {
+                            cdef_filter_block_8bpc(
+                                y,
+                                y_ls,
+                                b_y,
+                                &lr_bak[bit][0],
+                                &cdef_line[tf][0],
+                                top_col,
+                                unsafe { std::slice::from_raw_parts(y.as_ptr(), y.len()) },
+                                bot_y,
+                                adj,
+                                y_sec_lvl,
+                                dir,
+                                damping,
+                                8,
+                                8,
+                                edges,
+                            );
+                        }
+                    } else if y_sec_lvl != 0 && !y_lossless {
                         cdef_filter_block_8bpc(
                             y,
                             y_ls,
@@ -855,87 +880,68 @@ pub fn cdef_brow_8bpc(
                             top_col,
                             unsafe { std::slice::from_raw_parts(y.as_ptr(), y.len()) },
                             bot_y,
-                            adj,
+                            0,
                             y_sec_lvl,
-                            dir,
+                            0,
                             damping,
                             8,
                             8,
                             edges,
                         );
                     }
-                } else if y_sec_lvl != 0 && !y_lossless {
-                    cdef_filter_block_8bpc(
-                        y,
-                        y_ls,
-                        b_y,
-                        &lr_bak[bit][0],
-                        &cdef_line[tf][0],
-                        top_col,
-                        unsafe { std::slice::from_raw_parts(y.as_ptr(), y.len()) },
-                        bot_y,
-                        0,
-                        y_sec_lvl,
-                        0,
-                        damping,
-                        8,
-                        8,
-                        edges,
-                    );
-                }
 
-                if uv_lvl != 0 && have_chroma && !uv_lossless {
-                    let uvdir = if uv_pri_lvl != 0 {
-                        uv_dir[dir] as usize
-                    } else {
-                        0
-                    };
-                    let cw = 8 >> ss_hor;
-                    let ch = 8 >> ss_ver;
-                    let top_col_uv = (bx as usize * 4) >> ss_hor;
-                    let bot_uv = b_uv + ch * uv_ls;
-                    cdef_filter_block_8bpc(
-                        u,
-                        uv_ls,
-                        b_uv,
-                        &lr_bak[bit][1],
-                        &cdef_line[tf][1],
-                        top_col_uv,
-                        unsafe { std::slice::from_raw_parts(u.as_ptr(), u.len()) },
-                        bot_uv,
-                        uv_pri_lvl,
-                        uv_sec_lvl,
-                        uvdir,
-                        damping - 1,
-                        cw,
-                        ch,
-                        edges,
-                    );
-                    cdef_filter_block_8bpc(
-                        v,
-                        uv_ls,
-                        b_uv,
-                        &lr_bak[bit][2],
-                        &cdef_line[tf][2],
-                        top_col_uv,
-                        unsafe { std::slice::from_raw_parts(v.as_ptr(), v.len()) },
-                        bot_uv,
-                        uv_pri_lvl,
-                        uv_sec_lvl,
-                        uvdir,
-                        damping - 1,
-                        cw,
-                        ch,
-                        edges,
-                    );
-                }
+                    if uv_lvl != 0 && have_chroma && !uv_lossless {
+                        let uvdir = if uv_pri_lvl != 0 {
+                            uv_dir[dir] as usize
+                        } else {
+                            0
+                        };
+                        let cw = 8 >> ss_hor;
+                        let ch = 8 >> ss_ver;
+                        let top_col_uv = (bx as usize * 4) >> ss_hor;
+                        let bot_uv = b_uv + ch * uv_ls;
+                        cdef_filter_block_8bpc(
+                            u,
+                            uv_ls,
+                            b_uv,
+                            &lr_bak[bit][1],
+                            &cdef_line[tf][1],
+                            top_col_uv,
+                            unsafe { std::slice::from_raw_parts(u.as_ptr(), u.len()) },
+                            bot_uv,
+                            uv_pri_lvl,
+                            uv_sec_lvl,
+                            uvdir,
+                            damping - 1,
+                            cw,
+                            ch,
+                            edges,
+                        );
+                        cdef_filter_block_8bpc(
+                            v,
+                            uv_ls,
+                            b_uv,
+                            &lr_bak[bit][2],
+                            &cdef_line[tf][2],
+                            top_col_uv,
+                            unsafe { std::slice::from_raw_parts(v.as_ptr(), v.len()) },
+                            bot_uv,
+                            uv_pri_lvl,
+                            uv_sec_lvl,
+                            uvdir,
+                            damping - 1,
+                            cw,
+                            ch,
+                            edges,
+                        );
+                    }
 
-                bit ^= 1;
-                edges |= CDEF_HAVE_LEFT;
-                b_y += 8;
-                b_uv += 8 >> ss_hor;
-                bx += 2;
-            }
+                    bit ^= 1;
+                    edges |= CDEF_HAVE_LEFT;
+                    b_y += 8;
+                    b_uv += 8 >> ss_hor;
+                    bx += 2;
+                }
             } else {
                 // CDEF skipped for this SB (dav2d `goto next_sb` after resetting
                 // prev_flag); CCSO add still runs below.

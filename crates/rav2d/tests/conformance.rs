@@ -817,6 +817,158 @@ fn bit_exact_filtered_sweep() {
     }
 }
 
+/// Debug helper: bisect which filter stage diverges for CLIP by decoding both
+/// decoders with the same filter mask, comparing the keyframe, for each of:
+/// none, deblock, deblock+cdef, deblock+cdef+ccso, +wiener, +gdf, all.
+#[test]
+#[ignore = "filter bisect harness"]
+fn filter_bisect() {
+    use rav2d::InloopFilterType as F;
+    let clip = std::env::var("CLIP").unwrap();
+    let path = media(&clip);
+    // Cumulative filter masks (dav2d DAV2D_INLOOPFILTER_* bits). rav2d uses the
+    // RAV2D_FILT_OVERRIDE env to run the exact same bit mask, since the public
+    // InloopFilterType enum only exposes single bits / All.
+    let combos: [(u32, &str); 6] = [
+        (0, "none"),
+        (1, "deblock"),
+        (3, "deblock+cdef"),
+        (7, "deblock+cdef+ccso"),
+        (15, "deblock+cdef+ccso+wiener"),
+        (31, "all"),
+    ];
+    for (bits, name) in combos {
+        let reference = dav2d_decode_filters_invisible(&path, bits);
+        // SAFETY: single-threaded test; set the override env for the rust decode.
+        unsafe {
+            std::env::set_var("RAV2D_FILT_OVERRIDE", bits.to_string());
+        }
+        let got = rav2d_decode_filters(&path, F::All);
+        unsafe {
+            std::env::remove_var("RAV2D_FILT_OVERRIDE");
+        }
+        if got.is_empty() || reference.is_empty() {
+            eprintln!("{name}: empty");
+            continue;
+        }
+        let g = &got[0];
+        let r = reference
+            .iter()
+            .filter(|r| (r.w, r.h, r.bpc, r.layout) == (g.w, g.h, g.bpc, g.layout))
+            .min_by_key(|r| {
+                (0..3)
+                    .map(|pl| {
+                        r.planes[pl]
+                            .iter()
+                            .zip(g.planes[pl].iter())
+                            .filter(|(a, b)| a != b)
+                            .count()
+                    })
+                    .sum::<usize>()
+            });
+        let r = match r {
+            Some(r) => r,
+            None => {
+                eprintln!("{name}: no match");
+                continue;
+            }
+        };
+        let (ssh, _) = ss(r.layout);
+        let mut parts = Vec::new();
+        for pl in 0..3 {
+            if r.planes[pl].len() != g.planes[pl].len() {
+                parts.push(format!("p{pl} sizediff"));
+                continue;
+            }
+            let diff = r.planes[pl]
+                .iter()
+                .zip(g.planes[pl].iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            if diff != 0 {
+                let first = r.planes[pl]
+                    .iter()
+                    .zip(g.planes[pl].iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap();
+                let stride = if pl == 0 {
+                    r.w as usize
+                } else {
+                    ((r.w + ssh) >> ssh) as usize
+                };
+                parts.push(format!(
+                    "p{pl} diff={diff} @({},{}) r={} g={}",
+                    first % stride,
+                    first / stride,
+                    r.planes[pl][first],
+                    g.planes[pl][first]
+                ));
+            }
+        }
+        if parts.is_empty() {
+            eprintln!("{name}: BIT-EXACT");
+        } else {
+            eprintln!("{name}: {}", parts.join("  "));
+        }
+        // Optional first-N diff coords for the combo named by env DIFFCOMBO.
+        if std::env::var("DIFFCOMBO").ok().as_deref() == Some(name) {
+            let pl = 0usize;
+            let pw = r.w as usize;
+            let mut n = 0;
+            for (i, (a, b)) in r.planes[pl].iter().zip(g.planes[pl].iter()).enumerate() {
+                if a != b {
+                    eprintln!("  diff @({},{}) r={} g={}", i % pw, i / pw, a, b);
+                    n += 1;
+                    if n >= 30 {
+                        break;
+                    }
+                }
+            }
+        }
+        // Optional grid map for the combo named by env GRIDCOMBO.
+        if std::env::var("GRIDCOMBO").ok().as_deref() == Some(name) {
+            let cell = std::env::var("CELL")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(16);
+            for pl in 0..3 {
+                if r.planes[pl].len() != g.planes[pl].len() || r.planes[pl].is_empty() {
+                    continue;
+                }
+                let pw = if pl == 0 {
+                    r.w as usize
+                } else {
+                    ((r.w + ssh) >> ssh) as usize
+                };
+                let ph = r.planes[pl].len() / pw;
+                let gw = pw.div_ceil(cell);
+                let gh = ph.div_ceil(cell);
+                let mut grid = vec![0usize; gw * gh];
+                for (i, (a, b)) in r.planes[pl].iter().zip(g.planes[pl].iter()).enumerate() {
+                    if a != b {
+                        grid[(i / pw / cell) * gw + (i % pw / cell)] += 1;
+                    }
+                }
+                eprintln!("  plane {pl} grid (cell={cell}, {gw}x{gh}):");
+                for gy in 0..gh {
+                    let mut row = String::new();
+                    for gx in 0..gw {
+                        let n = grid[gy * gw + gx];
+                        row.push(if n == 0 {
+                            '.'
+                        } else if n < cell {
+                            '+'
+                        } else {
+                            '#'
+                        });
+                    }
+                    eprintln!("    {row}");
+                }
+            }
+        }
+    }
+}
+
 /// Debug helper: decode one clip (env CLIP) with both decoders so RAV2D_TRACE
 /// emits matched LUMATX/CHROMATX traces to stderr.
 #[test]
@@ -826,13 +978,26 @@ fn trace_clip() {
         std::env::var("CLIP").unwrap_or_else(|_| "avm-v14.1.0-bus.64x64.l5.lossless.obu".into());
     let path = media(&clip);
     let which = std::env::var("WHICH").unwrap_or_else(|_| "both".into());
+    // FILTERS env: bit word (dav2d DAV2D_INLOOPFILTER_*); default 0 (off).
+    let filt: u32 = std::env::var("FILTERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let rav_filt = match filt {
+        0 => rav2d::InloopFilterType::None,
+        1 => rav2d::InloopFilterType::Deblock,
+        3 => rav2d::InloopFilterType::Cdef,
+        7 => rav2d::InloopFilterType::Restoration,
+        15 => rav2d::InloopFilterType::Wiener,
+        _ => rav2d::InloopFilterType::All,
+    };
     if which == "dav2d" || which == "both" {
         eprintln!("@@@DAV2D@@@");
-        let _ = dav2d_decode(&path);
+        let _ = dav2d_decode_filters_invisible(&path, filt);
     }
     if which == "rav2d" || which == "both" {
         eprintln!("@@@RAV2D@@@");
-        let _ = rav2d_decode(&path);
+        let _ = rav2d_decode_filters(&path, rav_filt);
     }
 }
 
@@ -999,7 +1164,11 @@ fn inter_frame1_diag() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
     let reference = dav2d_decode(&path);
     let got = rav2d_decode(&path);
-    eprintln!("dav2d frames={} rav2d frames={}", reference.len(), got.len());
+    eprintln!(
+        "dav2d frames={} rav2d frames={}",
+        reference.len(),
+        got.len()
+    );
     let g = &got[1]; // rav2d decode order: [key, inter(poc4), ...]
     let mut best = (usize::MAX, [0usize; 3], [0usize; 3]);
     for (ri, r) in reference.iter().enumerate() {
@@ -1077,7 +1246,10 @@ fn bit_exact_first_inter_frame() {
         }
     }
     if !failures.is_empty() {
-        panic!("first inter frame not bit-exact:\n  {}", failures.join("\n  "));
+        panic!(
+            "first inter frame not bit-exact:\n  {}",
+            failures.join("\n  ")
+        );
     }
 }
 
