@@ -3577,6 +3577,12 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     )
     .ok_or(())?;
 
+    // Attach the frame's film-grain synthesis params to the picture so the output
+    // path can apply grain to a display copy (dav2d_submit_frame, decode.c:5498).
+    if frame_hdr.film_grain.present != 0 {
+        fc.cur_pic.fgm = c.fgm[frame_hdr.film_grain.id as usize];
+    }
+
     let qcat = crate::cdf::cdf_thread_init_static_qcat(frame_hdr.quant.yac as u32) as usize;
 
     let is_inter_or_switch = frame_hdr.is_inter_or_switch();
@@ -3835,7 +3841,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
 pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
     let allocator: std::sync::Arc<dyn crate::picture::PicAllocator> =
         std::sync::Arc::new(crate::picture::DefaultPicAllocator::new());
-    let dst = match crate::picture::Picture::alloc(
+    let mut dst = match crate::picture::Picture::alloc(
         src.p.w,
         src.p.h,
         src.p.layout,
@@ -3847,6 +3853,7 @@ pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Pi
         Some(p) => p,
         None => return crate::picture::Picture::new(),
     };
+    dst.fgm = src.fgm;
     let n_planes = if src.p.layout == crate::headers::PixelLayout::I400 {
         1
     } else {
@@ -3880,6 +3887,99 @@ pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Pi
             }
         }
     }
+    dst
+}
+
+/// Whether a picture carries applicable film-grain params (dav2d `has_grain`,
+/// lib.c). Grain is applied at output only when at least one plane has scaling
+/// points, or chroma-from-luma is active on a restricted-range frame.
+pub(crate) fn picture_has_grain(pic: &crate::picture::Picture) -> bool {
+    match pic.fgm {
+        Some(fgd) => {
+            fgd.num_points[0] != 0
+                || fgd.num_points[1] != 0
+                || fgd.num_points[2] != 0
+                || (fgd.clip_to_restricted_range && fgd.chroma_scaling_from_luma)
+        }
+        None => false,
+    }
+}
+
+/// Produce a display copy of `src` with film grain synthesised into it, mirroring
+/// dav2d's `dav2d_apply_grain` (lib.c) + `dav2d_apply_grain_8bpc` (fg_apply): the
+/// reconstruction/reference copy stays ungrained (grain is display-only and must
+/// not feed inter prediction), so grain is written into a fresh copy.
+///
+/// The copy is first made bit-identical to `src` (so planes without grain match
+/// dav2d's memcpy-of-non-modified-planes), then the grain kernels overwrite the
+/// grained planes reading from the ungrained `src` planes.
+pub(crate) fn apply_grain_to_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
+    let fgd = match src.fgm {
+        Some(f) => f,
+        None => return clone_picture(src),
+    };
+    if src.p.bpc != 8 {
+        // Only 8bpc grain kernels are ported; higher bit depths fall back to a
+        // plain copy (no clip corpus exercises >8bpc grain yet).
+        return clone_picture(src);
+    }
+
+    let dst = clone_picture(src);
+    let seed = src
+        .frame_hdr
+        .as_ref()
+        .map(|h| h.film_grain.seed)
+        .unwrap_or(0);
+
+    let ss_ver = src.p.layout == crate::headers::PixelLayout::I420;
+    let ss_hor = matches!(
+        src.p.layout,
+        crate::headers::PixelLayout::I420 | crate::headers::PixelLayout::I422
+    );
+    let has_chroma = src.p.layout != crate::headers::PixelLayout::I400;
+
+    let y_stride = src.stride[0];
+    let uv_stride = src.stride[1];
+    let aligned_h = (src.p.h as usize + 127) & !127;
+    let y_sz = y_stride.unsigned_abs() * aligned_h;
+    let uv_sz = uv_stride.unsigned_abs() * (aligned_h >> ss_ver as usize);
+
+    // SAFETY: every plane allocation spans `stride * aligned_h` (chroma
+    // `>> ss_ver`) bytes (DefaultPicAllocator); the grain kernels index within
+    // `row * 32 * stride` for `h` rows, which stays inside that span. `src` and
+    // `dst` are distinct allocations so the slices never alias.
+    unsafe {
+        let src_y = std::slice::from_raw_parts(src.data[0].unwrap().as_ptr(), y_sz);
+        let dst_y = std::slice::from_raw_parts_mut(dst.data[0].unwrap().as_ptr(), y_sz);
+        let (src_u, src_v, dst_u, dst_v): (&[u8], &[u8], &mut [u8], &mut [u8]) = if has_chroma {
+            (
+                std::slice::from_raw_parts(src.data[1].unwrap().as_ptr(), uv_sz),
+                std::slice::from_raw_parts(src.data[2].unwrap().as_ptr(), uv_sz),
+                std::slice::from_raw_parts_mut(dst.data[1].unwrap().as_ptr(), uv_sz),
+                std::slice::from_raw_parts_mut(dst.data[2].unwrap().as_ptr(), uv_sz),
+            )
+        } else {
+            (&[], &[], &mut [], &mut [])
+        };
+
+        crate::filmgrain::apply_grain_8bpc(
+            dst_y,
+            dst_u,
+            dst_v,
+            src_y,
+            src_u,
+            src_v,
+            y_stride,
+            uv_stride,
+            &fgd,
+            src.p.w as usize,
+            src.p.h as usize,
+            seed,
+            ss_hor,
+            ss_ver,
+        );
+    }
+
     dst
 }
 

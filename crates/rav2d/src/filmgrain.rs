@@ -180,7 +180,11 @@ pub fn generate_grain_uv(
             let mut ci = 0usize;
             'outer: for dy in (y.wrapping_sub(ar_lag))..=y {
                 let dx_start = x.wrapping_sub(ar_lag);
-                let dx_end = if dy == y { x } else { x + ar_lag + 1 };
+                // Current row stops at (and includes) the center pixel dx==x,
+                // which carries the luma-correlation term (dav2d: the dx==0,dy==0
+                // case uses the final AR coeff for the luma contribution, then
+                // breaks). Off rows span the full [-ar_lag, +ar_lag] window.
+                let dx_end = if dy == y { x + 1 } else { x + ar_lag + 1 };
                 for dx in dx_start..dx_end {
                     if dy == y && dx == x {
                         if data.num_points[0] > 0 {
@@ -578,16 +582,29 @@ impl Default for GrainLut {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prep_grain_8bpc(
     fgd: &FilmGrainData,
     grain_lut: &mut GrainLut,
     scaling: &mut [Vec<u8>; 3],
     seed: u32,
+    ss_x: bool,
+    ss_y: bool,
 ) {
-    if fgd.num_points[0] > 0 || fgd.chroma_scaling_from_luma {
-        generate_grain_y(&mut grain_lut.y, fgd, seed);
+    // Generate grain LUTs as needed (dav2d_prep_grain, fg_apply_tmpl.c). The Y
+    // LUT is ALWAYS generated: the chroma LUTs derive from it. The chroma LUTs
+    // are generated with the plane's subsampling so the sub-grid dimensions
+    // match the picture layout (dav2d selects generate_grain_uv[layout-1]).
+    generate_grain_y(&mut grain_lut.y, fgd, seed);
+
+    if fgd.num_points[1] > 0 || fgd.chroma_scaling_from_luma {
+        generate_grain_uv(&mut grain_lut.u, &grain_lut.y, fgd, seed, 0, ss_x, ss_y);
+    }
+    if fgd.num_points[2] > 0 || fgd.chroma_scaling_from_luma {
+        generate_grain_uv(&mut grain_lut.v, &grain_lut.y, fgd, seed, 1, ss_x, ss_y);
     }
 
+    // Scaling LUTs (dav2d generates one per plane with scaling points).
     if fgd.num_points[0] > 0 {
         scaling[0].resize(256, 0);
         generate_scaling_8bpc(
@@ -596,26 +613,20 @@ pub fn prep_grain_8bpc(
         );
     }
 
-    for uv in 0..2 {
-        if fgd.num_points[uv + 1] > 0 || fgd.chroma_scaling_from_luma {
-            let lut = if uv == 0 {
-                &mut grain_lut.u
-            } else {
-                &mut grain_lut.v
-            };
-            generate_grain_uv(lut, &grain_lut.y, fgd, seed, uv, false, false);
-        }
-
-        if fgd.num_points[uv + 1] > 0 && !fgd.chroma_scaling_from_luma {
-            scaling[uv + 1].resize(256, 0);
-            generate_scaling_8bpc(
-                &fgd.points[uv + 1][..fgd.num_points[uv + 1] as usize],
-                scaling[uv + 1].as_mut_slice().try_into().unwrap(),
-            );
+    if !fgd.chroma_scaling_from_luma {
+        for uv in 0..2 {
+            if fgd.num_points[uv + 1] > 0 {
+                scaling[uv + 1].resize(256, 0);
+                generate_scaling_8bpc(
+                    &fgd.points[uv + 1][..fgd.num_points[uv + 1] as usize],
+                    scaling[uv + 1].as_mut_slice().try_into().unwrap(),
+                );
+            }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_grain_row_8bpc(
     dst_y: &mut [u8],
     dst_u: &mut [u8],
@@ -629,15 +640,21 @@ pub fn apply_grain_row_8bpc(
     grain_lut: &GrainLut,
     scaling: &[Vec<u8>; 3],
     w: usize,
+    h: usize,
     row: usize,
     seed: u32,
     ss_x: bool,
     ss_y: bool,
 ) {
-    let bh = 32usize;
-    let row_start = row * bh;
+    // Grain block height in luma rows: 16 or 32 per `block_size` (dav2d
+    // dav2d_apply_grain_row, fg_apply_tmpl.c: `bs = 16 << data->block_size`).
+    let bs = (16usize) << fgd.block_size;
+    let row_start = row * bs;
 
     if fgd.num_points[0] > 0 && !scaling[0].is_empty() {
+        // Luma block height, clamped to the remaining image rows (dav2d
+        // `bh = imin(out->p.h - row*bs, bs)`).
+        let bh = (h - row_start).min(bs);
         let y_off = row_start * y_stride.unsigned_abs();
         let src_slice = if y_off < src_y.len() {
             &src_y[y_off..]
@@ -669,58 +686,54 @@ pub fn apply_grain_row_8bpc(
             && !scaling_for_uv(scaling, fgd, uv).is_empty()
     };
 
-    if has_uv(0) {
-        let cw = if ss_x { w / 2 } else { w };
-        let ch = bh >> (ss_y as usize);
-        let uv_off = (row_start >> (ss_y as usize)) * uv_stride.unsigned_abs();
-        if uv_off < src_u.len() && uv_off < dst_u.len() {
-            let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 0).try_into().unwrap();
-            fguv_32x32xn_8bpc(
-                &mut dst_u[uv_off..],
-                &src_u[uv_off..],
-                uv_stride.unsigned_abs(),
-                fgd,
-                seed,
-                cw,
-                uv_scaling,
-                &grain_lut.u,
-                ch as i32,
-                row as i32,
-                &src_y[row_start * y_stride.unsigned_abs()..],
-                y_stride.unsigned_abs(),
-                0,
-                fgd.mc_identity,
-                ss_x as usize,
-                ss_y as usize,
-            );
-        }
+    // Chroma block height (dav2d `bh = (imin(out->p.h - row*bs, bs) + ss_y) >> ss_y`).
+    let ch = (((h - row_start).min(bs) + ss_y as usize) >> ss_y as usize) as i32;
+    let cw = (w + ss_x as usize) >> ss_x as usize;
+    let uv_off = (row_start >> (ss_y as usize)) * uv_stride.unsigned_abs();
+    let luma_off = row_start * y_stride.unsigned_abs();
+
+    if has_uv(0) && uv_off < src_u.len() && uv_off < dst_u.len() {
+        let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 0).try_into().unwrap();
+        fguv_32x32xn_8bpc(
+            &mut dst_u[uv_off..],
+            &src_u[uv_off..],
+            uv_stride.unsigned_abs(),
+            fgd,
+            seed,
+            cw,
+            uv_scaling,
+            &grain_lut.u,
+            ch,
+            row as i32,
+            &src_y[luma_off..],
+            y_stride.unsigned_abs(),
+            0,
+            fgd.mc_identity,
+            ss_x as usize,
+            ss_y as usize,
+        );
     }
 
-    if has_uv(1) {
-        let cw = if ss_x { w / 2 } else { w };
-        let ch = bh >> (ss_y as usize);
-        let uv_off = (row_start >> (ss_y as usize)) * uv_stride.unsigned_abs();
-        if uv_off < src_v.len() && uv_off < dst_v.len() {
-            let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 1).try_into().unwrap();
-            fguv_32x32xn_8bpc(
-                &mut dst_v[uv_off..],
-                &src_v[uv_off..],
-                uv_stride.unsigned_abs(),
-                fgd,
-                seed,
-                cw,
-                uv_scaling,
-                &grain_lut.v,
-                ch as i32,
-                row as i32,
-                &src_y[row_start * y_stride.unsigned_abs()..],
-                y_stride.unsigned_abs(),
-                1,
-                fgd.mc_identity,
-                ss_x as usize,
-                ss_y as usize,
-            );
-        }
+    if has_uv(1) && uv_off < src_v.len() && uv_off < dst_v.len() {
+        let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 1).try_into().unwrap();
+        fguv_32x32xn_8bpc(
+            &mut dst_v[uv_off..],
+            &src_v[uv_off..],
+            uv_stride.unsigned_abs(),
+            fgd,
+            seed,
+            cw,
+            uv_scaling,
+            &grain_lut.v,
+            ch,
+            row as i32,
+            &src_y[luma_off..],
+            y_stride.unsigned_abs(),
+            1,
+            fgd.mc_identity,
+            ss_x as usize,
+            ss_y as usize,
+        );
     }
 }
 
@@ -751,15 +764,17 @@ pub fn apply_grain_8bpc(
     let mut grain_lut = GrainLut::new();
     let mut scaling = [Vec::new(), Vec::new(), Vec::new()];
 
-    prep_grain_8bpc(fgd, &mut grain_lut, &mut scaling, seed);
+    prep_grain_8bpc(fgd, &mut grain_lut, &mut scaling, seed, ss_x, ss_y);
 
-    let bh = 32usize;
-    let rows = h.div_ceil(bh);
+    // Row tiling matches dav2d_apply_grain: `bs = 16 << block_size`,
+    // `rows = (h + bs - 1) / bs` (fg_apply_tmpl.c).
+    let bs = (16usize) << fgd.block_size;
+    let rows = h.div_ceil(bs);
 
     for row in 0..rows {
         apply_grain_row_8bpc(
             dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, &grain_lut,
-            &scaling, w, row, seed, ss_x, ss_y,
+            &scaling, w, h, row, seed, ss_x, ss_y,
         );
     }
 }

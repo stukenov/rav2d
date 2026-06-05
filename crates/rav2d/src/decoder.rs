@@ -411,6 +411,15 @@ impl Decoder {
             self.dpb_out = 0;
         }
 
+        // Film grain is display-only: it must not feed inter prediction, so it is
+        // applied to a fresh output copy here (the DPB/reference copy stays
+        // ungrained). Mirrors dav2d's `dav2d_apply_grain` in `output_image`.
+        if self.ctx.apply_grain && crate::decode::picture_has_grain(&pic) {
+            let grained = crate::decode::apply_grain_to_picture(&pic);
+            pic.unref();
+            return Ok(grained);
+        }
+
         Ok(pic)
     }
 

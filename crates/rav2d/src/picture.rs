@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 
 use crate::data::DataProps;
-use crate::headers::{FrameHeader, PixelLayout, SequenceHeader};
+use crate::headers::{FilmGrainData, FrameHeader, PixelLayout, SequenceHeader};
 use crate::mem::MemPool;
 
 pub const PICTURE_ALIGNMENT: usize = 64;
@@ -138,6 +138,10 @@ pub struct Picture {
     pub stride: [isize; 2],
     pub seq_hdr: Option<Arc<SequenceHeader>>,
     pub frame_hdr: Option<Arc<FrameHeader>>,
+    /// Film-grain synthesis parameters for this frame (the selected `c.fgm[id]`
+    /// entry), or `None` when the frame carries no grain. Mirrors dav2d's
+    /// `Dav2dPicture.fgm`; used at output time to apply grain to a display copy.
+    pub fgm: Option<FilmGrainData>,
     pub props: DataProps,
     allocation: Option<PictureAllocation>,
     allocator: Option<Arc<dyn PicAllocator>>,
@@ -160,6 +164,7 @@ impl Picture {
             stride: [0, 0],
             seq_hdr: None,
             frame_hdr: None,
+            fgm: None,
             props: DataProps::new(),
             allocation: None,
             allocator: None,
@@ -184,6 +189,7 @@ impl Picture {
             stride: alloc.stride,
             seq_hdr,
             frame_hdr,
+            fgm: None,
             props: DataProps::new(),
             allocation: Some(alloc),
             allocator: Some(allocator),
@@ -202,6 +208,7 @@ impl Picture {
         self.stride = [0, 0];
         self.seq_hdr = None;
         self.frame_hdr = None;
+        self.fgm = None;
         self.props = DataProps::new();
         self.p = PictureParameters {
             w: 0,

@@ -293,6 +293,68 @@ pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Ve
     frames
 }
 
+/// Decode with dav2d with film grain APPLIED to the output (`apply_grain=1`),
+/// in-loop filters on (default), emitting non-shown frames in coding order
+/// (`output_invisible_frames`) so the frame list matches rav2d's coding-order
+/// output. Used by the grain-applied bit-exact oracle.
+pub fn dav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
+    use rav2d::sys;
+    let data = std::fs::read(path).expect("read clip");
+    let mut frames = Vec::new();
+
+    unsafe {
+        let mut settings: sys::Dav2dSettings = std::mem::zeroed();
+        sys::dav2d_default_settings(&mut settings);
+        settings.n_threads = 1;
+        settings.apply_grain = 1;
+        settings.inloop_filters = DAV2D_INLOOPFILTER_ALL;
+        settings.output_invisible_frames = 1;
+
+        let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
+        let r = sys::dav2d_open(&mut ctx, &settings);
+        assert_eq!(r, 0, "dav2d_open failed: {r}");
+
+        let mut d: sys::Dav2dData = std::mem::zeroed();
+        let buf = sys::dav2d_data_create(&mut d, data.len());
+        assert!(!buf.is_null(), "dav2d_data_create failed");
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+
+        let mut drained = false;
+        loop {
+            loop {
+                let mut pic: sys::Dav2dPicture = std::mem::zeroed();
+                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                if pr == EAGAIN || pr < 0 {
+                    break;
+                }
+                frames.push(extract_planes(&pic));
+                sys::dav2d_picture_unref(&mut pic);
+            }
+            if d.sz > 0 {
+                let sr = sys::dav2d_send_data(ctx, &mut d);
+                if sr < 0 && sr != EAGAIN {
+                    panic!("dav2d_send_data failed: {sr}");
+                }
+            } else if !drained {
+                drained = true;
+                sys::dav2d_send_data(ctx, std::ptr::null_mut());
+            } else {
+                let mut pic: sys::Dav2dPicture = std::mem::zeroed();
+                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                if pr == 0 {
+                    frames.push(extract_planes(&pic));
+                    sys::dav2d_picture_unref(&mut pic);
+                } else {
+                    break;
+                }
+            }
+        }
+        sys::dav2d_close(&mut ctx);
+    }
+
+    frames
+}
+
 // ---------------------------------------------------------------------------
 // rav2d decode
 // ---------------------------------------------------------------------------
@@ -301,6 +363,46 @@ pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Ve
 /// one `FramePlanes` per output frame.
 pub fn rav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
     rav2d_decode_filters(path, rav2d::InloopFilterType::None)
+}
+
+/// Decode with rav2d with film grain APPLIED (`apply_grain=true`) and in-loop
+/// filters on. Counterpart of `dav2d_decode_grain` for the grain-applied oracle.
+pub fn rav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
+    use rav2d::{Data, Decoder, Settings};
+    let bytes = std::fs::read(path).expect("read clip");
+    let mut s = Settings::default();
+    s.n_threads = 1;
+    s.apply_grain = true;
+    s.run_decode = true;
+    s.inloop_filters = rav2d::InloopFilterType::All;
+    let mut dec = Decoder::open(&s).expect("open");
+
+    let mut frames = Vec::new();
+    let mut sent = false;
+    loop {
+        if !sent {
+            match dec.send_data(Some(Data::wrap(bytes.clone()))) {
+                Ok(()) => sent = true,
+                Err(rav2d::Rav2dError::Again) => {}
+                Err(_) => break,
+            }
+        }
+        match dec.get_picture() {
+            Ok(pic) => frames.push(rav2d_picture_planes(&pic)),
+            Err(rav2d::Rav2dError::Again) => {
+                if sent {
+                    let _ = dec.send_data(None);
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+        if frames.len() > 4096 {
+            break; // safety
+        }
+    }
+    frames
 }
 
 /// Decode a clip with rav2d at the given in-loop filter setting.
@@ -1601,6 +1703,93 @@ fn bit_exact_full_clip_filmgrain() {
     if !failures.is_empty() {
         panic!(
             "filmgrain full clip not bit-exact:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+}
+
+/// Film-grain APPLICATION gate for `avm-v14.1.0-hm.64x64.l5.filmgrain.obu`:
+/// decode with grain synthesis turned ON in BOTH decoders (rav2d
+/// `apply_grain=true`, dav2d `apply_grain=1`) and in-loop filters on, then
+/// require every coding-order frame to be byte-identical across all planes.
+///
+/// This validates the full output path: reconstruction + filters + film-grain
+/// synthesis written to a display copy. Both decoders run with
+/// `output_invisible_frames` so non-shown frames are emitted in coding order;
+/// rav2d emits coding order natively, so frames are best-matched by dimensions
+/// then fewest diffs (zero for a correct decoder) before the bit-exact check.
+#[test]
+fn bit_exact_filmgrain_applied() {
+    let path = media("avm-v14.1.0-hm.64x64.l5.filmgrain.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode_grain(&path);
+    let got = rav2d_decode_grain(&path);
+    assert!(!reference.is_empty(), "dav2d produced no frames");
+    assert_eq!(
+        got.len(),
+        reference.len(),
+        "frame count mismatch (rav2d={}, dav2d={})",
+        got.len(),
+        reference.len()
+    );
+
+    let mut used = vec![false; reference.len()];
+    let mut failures = Vec::new();
+    for (gi, g) in got.iter().enumerate() {
+        let mut best: Option<(usize, usize)> = None;
+        for (ri, r) in reference.iter().enumerate() {
+            if used[ri] || (r.w, r.h, r.bpc, r.layout) != (g.w, g.h, g.bpc, g.layout) {
+                continue;
+            }
+            let diff: usize = (0..3)
+                .map(|pl| {
+                    r.planes[pl]
+                        .iter()
+                        .zip(g.planes[pl].iter())
+                        .filter(|(a, b)| a != b)
+                        .count()
+                })
+                .sum();
+            if best.is_none_or(|(_, bd)| diff < bd) {
+                best = Some((ri, diff));
+            }
+        }
+        let (ri, _) = best.unwrap_or_else(|| panic!("rav2d frame {gi}: no dav2d match"));
+        used[ri] = true;
+        let r = &reference[ri];
+        let (ssh, _ssv) = ss(r.layout);
+        for pl in 0..3 {
+            let rp = &r.planes[pl];
+            let gp = &g.planes[pl];
+            if rp.len() != gp.len() {
+                failures.push(format!(
+                    "rav2d[{gi}]~dav2d[{ri}] plane {pl} size differs ({} vs {})",
+                    rp.len(),
+                    gp.len()
+                ));
+                continue;
+            }
+            let diff = rp.iter().zip(gp.iter()).filter(|(a, b)| a != b).count();
+            if diff != 0 {
+                let first = rp.iter().zip(gp.iter()).position(|(a, b)| a != b).unwrap();
+                let stride = if pl == 0 { r.w } else { (r.w + ssh) >> ssh } as usize;
+                failures.push(format!(
+                    "rav2d[{gi}]~dav2d[{ri}] plane {pl}: {diff}/{} bytes differ; first @ ({},{}) ref={} got={}",
+                    rp.len(),
+                    first % stride,
+                    first / stride,
+                    rp[first],
+                    gp[first]
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        panic!(
+            "filmgrain-applied output not bit-exact:\n  {}",
             failures.join("\n  ")
         );
     }
