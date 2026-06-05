@@ -2523,11 +2523,19 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let ss_hor_v = *ss_hor;
     let ss_ver_v = *ss_ver;
     let bitdepth_max_v = *bitdepth_max;
-    let y_h: usize = cur_pic.p.h.max(0) as usize;
+    // The plane allocation is sized for the 128-aligned frame dimensions (see
+    // DefaultPicAllocator::alloc_picture: `aligned_h = (h + 127) & !127`), which
+    // gives bottom padding past the cropped/visible height. Reconstruction
+    // legitimately writes whole transform blocks that overhang the visible edge
+    // into that padding (matching dav2d, whose plane buffers are likewise
+    // padded). Span the slices over the *allocated* height so those overhang
+    // writes stay in bounds rather than panicking on the cropped height.
+    let aligned_h: usize = ((cur_pic.p.h as usize).max(0) + 127) & !127;
+    let y_h: usize = aligned_h;
     let uv_h: usize = if seq_hdr.layout == crate::headers::PixelLayout::I400 {
         0
     } else {
-        ((cur_pic.p.h + ss_ver_v) >> ss_ver_v).max(0) as usize
+        aligned_h >> ss_ver_v
     };
     let y_stride_px: usize = cur_pic.stride[0].unsigned_abs();
     let uv_stride_px: usize = cur_pic.stride[1].unsigned_abs();
@@ -6862,6 +6870,57 @@ fn decode_b(
                     );
                 }
             }
+        } else if b.skip_mode != 0 {
+            // skip_mode MV resolution (decode.c:1199-1217). refmvs_find with
+            // the two-ref/skip flag set, then copy mvstack[drl_idx[0]].
+            use crate::tables::COMP_INTER_PRED_MODES;
+            let _ = COMP_INTER_PRED_MODES; // keep import path consistent
+            let mut mvstack = [crate::refmvs::Candidate::default(); 6];
+            let mut n_mvs = 0i32;
+            let mut warp_cnt = 0i32;
+            let rp_proj_off = recon.rt.rp_proj_off;
+            let rp_proj_slice: &[crate::refmvs::SnglMvBlock] = if recon.rf.rp_proj.is_empty() {
+                &[]
+            } else {
+                &recon.rf.rp_proj[rp_proj_off..]
+            };
+            crate::refmvs::refmvs_find(
+                recon.rt,
+                recon.rf,
+                rp_proj_slice,
+                &recon.rf.rp_traj,
+                &mut mvstack,
+                None,
+                &mut n_mvs,
+                &mut warp_cnt,
+                RefPair { r: [refs[0], refs[1]] },
+                bs as u8,
+                true,
+                by,
+                bx,
+                recon.seq_hdr,
+                recon.frm_hdr,
+            );
+            let drl = unsafe { b.data.inter.drl_idx[0] } as usize;
+            let drl = drl.min(mvstack.len() - 1);
+            unsafe {
+                b.data.inter.mv[0] = mvstack[drl].mv[0];
+                b.data.inter.mv[1] = mvstack[drl].mv[1];
+                b.data.inter.cwp_idx = mvstack[drl].cwp_idx;
+            }
+
+            if recon.seq_hdr.refmv_bank {
+                crate::refmvs::bank_add(
+                    &mut recon.rt.bank,
+                    bs,
+                    by,
+                    bx,
+                    fi.sb_step,
+                    fi.sb128 != 0,
+                    &b,
+                );
+            }
+            splat_tworef_mv(recon, &b, bx, by, by4r, bw4, bh4, bs);
         } else if is_comp {
             // Compound (same-ref-pair) MV resolution + tworef splat
             // (decode.c:1218-1320). Cross-ref / TIP / warp-compound deferred.
