@@ -3611,8 +3611,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
             let src2 = c.refs[sec_ref].cdf.as_deref().unwrap_or(&default_cdf);
             let mut out = crate::cdf::CdfContext::init_from_defaults(qcat);
             out.pri_sec_average(
-                &src1.m, &src1.coef, &src1.mv, &src1.dmv, &src2.m, &src2.coef, &src2.mv,
-                &src2.dmv,
+                &src1.m, &src1.coef, &src1.mv, &src1.dmv, &src2.m, &src2.coef, &src2.mv, &src2.dmv,
             );
             Some(out)
         } else {
@@ -3863,47 +3862,6 @@ fn get_snglref_ctx(
     ((row != 0) as usize) + ((col != 0) as usize) + 2 * ((newmv != 0) as usize)
 }
 
-fn get_filter_ctx(
-    a: &BlockContext,
-    l: &BlockContext,
-    nb_boff: &[i32; 2],
-    ref0: i8,
-    is_comp: bool,
-) -> usize {
-    const N_SWITCHABLE: u8 = 3;
-    let comp_val = is_comp as usize * 4;
-
-    let flt0 = if nb_boff[0] != -1 {
-        let off = nb_boff[0] as usize;
-        if l.r#ref[0][off] == ref0 || l.r#ref[1][off] == ref0 {
-            l.filter[off]
-        } else {
-            N_SWITCHABLE
-        }
-    } else {
-        N_SWITCHABLE
-    };
-
-    let flt1 = if nb_boff[1] != -1 {
-        let off = nb_boff[1] as usize;
-        if a.r#ref[0][off] == ref0 || a.r#ref[1][off] == ref0 {
-            a.filter[off]
-        } else {
-            N_SWITCHABLE
-        }
-    } else {
-        N_SWITCHABLE
-    };
-
-    if flt0 == flt1 || flt1 == N_SWITCHABLE {
-        comp_val + flt0 as usize
-    } else if flt0 == N_SWITCHABLE {
-        comp_val + flt1 as usize
-    } else {
-        comp_val + N_SWITCHABLE as usize
-    }
-}
-
 #[allow(unused)]
 fn decode_b(
     fi: &SbFrameInfo,
@@ -3995,7 +3953,6 @@ fn decode_b(
             msac.dbg_rng()
         );
     }
-
     // Pre-compute cross-SB boundary neighbour context values.
     // The C code uses nx[2] pointers into a/l; here we read out
     // the values we need before any mutable operations.
@@ -5641,6 +5598,61 @@ fn decode_b(
                 };
             }
 
+            // --- NEWMV_NEWMV warp-causal motion mode (decode.c:2653-2691) ---
+            // For a NEWMV_NEWMV compound block with two distinct references, when
+            // every gathered spatial neighbour on both the left and the top edge
+            // references each of the block's refs, a warp_causal flag is read that
+            // promotes the block to MM_WARP_CAUSAL. Skipping this read (as the old
+            // compound path did) desyncs the bitstream on such blocks.
+            if final_inter_mode == CompInterPredMode::NewMvNewMv as u8
+                && imin(bw4, bh4) > 1
+                && !fi.force_integer_mv
+                && ref0 != ref1
+                && fi.opfl_refine_type != 2
+                && fi.motion_modes & (1 << MotionMode::WarpCausal as u8) != 0
+            {
+                let is_sb_boundary = (by & (fi.sb_step - 1)) == 0;
+                let match_ref_l =
+                    |off: usize, r: i8| -> bool { l.r#ref[0][off] == r || l.r#ref[1][off] == r };
+                let match_ref_a =
+                    |off: usize, r: i8| -> bool { a.r#ref[0][off] == r || a.r#ref[1][off] == r };
+                let match_refs = |r: i8| -> bool {
+                    let left = match_ref_l(by4, r)
+                        || (by + bh4 <= fi.tile_row_end && match_ref_l(by4 + bh4 as usize - 1, r));
+                    let top = if is_sb_boundary {
+                        let o0 = bx4 & !1;
+                        match_ref_a(o0, r)
+                            || (((bx + bw4 - 2) & !1) < fi.tile_col_end
+                                && match_ref_a((bx4 + bw4 as usize - 2) & !1, r))
+                    } else {
+                        match_ref_a(bx4, r)
+                            || (bx + bw4 <= fi.tile_col_end
+                                && match_ref_a(bx4 + bw4 as usize - 1, r))
+                    };
+                    left || top
+                };
+                if match_refs(ref0) && match_refs(ref1) {
+                    let x1 = if nb_boff[0] == -1 {
+                        MotionMode::Translation as u8
+                    } else {
+                        nb_motion_mode[0]
+                    };
+                    let x2 = if nb_boff[1] == -1 {
+                        MotionMode::Translation as u8
+                    } else {
+                        nb_motion_mode[1]
+                    };
+                    let wc = MotionMode::WarpCausal as u8;
+                    let cs_ctx =
+                        (x1 >= wc || x2 >= wc) as usize + (x1 == wc) as usize + (x2 == wc) as usize;
+                    if msac.decode_bool_adapt(cdf_m.warp_causal(cs_ctx)) != 0 {
+                        unsafe {
+                            b.data.inter.motion_mode = MotionMode::WarpCausal as u8;
+                        }
+                    }
+                }
+            }
+
             // --- compound DRL ---
             unsafe {
                 b.data.inter.drl_idx = [0; 2];
@@ -6005,8 +6017,27 @@ fn decode_b(
                     b.data.inter.filter = 2;
                 } // SHARP
             } else if fi.subpel_filter_mode == 4 && has_subpel_filter {
-                // get_filter_ctx (env.h:120) with comp=1 (ref[1] != -1).
-                let fctx = get_filter_ctx(a, l, &nb_boff, ref0, true);
+                // get_filter_ctx (env.h:120) with comp=1 (ref[1] != -1). Use the
+                // idx-ordered spatial-neighbour cache (nb_boff/nb_ref/nb_filter)
+                // captured at block entry so the C nb[0]/nb[1] identity is kept;
+                // re-reading a/l by offset alone loses which slot is left vs top.
+                const N_SW: u8 = N_SWITCHABLE_FILTERS as u8;
+                let flt = |i: usize| -> u8 {
+                    if nb_boff[i] != -1 && (nb_ref0[i] == ref0 || nb_ref1[i] == ref0) {
+                        nb_filter[i]
+                    } else {
+                        N_SW
+                    }
+                };
+                let flt0 = flt(0);
+                let flt1 = flt(1);
+                let fctx = 4 + if flt0 == flt1 || flt1 == N_SW {
+                    flt0 as usize
+                } else if flt0 == N_SW {
+                    flt1 as usize
+                } else {
+                    N_SW as usize
+                };
                 unsafe {
                     b.data.inter.filter = msac.decode_symbol_adapt(cdf_m.filter(fctx), 2) as u8;
                 }
@@ -7584,8 +7615,7 @@ fn decode_b(
                     );
                     for n in 0..6 {
                         mvstack[n].mv[1] = mvstack2[n].mv[0];
-                        mvstack[n].weight =
-                            (mvstack[n].weight & 0xff) | (mvstack2[n].weight << 8);
+                        mvstack[n].weight = (mvstack[n].weight & 0xff) | (mvstack2[n].weight << 8);
                     }
                 }
                 let mode_idx = (inter_mode - CompInterPredMode::NearMvNearMv as u8) as usize;
@@ -9295,7 +9325,15 @@ fn splat_tworef_mv(
         // WEDGE temporal splat (splat_comp_wedgemv, refmvs.c:2473). The spatial
         // grid is splatted plainly; the temporal grid is filled per-2x2 from the
         // wedge TMVP mask (0=ref0, 1=ref1, 2=both).
-        crate::refmvs::splat_mv(&mut recon.rt.r[s_off..], &mut s_src, None, 0, &t_src, bw4, bh4);
+        crate::refmvs::splat_mv(
+            &mut recon.rt.r[s_off..],
+            &mut s_src,
+            None,
+            0,
+            &t_src,
+            bw4,
+            bh4,
+        );
         let wedge_idx = unsafe { b.data.inter.wedge_idx } as usize;
         let wedge_sign = unsafe { b.data.inter.wedge_sign } as i32;
         let w_swap = (wedge_sign ^ t_swap as i32) != 0;
@@ -9965,22 +10003,19 @@ fn opfl_pred_luma(
     let yw = (bw4 * 4) as usize;
     let p_stride = (((bw4 + refine as i32 * 2) * 4) as usize + 63) & !63;
     let psz = p_stride * (((bw4 + refine as i32 * 2) * 4) as usize + 8);
-    let mut p = [vec![0u8; psz.max(p_stride * 8)], vec![0u8; psz.max(p_stride * 8)]];
+    let mut p = [
+        vec![0u8; psz.max(p_stride * 8)],
+        vec![0u8; psz.max(p_stride * 8)],
+    ];
 
     let sh4 = imin(4, bh4);
     let sw4 = imin(4, bw4);
 
-    let mut top = [
-        by * 4 + (b_mv[0].y >> 3) - 3,
-        by * 4 + (b_mv[1].y >> 3) - 3,
-    ];
+    let mut top = [by * 4 + (b_mv[0].y >> 3) - 3, by * 4 + (b_mv[1].y >> 3) - 3];
 
     let mut y = 0i32;
     while y < h4 {
-        let mut left = [
-            bx * 4 + (b_mv[0].x >> 3) - 3,
-            bx * 4 + (b_mv[1].x >> 3) - 3,
-        ];
+        let mut left = [bx * 4 + (b_mv[0].x >> 3) - 3, bx * 4 + (b_mv[1].x >> 3) - 3];
         if refine {
             let mut x = 0i32;
             while x < w4 {
@@ -10119,8 +10154,8 @@ fn opfl_pred_luma(
                         byi += 2;
                     }
                 } else {
-                    let rmv_idx = (((by + y) & 31) >> 1) as usize * 16
-                        + (((bx + x) & 31) >> 1) as usize;
+                    let rmv_idx =
+                        (((by + y) & 31) >> 1) as usize * 16 + (((bx + x) & 31) >> 1) as usize;
                     let mut mv = [Mv::default(); 2];
                     mv[0] = Mv {
                         c: MvXY {
