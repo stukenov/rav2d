@@ -3593,9 +3593,31 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
         fc.use_pri_sec_cdf = 0;
         None
     } else {
-        fc.use_pri_sec_cdf = 0;
+        // Primary/secondary CDF averaging (decode.c:5477-5491). When enabled the
+        // entropy context is the weighted average of the primary and secondary
+        // reference CDFs: in_cdf = (pri*7 + sec*1 + 4) >> 3 (cdf.c:6650).
+        let s_ref_idx = frame_hdr.secondary_ref_frame;
+        let use_pri_sec = s_ref_idx != crate::headers::PRIMARY_REF_NONE
+            && frame_hdr.frame_type == crate::headers::FrameType::Inter
+            && seq_hdr.avg_cdf
+            && seq_hdr.avg_cdf_type == 0
+            && frame_hdr.tip.frame_mode != 2;
+        fc.use_pri_sec_cdf = use_pri_sec as i32;
         let pri_ref = frame_hdr.refidx[p_ref_idx as usize] as usize;
-        c.refs[pri_ref].cdf.as_ref().map(|a| (**a).clone())
+        if use_pri_sec {
+            let sec_ref = frame_hdr.refidx[s_ref_idx as usize] as usize;
+            let default_cdf = crate::cdf::CdfContext::init_from_defaults(qcat);
+            let src1 = c.refs[pri_ref].cdf.as_deref().unwrap_or(&default_cdf);
+            let src2 = c.refs[sec_ref].cdf.as_deref().unwrap_or(&default_cdf);
+            let mut out = crate::cdf::CdfContext::init_from_defaults(qcat);
+            out.pri_sec_average(
+                &src1.m, &src1.coef, &src1.mv, &src1.dmv, &src2.m, &src2.coef, &src2.mv,
+                &src2.dmv,
+            );
+            Some(out)
+        } else {
+            c.refs[pri_ref].cdf.as_ref().map(|a| (**a).clone())
+        }
     };
 
     fc.seq_hdr = seq_hdr.clone();
@@ -7496,7 +7518,9 @@ fn decode_b(
                         recon.seq_hdr,
                         recon.frm_hdr,
                     );
-                } else {
+                } else if refs[0] == refs[1] {
+                    // Same-ref NEAR: single-ref find then mirror mv[0]->mv[1]
+                    // (decode.c:1224-1232).
                     crate::refmvs::refmvs_find(
                         recon.rt,
                         recon.rf,
@@ -7516,6 +7540,52 @@ fn decode_b(
                     );
                     for c in mvstack.iter_mut() {
                         c.mv[1] = c.mv[0];
+                        c.weight = c.weight.wrapping_mul(0x101);
+                    }
+                } else {
+                    // Cross-ref NEAR (distinct refs): two separate single-ref
+                    // finds, the second supplying mv[1] (decode.c:1233-1245).
+                    crate::refmvs::refmvs_find(
+                        recon.rt,
+                        recon.rf,
+                        rp_proj_slice,
+                        &recon.rf.rp_traj,
+                        &mut mvstack,
+                        None,
+                        &mut n_mvs,
+                        &mut warp_cnt,
+                        RefPair { r: [refs[0], -1] },
+                        bs as u8,
+                        false,
+                        by,
+                        bx,
+                        recon.seq_hdr,
+                        recon.frm_hdr,
+                    );
+                    let mut mvstack2 = [crate::refmvs::Candidate::default(); 6];
+                    let mut n_mvs2 = 0i32;
+                    let mut warp_cnt2 = 0i32;
+                    crate::refmvs::refmvs_find(
+                        recon.rt,
+                        recon.rf,
+                        rp_proj_slice,
+                        &recon.rf.rp_traj,
+                        &mut mvstack2,
+                        None,
+                        &mut n_mvs2,
+                        &mut warp_cnt2,
+                        RefPair { r: [refs[1], -1] },
+                        bs as u8,
+                        false,
+                        by,
+                        bx,
+                        recon.seq_hdr,
+                        recon.frm_hdr,
+                    );
+                    for n in 0..6 {
+                        mvstack[n].mv[1] = mvstack2[n].mv[0];
+                        mvstack[n].weight =
+                            (mvstack[n].weight & 0xff) | (mvstack2[n].weight << 8);
                     }
                 }
                 let mode_idx = (inter_mode - CompInterPredMode::NearMvNearMv as u8) as usize;
@@ -7580,8 +7650,14 @@ fn decode_b(
                 )
             }
         };
+        let (mv1y, mv1x) = if b.is_intra != 0 {
+            (0i32, 0i32)
+        } else {
+            unsafe { (b.data.inter.mv[1].c.y as i32, b.data.inter.mv[1].c.x as i32) }
+        };
         eprintln!(
-            "DBLK y={} x={} bs={} intra={} ref0={} ref1={} mm={} mvy={} mvx={} rng={}",
+            "DBLK poc={} y={} x={} bs={} intra={} ref0={} ref1={} mm={} mvy={} mvx={} mv1y={} mv1x={} rng={}",
+            recon.frm_hdr.frame_offset,
             by,
             bx,
             bs as i32,
@@ -7591,6 +7667,8 @@ fn decode_b(
             mm,
             mvy,
             mvx,
+            mv1y,
+            mv1x,
             msac.dbg_rng()
         );
     }
@@ -9207,12 +9285,70 @@ fn splat_tworef_mv(
         t_src.r#ref.r[!t_swap as usize] = ref1;
     }
     let wedge = comp_type == 2;
-    if write_temporal && !wedge {
-        let q0 = crate::refmvs::quantize_mv(blk_mv[t_swap as usize]);
-        let q1 = crate::refmvs::quantize_mv(blk_mv[!t_swap as usize]);
+    // Quantize the (ref-flipped) MVs into the temporal block; for the WEDGE path
+    // these are selected per-2x2 by the wedge TMVP mask (decode.c:689-708).
+    unsafe {
+        t_src.mv.mv[0] = crate::refmvs::quantize_mv(blk_mv[t_swap as usize]);
+        t_src.mv.mv[1] = crate::refmvs::quantize_mv(blk_mv[!t_swap as usize]);
+    }
+    if write_temporal && wedge {
+        // WEDGE temporal splat (splat_comp_wedgemv, refmvs.c:2473). The spatial
+        // grid is splatted plainly; the temporal grid is filled per-2x2 from the
+        // wedge TMVP mask (0=ref0, 1=ref1, 2=both).
+        crate::refmvs::splat_mv(&mut recon.rt.r[s_off..], &mut s_src, None, 0, &t_src, bw4, bh4);
+        let wedge_idx = unsafe { b.data.inter.wedge_idx } as usize;
+        let wedge_sign = unsafe { b.data.inter.wedge_sign } as i32;
+        let w_swap = (wedge_sign ^ t_swap as i32) != 0;
+        let mask: Vec<u8> = recon
+            .masks
+            .wedge_tmvp(bs as usize, bw4 as usize, bh4 as usize, wedge_idx)
+            .to_vec();
+        let t_stride = recon.rf.rp_stride;
+        let m0n = unsafe { t_src.mv.mv[0].n };
+        let m1n = unsafe { t_src.mv.mv[1].n };
+        let r = unsafe { t_src.r#ref.r };
+        let mask_w = (bw4 >> 1) as usize;
+        let mut row = 0i32;
+        while row < bh4 {
+            let row8 = (by >> 1) + (row >> 1);
+            let mrow = (row >> 1) as usize;
+            let mut x = 0i32;
+            while x < bw4 {
+                let col8 = (bx >> 1) + (x >> 1);
+                let t_off = row8 as isize * t_stride + col8 as isize;
+                if t_off >= 0 && (t_off as usize) < recon.cur_mvs.len() {
+                    let d = mask[mrow * mask_w + (x >> 1) as usize] as i32;
+                    let dst = &mut recon.cur_mvs[t_off as usize];
+                    if d != 2 {
+                        let idx = (!((d != 0) ^ w_swap)) as usize;
+                        let m = unsafe { t_src.mv.mv[idx].n };
+                        dst.mv.n = m as u32 * 0x10001;
+                        dst.r#ref.pair = if m == crate::refmvs::INVALID_TRAJ {
+                            -1
+                        } else {
+                            (r[idx] as u8 as i16).wrapping_mul(0x101)
+                        };
+                    } else if m0n == crate::refmvs::INVALID_TRAJ {
+                        if m1n == crate::refmvs::INVALID_TRAJ {
+                            dst.mv.n = crate::refmvs::INVALID_TRAJ as u32 * 0x10001;
+                            dst.r#ref.pair = -1;
+                        } else {
+                            dst.mv.n = m1n as u32 * 0x10001;
+                            dst.r#ref.pair = (r[1] as u8 as i16).wrapping_mul(0x101);
+                        }
+                    } else if m1n == crate::refmvs::INVALID_TRAJ {
+                        dst.mv.n = m0n as u32 * 0x10001;
+                        dst.r#ref.pair = (r[0] as u8 as i16).wrapping_mul(0x101);
+                    } else {
+                        *dst = t_src;
+                    }
+                }
+                x += 2;
+            }
+            row += 2;
+        }
+    } else if write_temporal {
         unsafe {
-            t_src.mv.mv[0] = q0;
-            t_src.mv.mv[1] = q1;
             if t_src.mv.mv[0].n == crate::refmvs::INVALID_TRAJ {
                 if t_src.mv.mv[1].n == crate::refmvs::INVALID_TRAJ {
                     t_src.r#ref.pair = -1;
@@ -9237,8 +9373,7 @@ fn splat_tworef_mv(
             bh4,
         );
     } else {
-        // Spatial-only splat (no temporal write, or wedge whose per-2x2 temporal
-        // pattern is only consumed by later frames — out of scope for frame 1).
+        // Spatial-only splat (opfl+refine blocks write temporal during recon).
         let _ = Mv::default();
         crate::refmvs::splat_mv(
             &mut recon.rt.r[s_off..],
@@ -9260,9 +9395,11 @@ fn splat_tworef_mv(
 ///  - WEDGE: `mask` blend with the wedge mask (luma + subsampled for chroma).
 ///  - SEG: luma `w_mask` (derives a subsampled seg mask), chroma `mask` reusing
 ///    that seg mask.
-/// Translational MC only (warp-compound / OPFL / TIP / scaled refs deferred — not
-/// present in the bring-up clip). After blend, the parsed residual is added with
-/// the same per-TU walk as the single-ref path.
+/// OPFL/refine-MV blocks (inter_mode >= OPFL_NEARMV_NEARMV, or refine_mv on an
+/// AVG block) fill `tmp[0]`/`tmp[1]` via `opfl_pred_luma` / `rmv_uvpred` instead
+/// of the plain two-reference MC loop; warp-compound / TIP / scaled refs are
+/// handled elsewhere. After blend, the parsed residual is added with the same
+/// per-TU walk as the single-ref path.
 #[allow(clippy::too_many_arguments)]
 fn recon_b_inter_compound(
     recon: &mut ReconCtx,
@@ -9318,6 +9455,14 @@ fn recon_b_inter_compound(
         && recon.svc[ref0][0].scale == 0
         && recon.svc[ref1][0].scale == 0;
 
+    // Compound optical-flow prediction predicate (recon_tmpl.c:3189-3192): the
+    // block either signals an OPFL inter mode or requests implicit MV refinement
+    // on an AVG-compound block. These use `opfl_pred` to fill `tmp[0]`/`tmp[1]`
+    // (per-2x2/per-bs refined MC) instead of the plain two-reference MC loop.
+    let refine_mv = unsafe { b.data.inter.refine_mv };
+    let is_opfl = inter_mode >= CompInterPredMode::OpflNearMvNearMv as u8
+        || (refine_mv != 0 && comp_type == 1);
+
     // ---- luma ----
     let mut luma_bacp = 0i32; // shared with chroma AVG path (bacpu)
     let mut seg_mask = vec![0u8; 128 * 128];
@@ -9332,23 +9477,42 @@ fn recon_b_inter_compound(
         let dst_off = 4 * (by as usize * y_stride + bx as usize);
 
         let mut tmp = [vec![0i16; w * h], vec![0i16; w * h]];
-        for i in 0..2 {
-            inter_mc_plane_prep_8bpc(
-                &mut tmp[i],
-                refp[i],
-                0,
+        let mut opfl_bacp = false;
+        if is_opfl {
+            let w4 = imin(bw4, fi.bw - bx);
+            let h4 = imin(bh4, fi.bh - by);
+            opfl_bacp = opfl_pred_luma(
+                recon,
+                &mut tmp,
+                &mut seg_mask,
+                b,
                 bx,
                 by,
                 bw4,
                 bh4,
-                mvs[i].x,
-                mvs[i].y,
-                filter,
-                ss_hor,
-                ss_ver,
-                fi.bw,
-                fi.bh,
+                w4,
+                h4,
+                fi,
             );
+        } else {
+            for i in 0..2 {
+                inter_mc_plane_prep_8bpc(
+                    &mut tmp[i],
+                    refp[i],
+                    0,
+                    bx,
+                    by,
+                    bw4,
+                    bh4,
+                    mvs[i].x,
+                    mvs[i].y,
+                    filter,
+                    ss_hor,
+                    ss_ver,
+                    fi.bw,
+                    fi.bh,
+                );
+            }
         }
 
         let (tmp0, tmp1) = tmp.split_at(1);
@@ -9394,7 +9558,14 @@ fn recon_b_inter_compound(
             _ => {
                 // AVG (or implicit mask / CWP weighted)
                 if cwp_idx == 8 {
-                    let mut bacp = 2 * imp_base as i32;
+                    // For OPFL/refine blocks the BACP mask is already derived by
+                    // `opfl_pred` (recon_tmpl.c:3247 only re-runs `get_mask` for
+                    // the plain-MC `bacp==2` case).
+                    let mut bacp = if is_opfl {
+                        opfl_bacp as i32
+                    } else {
+                        2 * imp_base as i32
+                    };
                     if bacp == 2 {
                         bacp = crate::recon::get_mask(
                             &mut seg_mask,
@@ -9503,26 +9674,57 @@ fn recon_b_inter_compound(
         let cw = (cbw4 * 4 >> ss_hor) as usize;
         let ch = (cbh4 * 4 >> ss_ver) as usize;
 
+        // OPFL chroma step config (recon_tmpl.c:3703-3705): r_step = 2<<refine,
+        // o_step = 4>>opfl.
+        let opfl_refine = comp_type == 1 && refine_mv != 0;
+        let opfl_mode = inter_mode >= CompInterPredMode::OpflNearMvNearMv as u8;
+        let r_step = 2 << opfl_refine as i32;
+        let o_step = 4 >> opfl_mode as i32;
+        let r_pair = b.ref_pair;
+        let mut chroma_bacp = false;
         for pl in 1..3usize {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let mut tmp = [vec![0i16; cw * ch], vec![0i16; cw * ch]];
-            for i in 0..2 {
-                inter_mc_plane_prep_8bpc(
-                    &mut tmp[i],
-                    refp[i],
-                    pl,
-                    cbx,
-                    cby,
+            let mut opfl_bacp_chroma = false;
+            if is_opfl {
+                opfl_bacp_chroma = rmv_uvpred(
+                    recon,
+                    b,
+                    &mut tmp,
+                    pl - 1,
+                    r_step,
+                    o_step,
                     cbw4,
                     cbh4,
-                    mvs[i].x,
-                    mvs[i].y,
-                    filter,
-                    ss_hor,
-                    ss_ver,
-                    fi.bw,
-                    fi.bh,
+                    cbx,
+                    cby,
+                    r_pair,
+                    false,
+                    &mut seg_mask,
+                    fi,
                 );
+                if pl == 1 {
+                    chroma_bacp = opfl_bacp_chroma;
+                }
+            } else {
+                for i in 0..2 {
+                    inter_mc_plane_prep_8bpc(
+                        &mut tmp[i],
+                        refp[i],
+                        pl,
+                        cbx,
+                        cby,
+                        cbw4,
+                        cbh4,
+                        mvs[i].x,
+                        mvs[i].y,
+                        filter,
+                        ss_hor,
+                        ss_ver,
+                        fi.bw,
+                        fi.bh,
+                    );
+                }
             }
             let dst: &mut [u8] = if pl == 1 {
                 &mut recon.dst_u[dst_off..]
@@ -9556,7 +9758,11 @@ fn recon_b_inter_compound(
                 }
                 _ => {
                     if cwp_idx == 8 {
-                        if luma_bacp != 0 {
+                        // For OPFL the per-plane BACP comes from `rmv_uvpred`
+                        // (carried U->V via `bacpu`); otherwise it follows the
+                        // luma plane's bacp.
+                        let use_mask = if is_opfl { chroma_bacp } else { luma_bacp != 0 };
+                        if use_mask {
                             crate::mc::mask_8bpc(
                                 dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask,
                             );
@@ -9568,6 +9774,7 @@ fn recon_b_inter_compound(
                     }
                 }
             }
+            let _ = opfl_bacp_chroma;
         }
         let _ = (seg_mask_stride, cb_dim);
 
@@ -9605,6 +9812,561 @@ fn recon_b_inter_compound(
         )?;
     }
     Ok(())
+}
+
+/// Rectangular bilinear prefetch into the OPFL `p[i]` scratch (the `mc(t, p[i],
+/// NULL, ...)` dst8 path with `DAV2D_FILTER_BILINEAR`, recon_tmpl.c:2224 / 2303).
+/// Unlike the square TIP variant, this writes `dimw x dimh` luma pixels at 3-bit
+/// subpel precision with explicit edge limits.
+#[allow(clippy::too_many_arguments)]
+fn prep_opfl_prefetch_rect_8bpc(
+    p: &mut [u8],
+    p_stride: usize,
+    ref_pic: &crate::picture::Picture,
+    bx4: i32,
+    by4: i32,
+    dimw: i32,
+    dimh: i32,
+    mvx: i32,
+    mvy: i32,
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+) {
+    let ref_stride = ref_pic.stride[0].unsigned_abs();
+    let ref_data: &[u8] = match ref_pic.data[0] {
+        Some(ptr) => unsafe {
+            std::slice::from_raw_parts(ptr.as_ptr(), ref_stride * ref_pic.p.h as usize)
+        },
+        None => return,
+    };
+    let mx = mvx & 7;
+    let my = mvy & 7;
+    let dx = bx4 * 4 + (mvx >> 3);
+    let dy = by4 * 4 + (mvy >> 3);
+
+    let need_emu = dx - (mx != 0) as i32 * 3 < left
+        || dy - (my != 0) as i32 * 3 < top
+        || dx + dimw + (mx != 0) as i32 * 4 > right
+        || dy + dimh + (my != 0) as i32 * 4 > bottom;
+    let dwu = dimw as usize;
+    let dhu = dimh as usize;
+    let mut emu_buf = if need_emu {
+        Some(vec![0u8; 192 * 192])
+    } else {
+        None
+    };
+    let (src, src_off, src_stride) = if let Some(ref mut buf) = emu_buf {
+        let emu_w = dwu + (mx != 0) as usize * 7;
+        let emu_h = dhu + (my != 0) as usize * 7;
+        let emu_stride = 192usize;
+        inter_emu_edge_8bpc(
+            buf,
+            emu_stride,
+            &ref_data[(left + top * ref_stride as i32) as usize..],
+            ref_stride,
+            emu_w,
+            emu_h,
+            (right - left) as usize,
+            (bottom - top) as usize,
+            dx - (mx != 0) as i32 * 3 - left,
+            dy - (my != 0) as i32 * 3 - top,
+        );
+        let off = emu_stride * (my != 0) as usize * 3 + (mx != 0) as usize * 3;
+        (&buf[..], off, emu_stride)
+    } else {
+        let off = dy as usize * ref_stride + dx as usize;
+        (ref_data, off, ref_stride)
+    };
+    crate::mc::put_bilin_8bpc(
+        p,
+        p_stride,
+        &src[src_off..],
+        src_stride,
+        dwu,
+        dhu,
+        mx << 1,
+        my << 1,
+    );
+}
+
+/// Compound optical-flow prediction (`opfl_pred`, recon_tmpl.c:2178). Used for
+/// two-reference (same-pair) blocks that either signal an OPFL inter mode
+/// (`inter_mode >= OPFL_NEARMV_NEARMV`) or request implicit MV refinement
+/// (`refine_mv && comp_type == COMP_INTER_AVG`). Fills the two compound
+/// predictors `tmp[0]`/`tmp[1]`, writes per-2x2 / per-bs temporal MVs into the
+/// frame MV grid (`update_temporal`), stores the refined per-8x8 MVs in the
+/// `recon.scratch.rmv` grid for chroma, and (for BACP) accumulates the
+/// out-of-bounds blend mask. Returns the BACP predicate (mask vs average).
+#[allow(clippy::too_many_arguments)]
+fn opfl_pred_luma(
+    recon: &mut ReconCtx,
+    tmp: &mut [Vec<i16>; 2],
+    seg_mask: &mut [u8],
+    b: &Av2Block,
+    bx: i32,
+    by: i32,
+    bw4: i32,
+    bh4: i32,
+    w4: i32,
+    h4: i32,
+    fi: &SbFrameInfo,
+) -> bool {
+    use crate::levels::{Mv, MvXY};
+    let layout = recon.frame.layout;
+    let refs = unsafe { b.ref_pair.r };
+    let r0 = refs[0] as usize;
+    let r1 = refs[1] as usize;
+    let filter = unsafe { b.data.inter.filter };
+    let cwp_idx = unsafe { b.data.inter.cwp_idx } as i32;
+    let inter_mode = unsafe { b.data.inter.inter_mode };
+    let comp_type = unsafe { b.data.inter.comp_type };
+    let refine_mv = unsafe { b.data.inter.refine_mv };
+    let b_mv = unsafe { [b.data.inter.mv[0].c, b.data.inter.mv[1].c] };
+    let r_pair = b.ref_pair;
+
+    // comp_type AVG is value 1 in this codebase (1=AVG,2=WEDGE,3=SEG), matching
+    // C `COMP_INTER_AVG` in `refine = comp_type == COMP_INTER_AVG && refine_mv`.
+    let refine = comp_type == 1 && refine_mv != 0;
+    let opfl = inter_mode >= crate::levels::CompInterPredMode::OpflNearMvNearMv as u8;
+
+    let refp0 = match recon.refp[r0].clone() {
+        Some(p) => p,
+        None => return false,
+    };
+    let refp1 = match recon.refp[r1].clone() {
+        Some(p) => p,
+        None => return false,
+    };
+    let refp = [&refp0, &refp1];
+
+    let w = fi.bw * 4;
+    let h = fi.bh * 4;
+
+    let bacp = recon.seq_hdr.imp_msk_bld && cwp_idx == 8;
+    if bacp {
+        for m in seg_mask.iter_mut() {
+            *m = 0x20;
+        }
+    }
+    let mut have_bacp = false;
+
+    // OPFL difference weights d.i8[0/1] (recon_tmpl.c:2205-2209).
+    let d0 = fi.absrefdist[r0] as i32;
+    let d1 = fi.absrefdist[r1] as i32;
+    let dw0 = apply_sign_i8(1 + (d0 > d1) as i32, -(fi.refdist[r0] as i32));
+    let dw1 = apply_sign_i8(1 + (d1 > d0) as i32, fi.refdist[r1] as i32);
+    let dweights = [dw0, dw1];
+
+    let bs = 2 - (b.bs == BlockSize::Bs8x8 as u8 as i8) as i32;
+    let t_swap = (recon.rf.ref_flip & (1u64 << (r0 * 8 + r1))) != 0;
+
+    let yw = (bw4 * 4) as usize;
+    let p_stride = (((bw4 + refine as i32 * 2) * 4) as usize + 63) & !63;
+    let psz = p_stride * (((bw4 + refine as i32 * 2) * 4) as usize + 8);
+    let mut p = [vec![0u8; psz.max(p_stride * 8)], vec![0u8; psz.max(p_stride * 8)]];
+
+    let sh4 = imin(4, bh4);
+    let sw4 = imin(4, bw4);
+
+    let mut top = [
+        by * 4 + (b_mv[0].y >> 3) - 3,
+        by * 4 + (b_mv[1].y >> 3) - 3,
+    ];
+
+    let mut y = 0i32;
+    while y < h4 {
+        let mut left = [
+            bx * 4 + (b_mv[0].x >> 3) - 3,
+            bx * 4 + (b_mv[1].x >> 3) - 3,
+        ];
+        if refine {
+            let mut x = 0i32;
+            while x < w4 {
+                // bilinear prefetch both refs at b->mv[n]-32 into p[n].
+                for n in 0..2 {
+                    prep_opfl_prefetch_rect_8bpc(
+                        &mut p[n],
+                        p_stride,
+                        refp[n],
+                        bx + x,
+                        by + y,
+                        (sw4 + 2) * 4,
+                        (sh4 + 2) * 4,
+                        b_mv[n].x - 32,
+                        b_mv[n].y - 32,
+                        iclip(left[n], 0, w - 1),
+                        iclip(left[n] + 4 * sw4 + 7, 1, w),
+                        iclip(top[n], 0, h - 1),
+                        iclip(top[n] + 4 * sh4 + 7, 1, h),
+                    );
+                }
+                let (dx, dy) = crate::mc::sad_refine_mv_8bpc(
+                    &p[0],
+                    p_stride,
+                    &p[1],
+                    p_stride,
+                    (sw4 * 4) as usize,
+                    (sh4 * 4) as usize,
+                    refine_mv == 2,
+                );
+                if opfl {
+                    let mut res = [crate::mc::OpflRegressionData::default(); 4];
+                    let o0 = ((4 + dy) * p_stride as i32 + (4 + dx)) as usize;
+                    let o1 = ((4 - dy) * p_stride as i32 + (4 - dx)) as usize;
+                    crate::mc::opfl_derive_mv_8bpc(
+                        &mut res,
+                        &p[0][o0..],
+                        p_stride,
+                        &p[1][o1..],
+                        p_stride,
+                        (sw4 * 4) as usize,
+                        (sh4 * 4) as usize,
+                        (bs * 4) as usize,
+                        dweights,
+                    );
+                    let mut ri = 0usize;
+                    let mut byi = 0i32;
+                    while byi < sh4 {
+                        let mut bxi = 0i32;
+                        while bxi < sw4 {
+                            let mut dd = crate::recon::OpflMvDeltaBlock::default();
+                            crate::recon::opfl_mv_adj(&res[ri], &mut dd, dweights);
+                            ri += 1;
+                            let rmv_idx = (((by + y) & 31) >> 1) as usize * 16
+                                + (byi != 0) as usize * 16
+                                + (((bx + x + bxi) & 31) >> 1) as usize;
+                            let mut mv = [Mv::default(); 2];
+                            mv[0] = Mv {
+                                c: MvXY {
+                                    y: b_mv[0].y * 2 + dd.d[0].y as i32 + dy * 16,
+                                    x: b_mv[0].x * 2 + dd.d[0].x as i32 + dx * 16,
+                                },
+                            };
+                            mv[1] = Mv {
+                                c: MvXY {
+                                    y: b_mv[1].y * 2 + dd.d[1].y as i32 - dy * 16,
+                                    x: b_mv[1].x * 2 + dd.d[1].x as i32 - dx * 16,
+                                },
+                            };
+                            for i in 0..2 {
+                                let off = ((y + byi) * 4) as usize * yw + ((x + bxi) * 4) as usize;
+                                mc_opfl_8bpc(
+                                    &mut tmp[i],
+                                    off,
+                                    yw,
+                                    bs,
+                                    bs,
+                                    bx + x + bxi,
+                                    by + y + byi,
+                                    0,
+                                    unsafe { mv[i].c.x },
+                                    unsafe { mv[i].c.y },
+                                    refp[i],
+                                    filter,
+                                    iclip(left[i], 0, w - 1),
+                                    iclip(left[i] + sw4 * 4 + 7, 1, w),
+                                    iclip(top[i], 0, h - 1),
+                                    iclip(top[i] + sh4 * 4 + 7, 1, h),
+                                );
+                            }
+                            let dmv = [
+                                Mv {
+                                    c: MvXY {
+                                        y: (unsafe { mv[0].c.y } + (dd.d[0].y > 0) as i32) >> 1,
+                                        x: (unsafe { mv[0].c.x } + (dd.d[0].x > 0) as i32) >> 1,
+                                    },
+                                },
+                                Mv {
+                                    c: MvXY {
+                                        y: (unsafe { mv[1].c.y } + (dd.d[1].y > 0) as i32) >> 1,
+                                        x: (unsafe { mv[1].c.x } + (dd.d[1].x > 0) as i32) >> 1,
+                                    },
+                                },
+                            ];
+                            update_temporal_grid(
+                                recon,
+                                by + y + byi,
+                                bx + x + bxi,
+                                1,
+                                1,
+                                r_pair,
+                                &dmv,
+                                t_swap,
+                            );
+                            if bacp {
+                                have_bacp |= crate::recon::get_mask(
+                                    seg_mask,
+                                    yw,
+                                    bx,
+                                    x + bxi,
+                                    by,
+                                    y + byi,
+                                    &mv,
+                                    4,
+                                    4,
+                                    2,
+                                    2,
+                                    w,
+                                    h,
+                                );
+                            }
+                            crate::recon::scaledown_16pel_mv_for_chroma(&mut mv, layout);
+                            recon.scratch.rmv[rmv_idx][0] = mv;
+                            bxi += 2;
+                        }
+                        byi += 2;
+                    }
+                } else {
+                    let rmv_idx = (((by + y) & 31) >> 1) as usize * 16
+                        + (((bx + x) & 31) >> 1) as usize;
+                    let mut mv = [Mv::default(); 2];
+                    mv[0] = Mv {
+                        c: MvXY {
+                            y: b_mv[0].y + dy * 8,
+                            x: b_mv[0].x + dx * 8,
+                        },
+                    };
+                    mv[1] = Mv {
+                        c: MvXY {
+                            y: b_mv[1].y - dy * 8,
+                            x: b_mv[1].x - dx * 8,
+                        },
+                    };
+                    for i in 0..2 {
+                        let off = (y * 4) as usize * yw + (x * 4) as usize;
+                        mc_prep_bounds_8bpc(
+                            &mut tmp[i],
+                            yw,
+                            refp[i],
+                            0,
+                            bx + x,
+                            by + y,
+                            sw4,
+                            sh4,
+                            unsafe { mv[i].c.x },
+                            unsafe { mv[i].c.y },
+                            filter,
+                            recon.frame.ss_hor,
+                            recon.frame.ss_ver,
+                            iclip(left[i], 0, w - 1),
+                            iclip(left[i] + sw4 * 4 + 7, 1, w),
+                            iclip(top[i], 0, h - 1),
+                            iclip(top[i] + sh4 * 4 + 7, 1, h),
+                        );
+                        let _ = off;
+                    }
+                    update_temporal_grid(
+                        recon,
+                        by + y,
+                        bx + x,
+                        (sw4 >> 1) as usize,
+                        (sh4 >> 1) as usize,
+                        r_pair,
+                        &mv,
+                        t_swap,
+                    );
+                    crate::recon::scaleup_8pel_mv_for_chroma(&mut mv, layout);
+                    if bacp {
+                        have_bacp |= crate::recon::get_mask(
+                            seg_mask, yw, bx, x, by, y, &mv, 3, 3, sw4, sh4, w, h,
+                        );
+                    }
+                    recon.scratch.rmv[rmv_idx][0] = mv;
+                }
+                for n in 0..2 {
+                    left[n] += 16;
+                }
+                x += sw4;
+            }
+        } else {
+            debug_assert!(opfl);
+            // bilinear prefetch whole rows (full frame bounds).
+            for n in 0..2 {
+                prep_opfl_prefetch_rect_8bpc(
+                    &mut p[n],
+                    p_stride,
+                    refp[n],
+                    bx,
+                    by + y,
+                    bw4 * 4,
+                    sh4 * 4,
+                    b_mv[n].x,
+                    b_mv[n].y,
+                    0,
+                    w,
+                    0,
+                    h,
+                );
+            }
+            // res[bs-block grid]: rows = sh4/bs, cols = bw4/bs.
+            let nres = ((sh4 / bs) * (bw4 / bs)) as usize;
+            let mut res = vec![crate::mc::OpflRegressionData::default(); nres.max(1)];
+            crate::mc::opfl_derive_mv_8bpc(
+                &mut res,
+                &p[0],
+                p_stride,
+                &p[1],
+                p_stride,
+                (bw4 * 4) as usize,
+                (sh4 * 4) as usize,
+                (bs * 4) as usize,
+                dweights,
+            );
+            // dd[4] for the BS_8x8 (bs==1) accumulation special case.
+            let mut dd_acc = [crate::recon::OpflMvDeltaBlock::default(); 4];
+            let mut dd_acc_n = 0usize;
+            let cols = (bw4 / bs) as usize;
+            let mut byi = 0i32;
+            let mut row = 0usize;
+            while byi < sh4 {
+                let mut bxi = 0i32;
+                let mut xx = 0usize;
+                while bxi < bw4 {
+                    let ri = row * cols + xx;
+                    let mut dd = crate::recon::OpflMvDeltaBlock::default();
+                    crate::recon::opfl_mv_adj(&res[ri], &mut dd, dweights);
+                    let store_rmv = !(bs == 1 && (bxi != 0 || byi != 0));
+                    let rmv_idx = (((by + y) & 31) >> 1) as usize * 16
+                        + (byi != 0) as usize * 16
+                        + (((bx + bxi) & 31) >> 1) as usize;
+                    let mut mv = [Mv::default(); 2];
+                    mv[0] = Mv {
+                        c: MvXY {
+                            y: b_mv[0].y * 2 + dd.d[0].y as i32,
+                            x: b_mv[0].x * 2 + dd.d[0].x as i32,
+                        },
+                    };
+                    mv[1] = Mv {
+                        c: MvXY {
+                            y: b_mv[1].y * 2 + dd.d[1].y as i32,
+                            x: b_mv[1].x * 2 + dd.d[1].x as i32,
+                        },
+                    };
+                    for i in 0..2 {
+                        let off = ((y + byi) * 4) as usize * yw + (bxi * 4) as usize;
+                        mc_opfl_8bpc(
+                            &mut tmp[i],
+                            off,
+                            yw,
+                            bs,
+                            bs,
+                            bx + bxi,
+                            by + y + byi,
+                            0,
+                            unsafe { mv[i].c.x },
+                            unsafe { mv[i].c.y },
+                            refp[i],
+                            filter,
+                            iclip(left[i] + bxi * 4, 0, w - 1),
+                            iclip(left[i] + bxi * 4 + 7 + 8, 1, w),
+                            iclip(top[i] + byi * 4, 0, h - 1),
+                            iclip(top[i] + byi * 4 + 7 + 8, 1, h),
+                        );
+                    }
+                    if bs > 1 {
+                        let dmv = [
+                            Mv {
+                                c: MvXY {
+                                    y: (unsafe { mv[0].c.y } + (dd.d[0].y > 0) as i32) >> 1,
+                                    x: (unsafe { mv[0].c.x } + (dd.d[0].x > 0) as i32) >> 1,
+                                },
+                            },
+                            Mv {
+                                c: MvXY {
+                                    y: (unsafe { mv[1].c.y } + (dd.d[1].y > 0) as i32) >> 1,
+                                    x: (unsafe { mv[1].c.x } + (dd.d[1].x > 0) as i32) >> 1,
+                                },
+                            },
+                        ];
+                        update_temporal_grid(
+                            recon,
+                            by + y + byi,
+                            bx + bxi,
+                            (bs >> 1) as usize,
+                            (bs >> 1) as usize,
+                            r_pair,
+                            &dmv,
+                            t_swap,
+                        );
+                    } else {
+                        // BS_8x8: accumulate dd for the post-row averaged write.
+                        if dd_acc_n < 4 {
+                            dd_acc[dd_acc_n] = dd;
+                            dd_acc_n += 1;
+                        }
+                    }
+                    if bacp {
+                        have_bacp |= crate::recon::get_mask(
+                            seg_mask,
+                            yw,
+                            bx,
+                            bxi,
+                            by,
+                            y + byi,
+                            &mv,
+                            4,
+                            4,
+                            bs,
+                            bs,
+                            w,
+                            h,
+                        );
+                    }
+                    crate::recon::scaledown_16pel_mv_for_chroma(&mut mv, layout);
+                    if store_rmv {
+                        recon.scratch.rmv[rmv_idx][0] = mv;
+                    }
+                    bxi += bs;
+                    xx += 1;
+                }
+                byi += bs;
+                row += 1;
+            }
+            if bs == 1 {
+                // BS_8x8: average the four 4x4 dd's into a single 8x8 MV
+                // (recon_tmpl.c:2356-2366) and write one temporal entry.
+                let s0x = dd_acc[0].d[0].x as i32
+                    + dd_acc[1].d[0].x as i32
+                    + dd_acc[2].d[0].x as i32
+                    + dd_acc[3].d[0].x as i32;
+                let s0y = dd_acc[0].d[0].y as i32
+                    + dd_acc[1].d[0].y as i32
+                    + dd_acc[2].d[0].y as i32
+                    + dd_acc[3].d[0].y as i32;
+                let s1x = dd_acc[0].d[1].x as i32
+                    + dd_acc[1].d[1].x as i32
+                    + dd_acc[2].d[1].x as i32
+                    + dd_acc[3].d[1].x as i32;
+                let s1y = dd_acc[0].d[1].y as i32
+                    + dd_acc[1].d[1].y as i32
+                    + dd_acc[2].d[1].y as i32
+                    + dd_acc[3].d[1].y as i32;
+                let dmv = [
+                    Mv {
+                        c: MvXY {
+                            y: (b_mv[0].y * 8 + s0y + 3 + (s0y > 0) as i32) >> 3,
+                            x: (b_mv[0].x * 8 + s0x + 3 + (s0x > 0) as i32) >> 3,
+                        },
+                    },
+                    Mv {
+                        c: MvXY {
+                            y: (b_mv[1].y * 8 + s1y + 3 + (s1y > 0) as i32) >> 3,
+                            x: (b_mv[1].x * 8 + s1x + 3 + (s1x > 0) as i32) >> 3,
+                        },
+                    },
+                ];
+                update_temporal_grid(recon, by + y, bx, 1, 1, r_pair, &dmv, t_swap);
+            }
+        }
+        for n in 0..2 {
+            top[n] += 4 * sh4;
+        }
+        y += sh4;
+    }
+
+    bacp && have_bacp
 }
 
 /// Reconstruct a TIP (Temporal Interpolated Prediction) inter block (8bpc).
@@ -10093,6 +10855,7 @@ fn recon_b_inter_tip(
                 cbx,
                 cby,
                 r_pair,
+                true,
                 &mut seg_mask,
                 fi,
             );
@@ -10166,6 +10929,7 @@ fn rmv_uvpred(
     cbx: i32,
     cby: i32,
     r_pair: crate::levels::RefPair,
+    tip: bool,
     mask: &mut [u8],
     fi: &SbFrameInfo,
 ) -> bool {
@@ -10174,6 +10938,9 @@ fn rmv_uvpred(
     let refs = unsafe { r_pair.r };
     let r0 = refs[0] as usize;
     let r1 = refs[1] as usize;
+    // For non-TIP (compound OPFL) the MC reference-window bounds use the block's
+    // signalled MVs (recon_tmpl.c:2408-2411 `tip ? rmv[1] : b->mv`).
+    let b_mv = unsafe { [b.data.inter.mv[0].c, b.data.inter.mv[1].c] };
     let refp0 = match recon.refp[r0].clone() {
         Some(p) => p,
         None => return false,
@@ -10218,8 +10985,11 @@ fn rmv_uvpred(
             let mut bottom = [0i32; 2];
             let mut right = [0i32; 2];
             for i in 0..2 {
-                let mvy = unsafe { rmv[1][i].c.y };
-                let mvx = unsafe { rmv[1][i].c.x };
+                let (mvy, mvx) = if tip {
+                    unsafe { (rmv[1][i].c.y, rmv[1][i].c.x) }
+                } else {
+                    (b_mv[i].y, b_mv[i].x)
+                };
                 top[i] = ((cby + y) * 4 >> ss_ver) + (mvy >> 4);
                 left[i] = ((cbx + x) * 4 >> ss_hor) + (mvx >> 4);
                 bottom[i] = iclip(top[i] + (4 * rh4 >> ss_ver) + hvtaps, 1, h);
@@ -10388,6 +11158,24 @@ fn update_temporal_grid(
     let idx = ((by_abs >> 1) as isize * t_stride + (bx_abs >> 1) as isize) as usize;
     if idx >= recon.cur_mvs.len() {
         return;
+    }
+    if std::env::var("RAV2D_UT").is_ok() {
+        let mv0 = crate::refmvs::quantize_mv(mv[swap as usize]);
+        let mv1 = crate::refmvs::quantize_mv(mv[(!swap) as usize]);
+        let (m0y, m0x) = if unsafe { mv0.n } == crate::refmvs::INVALID_TRAJ {
+            (-128i8, -128i8)
+        } else {
+            unsafe { (mv0.c[0], mv0.c[1]) }
+        };
+        let (m1y, m1x) = if unsafe { mv1.n } == crate::refmvs::INVALID_TRAJ {
+            (-128i8, -128i8)
+        } else {
+            unsafe { (mv1.c[0], mv1.c[1]) }
+        };
+        eprintln!(
+            "RUT poc={} off={} w8={w8} h8={h8} mv0=({},{}) mv1=({},{})",
+            recon.frm_hdr.frame_offset, idx, m0y, m0x, m1y, m1x
+        );
     }
     crate::recon::update_temporal(
         &mut recon.cur_mvs[idx..],
