@@ -6706,6 +6706,11 @@ fn decode_b(
             }
             if has_chroma && level_uv_on {
                 let m = &mut recon.lf_mask[recon.lf_idx];
+                // tx_lpf_uv is the chroma-subsampled above/left edge-level
+                // context (dav2d decode.c:1554-1555,3402): index it with the
+                // subsampled chroma 4px offset, not the luma-unit cbx4/cby4.
+                let cbx4_ss = ((cbx & 63) >> ss_hor) as usize;
+                let cby4_ss = ((cby & 63) >> ss_ver) as usize;
                 crate::lf_mask::create_db_mask(
                     &mut m.filter_uv,
                     &b,
@@ -6716,8 +6721,8 @@ fn decode_b(
                     fi.bh,
                     layout,
                     true,
-                    &mut a.tx_lpf_uv[cbx4..],
-                    &mut l.tx_lpf_uv[cby4..],
+                    &mut a.tx_lpf_uv[cbx4_ss..],
+                    &mut l.tx_lpf_uv[cby4_ss..],
                     recon.frm_hdr,
                     recon.seq_hdr,
                 );

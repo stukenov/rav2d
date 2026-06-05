@@ -1986,24 +1986,6 @@ fn deblock64_rows(
                 ((row[2][mask_idx] as u32 >> mask_shift) & bytes_mask) as u16,
             ];
             let llm = [ll_mask[y], ll_mask[y + 1]];
-            if std::env::var("RAV2D_ROWUV").is_ok()
-                && ctx.frame_hdr.frame_type == crate::headers::FrameType::Key
-                && (vmask[0] | vmask[1] | vmask[2]) != 0
-            {
-                eprintln!(
-                    "RROWUV x64={} sy4={} y={} vm={},{},{} ll={},{} q={} s={}",
-                    x64,
-                    starty4 >> ctx.ss_ver,
-                    y,
-                    vmask[0],
-                    vmask[1],
-                    vmask[2],
-                    llm[0],
-                    llm[1],
-                    q_thr[0][16 + y],
-                    side_thr[0][16 + y]
-                );
-            }
             if apply_u {
                 deblock_v_sb64uv_8bpc(
                     p_u,

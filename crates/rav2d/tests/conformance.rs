@@ -703,11 +703,9 @@ fn intra_frame0_sweep() {
 /// best-match-keyframe approach used by the intra sweep), then require zero diff.
 ///
 /// Film grain stays off (M4). All listed clips' keyframes must be bit-exact with
-/// filters on; this is the M2 done-condition.
-/// WIP: deblock+CDEF clips pass; LR/CCSO (352x288 seg1/deltaq1/partial_lossless)
-/// still pending — un-ignore once those land.
+/// filters on; this is the in-loop-filter done-condition. All listed clips'
+/// keyframes are bit-exact with deblock + CDEF + CCSO + loop-restoration on.
 #[test]
-#[ignore = "M2 WIP: deblock+CDEF bit-exact; LR/CCSO pending"]
 fn bit_exact_filtered_sweep() {
     let clips = [
         "avm-v14.1.0-bus.64x64.l5.obu",
@@ -912,25 +910,14 @@ fn filter_bisect() {
         }
         // Optional first-N diff coords for the combo named by env DIFFCOMBO.
         if std::env::var("DIFFCOMBO").ok().as_deref() == Some(name) {
-            let pl = std::env::var("DIFFPL")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0usize);
-            let pw = if pl == 0 {
-                r.w as usize
-            } else {
-                ((r.w + ssh) >> ssh) as usize
-            };
-            let nmax = std::env::var("DIFFN")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(60);
+            let pl = 0usize;
+            let pw = r.w as usize;
             let mut n = 0;
             for (i, (a, b)) in r.planes[pl].iter().zip(g.planes[pl].iter()).enumerate() {
                 if a != b {
                     eprintln!("  diff @({},{}) r={} g={}", i % pw, i / pw, a, b);
                     n += 1;
-                    if n >= nmax {
+                    if n >= 30 {
                         break;
                     }
                 }
