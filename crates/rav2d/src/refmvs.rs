@@ -2832,6 +2832,52 @@ pub fn load_tmvs(
                     continue;
                 }
 
+                // Write the trajectory MV grid + map (decode.c:1909-1938).
+                if mv_traj {
+                    let off = offset as usize;
+                    let k1 = (x1 >> shift) - (x >> shift);
+                    debug_assert!((-1..=1).contains(&k1));
+                    rf.rp_traj[mfmv_ref][off + pos1].c.y = iclip(mv1_y, -2047, 2047);
+                    rf.rp_traj[mfmv_ref][off + pos1].c.x = iclip(mv1_x, -2047, 2047);
+                    rf.rp_map[(k1 + 1) as usize][mfmv_ref][off + pos] = TrajMap {
+                        y: (y1 - y) as i8,
+                        x: (x1 - x) as i8,
+                    };
+                    // Inner: project the reverse trajectory for the matched ref2idx.
+                    if ref2idx >= 0 {
+                        let ref2idx_u = ref2idx as usize;
+                        let mv2 = scale_mv(b_mv, rf.mfmv_ref2sf[n][b_ref as usize][1]);
+                        let (mv2_y, mv2_x) = unsafe { (mv2.c.y, mv2.c.x) };
+                        rf.rp_traj[ref2idx_u][off + pos1].c.y = iclip(mv2_y, -2047, 2047);
+                        rf.rp_traj[ref2idx_u][off + pos1].c.x = iclip(mv2_x, -2047, 2047);
+                        let (b_mv_y, b_mv_x) = unsafe { (b_mv.c.y, b_mv.c.x) };
+                        let mut ok = true;
+                        let mut y2 = y + apply_sign(b_mv_y.abs() >> 6, b_mv_y);
+                        if y2 < y_proj_start || y2 >= y_proj_end {
+                            ok = false;
+                        }
+                        if ok {
+                            y2 &= mask;
+                            let mut x2 = x + apply_sign(b_mv_x.abs() >> 6, b_mv_x);
+                            if x2 < x_proj_start || x2 >= x_proj_end {
+                                ok = false;
+                            }
+                            if ok {
+                                x2 &= mask;
+                                let pos2 = (y2 as usize & (sbsz8 as usize - 1))
+                                    * stride as usize
+                                    + x2 as usize;
+                                let k2 = (x1 >> shift) - (x2 >> shift);
+                                debug_assert!((-1..=1).contains(&k2));
+                                rf.rp_map[(k2 + 1) as usize][ref2idx_u][off + pos2] = TrajMap {
+                                    y: (y1 - y2) as i8,
+                                    x: (x1 - x2) as i8,
+                                };
+                            }
+                        }
+                    }
+                }
+
                 let mut final_mv = b_mv;
                 if ref2ref < 0 {
                     unsafe {
