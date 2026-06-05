@@ -3232,19 +3232,6 @@ fn filter_sbrow(
             sby,
             false,
         );
-        if std::env::var("RAV2D_CDEFTRACE").is_ok()
-            && frame_hdr.frame_type == crate::headers::FrameType::Key
-        {
-            let s = fp.y_stride.unsigned_abs();
-            for gy in 48..64 {
-                for xx in 0..16 {
-                    let idx = gy as usize * s + xx as usize;
-                    if idx < dst_y.len() {
-                        eprintln!("CDEFPX {} {} {}", xx, gy, dst_y[idx]);
-                    }
-                }
-            }
-        }
     }
 
     // (4) Loop restoration (Wiener / GDF). dav2d gates on restore_planes plus the

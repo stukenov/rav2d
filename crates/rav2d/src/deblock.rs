@@ -1319,7 +1319,7 @@ fn filter_plane_rows_uv_8bpc(
 // ===========================================================================
 
 use crate::headers::PixelLayout;
-use crate::lf_mask::{transpose_lossless_mask as lf_transpose_lossless_mask, Av2Filter};
+use crate::lf_mask::{Av2Filter, transpose_lossless_mask as lf_transpose_lossless_mask};
 
 /// Bundled per-frame inputs for the deblock pass, mirroring the fields
 /// `dav2d_deblock_sbrow_*` reads from `Dav2dFrameContext`.
@@ -1384,8 +1384,8 @@ fn setup_thr_cols(
                 segmap[(seg_off + x4 as isize + y4 as isize * seg_stride) as usize] as usize;
             let cur_q_thr = thr_lut[0][seg_id] as i32;
             let cur_side_thr = thr_lut[1][seg_id] as i32;
-            let subpu = 3 * (((mask[bx4_base + x4][4][mask_idx] >> (mask_shift + y4 as u32)) & 1)
-                as i32);
+            let subpu =
+                3 * (((mask[bx4_base + x4][4][mask_idx] >> (mask_shift + y4 as u32)) & 1) as i32);
             let eq = edge_thr(cur_q_thr, prev_q_thr) >> subpu;
             let es = edge_thr(cur_side_thr, prev_side_thr) >> subpu;
             q_thr_dst[x4 * 16 + y4] = eq as u8;
@@ -1437,8 +1437,8 @@ fn setup_thr_rows(
                 segmap[(seg_off + x4 as isize + y4 as isize * seg_stride) as usize] as usize;
             let cur_q_thr = thr_lut[0][seg_id] as i32;
             let cur_side_thr = thr_lut[1][seg_id] as i32;
-            let subpu = 3 * (((mask[starty4 + y4][4][mask_idx] >> (mask_shift + x4 as u32)) & 1)
-                as i32);
+            let subpu =
+                3 * (((mask[starty4 + y4][4][mask_idx] >> (mask_shift + x4 as u32)) & 1) as i32);
             let eq = edge_thr(cur_q_thr, prev_q_thr) >> subpu;
             let es = edge_thr(cur_side_thr, prev_side_thr) >> subpu;
             q_thr_dst[x4 + y4 * 16] = eq as u8;
@@ -1661,7 +1661,10 @@ fn deblock64_cols(
         let bx4_base = (((x64 & 3) * 16) >> ctx.ss_hor) as usize;
         let uv_w4 = imin(ctx.bw - x64 * 16, 16) >> ctx.ss_hor;
         let (seg, seg_off): (&[u8], isize) = if !ctx.segmap_uv.is_empty() {
-            (ctx.segmap_uv, uv_seg_band + (x64 as isize) * (16 >> ctx.ss_hor) as isize)
+            (
+                ctx.segmap_uv,
+                uv_seg_band + (x64 as isize) * (16 >> ctx.ss_hor) as isize,
+            )
         } else {
             (&PLACEHOLDER_SEGMAP, 0)
         };
@@ -1955,7 +1958,11 @@ fn deblock64_rows(
                 &col_lflvl.filter_uv[1],
                 starty4 >> ctx.ss_ver,
                 &lut[pl],
-                if above_present { Some(&a_lut[pl]) } else { None },
+                if above_present {
+                    Some(&a_lut[pl])
+                } else {
+                    None
+                },
                 above_seg,
                 x64 & 3,
                 ctx.ss_hor,
@@ -1979,6 +1986,24 @@ fn deblock64_rows(
                 ((row[2][mask_idx] as u32 >> mask_shift) & bytes_mask) as u16,
             ];
             let llm = [ll_mask[y], ll_mask[y + 1]];
+            if std::env::var("RAV2D_ROWUV").is_ok()
+                && ctx.frame_hdr.frame_type == crate::headers::FrameType::Key
+                && (vmask[0] | vmask[1] | vmask[2]) != 0
+            {
+                eprintln!(
+                    "RROWUV x64={} sy4={} y={} vm={},{},{} ll={},{} q={} s={}",
+                    x64,
+                    starty4 >> ctx.ss_ver,
+                    y,
+                    vmask[0],
+                    vmask[1],
+                    vmask[2],
+                    llm[0],
+                    llm[1],
+                    q_thr[0][16 + y],
+                    side_thr[0][16 + y]
+                );
+            }
             if apply_u {
                 deblock_v_sb64uv_8bpc(
                     p_u,

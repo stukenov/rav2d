@@ -1774,8 +1774,7 @@ pub fn refmvs_find(
         && let Some(bml_b) = bml
         && {
             let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
-            bl_ref_idx == 0
-                || (unsafe { bml_b.r#ref.r[1] } == ref0 && bml_b.mf & 2 == 0)
+            bl_ref_idx == 0 || (unsafe { bml_b.r#ref.r[1] } == ref0 && bml_b.mf & 2 == 0)
         }
     {
         let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
@@ -2864,8 +2863,7 @@ pub fn load_tmvs(
                             }
                             if ok {
                                 x2 &= mask;
-                                let pos2 = (y2 as usize & (sbsz8 as usize - 1))
-                                    * stride as usize
+                                let pos2 = (y2 as usize & (sbsz8 as usize - 1)) * stride as usize
                                     + x2 as usize;
                                 let k2 = (x1 >> shift) - (x2 >> shift);
                                 debug_assert!((-1..=1).contains(&k2));

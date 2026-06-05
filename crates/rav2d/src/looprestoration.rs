@@ -1698,14 +1698,12 @@ fn lr_stripe_8bpc(
     let mut cur_off = p_off;
     // Running deblocked-line (lpf) offset. dav2d advances lpf by 4*stride per
     // stripe (lr_apply_tmpl.c:188); the single-thread base term is just `x`.
-    let mut lpf_off = (have_tt as isize
-        * (sby as isize * (4 << ctx.sb128 as i32) - 4)
-        * stride_u as isize
-        + x as isize) as usize;
-    let mut llpf_off = (have_tt as isize
-        * (sby as isize * (4 << ctx.sb128 as i32) - 4)
-        * lstride_u as isize
-        + (x * 2) as isize) as usize;
+    let mut lpf_off =
+        (have_tt as isize * (sby as isize * (4 << ctx.sb128 as i32) - 4) * stride_u as isize
+            + x as isize) as usize;
+    let mut llpf_off =
+        (have_tt as isize * (sby as isize * (4 << ctx.sb128 as i32) - 4) * lstride_u as isize
+            + (x * 2) as isize) as usize;
 
     while y + stripe_h <= row_h {
         edges ^= ((-(((sby + 1) != ctx.sbh) as i32 | (y + stripe_h != row_h) as i32)) as u8
@@ -1738,8 +1736,7 @@ fn lr_stripe_8bpc(
         let cdef_top: Option<usize> = if (edges & (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED))
             == (LR_HAVE_TOP | LR_HAVE_TOP_INTEGRATED)
         {
-            let cdef_off =
-                tile_row_m1 as usize * (6 - 4 * chroma as usize) * stride_u + x as usize;
+            let cdef_off = tile_row_m1 as usize * (6 - 4 * chroma as usize) * stride_u + x as usize;
             let off = cdef_off + (2 * (1 - chroma) as usize) * stride_u;
             if off < ctx.lr_cdef_line[plane_u].len() {
                 Some(off)
@@ -1850,8 +1847,19 @@ fn lr_stripe_8bpc(
                         None => (&db_line, lpf_off),
                     };
                     ns_wiener_single_y_8bpc(
-                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
-                        w_u, stripe_u, &filter, edges, &ll_mask_buf,
+                        p,
+                        cur_off,
+                        stride_u,
+                        &left[left_idx..],
+                        ts,
+                        to,
+                        &db_line,
+                        bottom_off,
+                        w_u,
+                        stripe_u,
+                        &filter,
+                        edges,
+                        &ll_mask_buf,
                     );
                 }
                 WKind::NsSingle => {
@@ -1864,8 +1872,7 @@ fn lr_stripe_8bpc(
                     };
                     filter.copy_from_slice(src);
                     let luma = ctx.lf_p_luma.to_vec();
-                    let luma_off =
-                        (x << ss_hor) as usize + (y << ss_ver) as usize * lstride_u;
+                    let luma_off = (x << ss_hor) as usize + (y << ss_ver) as usize * lstride_u;
                     let luma_db = ctx.lr_db_line[0].clone();
                     let top_owned = if cdef_top.is_some() {
                         Some(top_slice.to_vec())
@@ -1877,10 +1884,29 @@ fn lr_stripe_8bpc(
                         None => (&db_line, lpf_off),
                     };
                     ns_wiener_single_uv_8bpc(
-                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
-                        w_u, stripe_u, &filter, &luma, luma_off, lstride_u, &luma_db, llpf_off,
-                        &luma_db, llpf_off + 6 * lstride_u, ss_hor as usize, ss_ver as usize,
-                        ctx.cfl_ds_filter_index, edges, &ll_mask_buf,
+                        p,
+                        cur_off,
+                        stride_u,
+                        &left[left_idx..],
+                        ts,
+                        to,
+                        &db_line,
+                        bottom_off,
+                        w_u,
+                        stripe_u,
+                        &filter,
+                        &luma,
+                        luma_off,
+                        lstride_u,
+                        &luma_db,
+                        llpf_off,
+                        &luma_db,
+                        llpf_off + 6 * lstride_u,
+                        ss_hor as usize,
+                        ss_ver as usize,
+                        ctx.cfl_ds_filter_index,
+                        edges,
+                        &ll_mask_buf,
                     );
                 }
                 WKind::NsMulti => {
@@ -1907,9 +1933,22 @@ fn lr_stripe_8bpc(
                         None => (&db_line, lpf_off),
                     };
                     ns_wiener_multi_8bpc(
-                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
-                        w_u, stripe_u, filters, ctx.ns_subclass_lut,
-                        &noskip_mask[noskip_offset..], ctx.base_q, edges, &ll_mask_buf,
+                        p,
+                        cur_off,
+                        stride_u,
+                        &left[left_idx..],
+                        ts,
+                        to,
+                        &db_line,
+                        bottom_off,
+                        w_u,
+                        stripe_u,
+                        filters,
+                        ctx.ns_subclass_lut,
+                        &noskip_mask[noskip_offset..],
+                        ctx.base_q,
+                        edges,
+                        &ll_mask_buf,
                     );
                     noskip_offset += (stripe_h >> 2) as usize;
                 }
@@ -1924,9 +1963,22 @@ fn lr_stripe_8bpc(
                         None => (&db_line, lpf_off),
                     };
                     pc_wiener_8bpc(
-                        p, cur_off, stride_u, &left[left_idx..], ts, to, &db_line, bottom_off,
-                        w_u, stripe_u, ctx.pc_filters, ctx.pc_subclass_lut,
-                        &noskip_mask[noskip_offset..], ctx.base_q, edges, &ll_mask_buf,
+                        p,
+                        cur_off,
+                        stride_u,
+                        &left[left_idx..],
+                        ts,
+                        to,
+                        &db_line,
+                        bottom_off,
+                        w_u,
+                        stripe_u,
+                        ctx.pc_filters,
+                        ctx.pc_subclass_lut,
+                        &noskip_mask[noskip_offset..],
+                        ctx.base_q,
+                        edges,
+                        &ll_mask_buf,
                     );
                     noskip_offset += (stripe_h >> 2) as usize;
                 }
@@ -1936,7 +1988,14 @@ fn lr_stripe_8bpc(
 
         if gdf_enabled {
             gdf_add_8bpc(
-                &mut p[cur_off..], stride_u, &gdf_err, 64, w_u, stripe_u, gdf_scale, &ll_mask_buf,
+                &mut p[cur_off..],
+                stride_u,
+                &gdf_err,
+                64,
+                w_u,
+                stripe_u,
+                gdf_scale,
+                &ll_mask_buf,
             );
         }
 
