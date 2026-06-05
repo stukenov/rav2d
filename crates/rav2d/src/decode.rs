@@ -7936,18 +7936,20 @@ fn inter_residual_tx_8bpc(
         if eob == i32::MIN {
             return Err(());
         }
-        // Mirror dav2d's `txtp_map` (recon_tmpl.c:2502): record the full luma
-        // transform type (base | secondary-tx << 8) for each covered 4x4 so the
-        // inter chroma path can seed its transform type from it.
+        // Mirror dav2d's `txtp_map` (recon_tmpl.c:2489/2502): record the luma
+        // transform type for each covered 4x4 so the inter chroma path can seed
+        // its transform type. dav2d masks off the secondary-transform bits
+        // (txtp &= 0xff) before storing, so only the base type is propagated.
         if pl == 0 {
             let by15 = (by & 15) as usize;
             let bx15 = (bx & 15) as usize;
+            let base_txtp = txtp & 0xff;
             for dy in 0..t_dim.h as usize {
                 for dx in 0..t_dim.w as usize {
                     let yy = by15 + dy;
                     let xx = bx15 + dx;
                     if yy < 16 && xx < 16 {
-                        recon.scratch.txtp_map[yy * 16 + xx] = txtp;
+                        recon.scratch.txtp_map[yy * 16 + xx] = base_txtp;
                     }
                 }
             }
@@ -8106,6 +8108,211 @@ fn inter_residual_tx_8bpc(
             }
             eprintln!("{s}");
         }
+    }
+    Ok(())
+}
+
+/// Inter chroma residual for both planes with the cross-component transform
+/// (CCTX). Mirrors dav2d's chroma loop in `dav2d_recon_b` (recon_tmpl.c:3546-
+/// 3925): decode all U then all V TU coefficients (the entropy order), apply
+/// CCTX to mix U/V per TU, then inverse-transform-add both planes. CCTX needs
+/// U and V coefficients together, so it cannot be done in the per-plane
+/// `inter_residual_tx_8bpc`. The chroma prediction is already in dst_u/dst_v.
+#[allow(clippy::too_many_arguments)]
+fn inter_chroma_residual_8bpc(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    uvtx: usize,
+    cbx: i32,
+    cby: i32,
+    cbw4ss: i32,
+    cbh4ss: i32,
+    cw4ss: i32,
+    ch4ss: i32,
+    txtp_seed: u16,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
+    let (txw, txh) = (uv_t_dim.w as i32, uv_t_dim.h as i32);
+    let ss_hor = recon.frame.ss_hor;
+    let ss_ver = recon.frame.ss_ver;
+    let seg_id = b.seg_id as usize;
+    let lossless = recon.frame.seg_lossless[seg_id] != 0;
+    let n_tu = (cbw4ss * cbh4ss) as usize;
+    let tu_n = (txw as usize * 4) * (txh as usize * 4);
+
+    // Per-TU coefficient + metadata storage (recon_tmpl.c t->cf_uv / chroma_txtp).
+    // Coefficients for the TU at grid position i = y*cbw4ss + x are placed at
+    // cf[i*16] (mirrors C `cf[pl][i*16]`); the per-plane buffer is n_tu*16.
+    let mut cf_uv = vec![0i32; n_tu * 16 * 2];
+    let (cf_u, cf_v) = cf_uv.split_at_mut(n_tu * 16);
+    let mut tu_eob = [[-1i32; 2]; 256];
+    let mut tu_txtp = [[0u16; 2]; 256];
+
+    // Decode all U TUs then all V TUs (entropy order).
+    recon.scratch_u_has_cf = 0;
+    for pl in 0..2usize {
+        let plane_cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
+        let mut y = 0;
+        while y < ch4ss {
+            let mut x = 0;
+            while x < cw4ss {
+                let i = (y * cbw4ss + x) as usize;
+                let bx = cbx + (x << ss_hor);
+                let by = cby + (y << ss_ver);
+                let bx4 = ((bx & 63) >> ss_hor) as usize;
+                let by4 = ((by & 63) >> ss_ver) as usize;
+
+                let cf_slot = &mut plane_cf[i * 16..i * 16 + tu_n];
+                cf_slot.fill(0);
+
+                let mut txtp: u16 = txtp_seed;
+                let mut res_ctx: u8 = 0;
+                let eob = if b.skip_txfm != 0 {
+                    res_ctx = 0x40;
+                    txtp = crate::levels::txtp::DCT_DCT as u16;
+                    -1i32
+                } else {
+                    let dq_tbl = recon.dq_active[seg_id][1 + pl];
+                    let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
+                    let params = crate::recon::DecodeCoefParams {
+                        tx: uvtx,
+                        bs: b.bs as usize,
+                        plane: (1 + pl) as i32,
+                        intra: false,
+                        fsc: false,
+                        lossless,
+                        sdp_active: false,
+                        y_mode: 0,
+                        uv_mode: 0,
+                        seg_id,
+                        seq_fsc: recon.frame.seq_fsc,
+                        seq_ist: recon.frame.seq_ist,
+                        seq_cctx: recon.frame.seq_cctx,
+                        chroma_dctonly: false,
+                        reduced_txtp_set: recon.frame.reduced_txtp_set,
+                        tcq_enabled: recon.frame.tcq,
+                        layout: recon.frame.layout,
+                        u_has_cf: recon.scratch_u_has_cf,
+                        cbx: bx,
+                        cby: by,
+                        luma_fsc_map: &[],
+                        dq_tbl,
+                        bitdepth: recon.frame.bitdepth,
+                        qm: qm_ref,
+                        ss_hor: recon.frame.ss_hor != 0,
+                        ss_ver: recon.frame.ss_ver != 0,
+                    };
+                    let acoef = &a.ccoef[pl][bx4..];
+                    let lcoef = &l.ccoef[pl][by4..];
+                    let e = crate::recon::decode_coefs(
+                        msac,
+                        recon.cdf_coef,
+                        cdf_m,
+                        acoef,
+                        lcoef,
+                        &params,
+                        cf_slot,
+                        &mut txtp,
+                        &mut res_ctx,
+                    );
+                    if e == i32::MIN {
+                        return Err(());
+                    }
+                    e
+                };
+                if pl == 0 {
+                    recon.scratch_u_has_cf = (eob >= 0) as i32;
+                }
+                tu_eob[i][pl] = eob;
+                tu_txtp[i][pl] = txtp;
+
+                // Context fill (a/l ccoef) and is_coded[1] (pl==0 only).
+                let aw = imin(txw, (fi.bw >> ss_hor) - (bx >> ss_hor)).max(0) as usize;
+                let lh = imin(txh, (fi.bh >> ss_ver) - (by >> ss_ver)).max(0) as usize;
+                if aw > 0 {
+                    a.ccoef[pl][bx4..bx4 + aw].fill(res_ctx);
+                }
+                if lh > 0 {
+                    l.ccoef[pl][by4..by4 + lh].fill(res_ctx);
+                }
+                if pl == 0 {
+                    let mask: u64 = ((1u64 << txw) - 1) << (bx4 as u32);
+                    for yy in 0..txh as usize {
+                        let row = by4 + yy;
+                        if row < 64 {
+                            recon.scratch.is_coded[1][row] |= mask;
+                        }
+                    }
+                }
+                x += txw;
+            }
+            y += txh;
+        }
+    }
+
+    // CCTX + inverse transform add per TU (recon_tmpl.c:3882-3925).
+    let cctx_enabled = recon.frame.seq_cctx
+        && (recon.frame.layout == crate::headers::PixelLayout::I420 || uv_t_dim.max < 8);
+    let uv_stride = recon.frame.uv_stride_px;
+    let mut y = 0;
+    while y < ch4ss {
+        let mut x = 0;
+        while x < cw4ss {
+            let i = (y * cbw4ss + x) as usize;
+            let bx = cbx + (x << ss_hor);
+            let by = cby + (y << ss_ver);
+
+            // dav2d uses `eob[0] >= intra`; intra is 0 for inter blocks.
+            let cctx_type = if cctx_enabled && tu_eob[i][0] >= 0 {
+                (tu_txtp[i][0] >> 8) as i32
+            } else {
+                0
+            };
+            if cctx_type != 0 {
+                let sz = imin(txw * 4, 32) as usize * imin(txh * 4, 32) as usize;
+                crate::itx::cctx_8bpc(
+                    &mut cf_u[i * 16..],
+                    &mut cf_v[i * 16..],
+                    &crate::tables::CCTX_ANGLE[(cctx_type - 1) as usize],
+                    sz,
+                );
+                let gt = (tu_eob[i][1] > tu_eob[i][0]) as usize;
+                tu_eob[i][1 - gt] = tu_eob[i][gt];
+                let t0 = tu_txtp[i][0] & 0xff;
+                tu_txtp[i][0] = t0;
+                tu_txtp[i][1] = t0;
+            }
+
+            for pl in 0..2usize {
+                if tu_eob[i][pl] == -1 {
+                    continue;
+                }
+                let mut txtp = tu_txtp[i][pl] as u32;
+                if recon.frame.seq_inter_ddt {
+                    txtp += txtp & crate::tables::TX_DDT_MASK[uvtx] as u32;
+                }
+                let dst_off =
+                    4 * (((by >> ss_ver) as usize) * uv_stride + ((bx >> ss_hor) as usize));
+                let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
+                let dst_plane: &mut [u8] = if pl == 0 { recon.dst_u } else { recon.dst_v };
+                crate::itx::inv_txfm_add_8bpc(
+                    dst_plane,
+                    dst_off,
+                    uv_stride,
+                    &mut cf[i * 16..],
+                    txtp,
+                    tu_eob[i][pl],
+                    uvtx,
+                );
+            }
+            x += txw;
+        }
+        y += txh;
     }
     Ok(())
 }
@@ -8750,7 +8957,7 @@ fn recon_b_inter_compound(
         }
         let _ = (seg_mask_stride, cb_dim);
 
-        // Chroma residual per uvtx TU.
+        // Chroma residual per uvtx TU (both planes + CCTX).
         let seg_id = b.seg_id as usize;
         let lossless = recon.frame.seg_lossless[seg_id] != 0;
         let uvtx = if lossless {
@@ -8760,37 +8967,15 @@ fn recon_b_inter_compound(
                 (crate::headers::PixelLayout::I444 as i32 - recon.frame.layout as i32) as usize;
             crate::tables::MAX_TXFM_SIZE_FOR_BS[cbs as u8 as usize][layout_idx] as usize
         };
-        let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
-        let (txw, txh) = (uv_t_dim.w as i32, uv_t_dim.h as i32);
-        recon.scratch_u_has_cf = 0;
         // Seed the inter chroma transform type from the co-located luma 4x4's
         // recorded txtp (dav2d `y_txtp = txtp_map[...]`, recon_tmpl.c:3540/3553).
         let uv_txtp_seed = recon.scratch.txtp_map[(by & 15) as usize * 16 + (bx & 15) as usize];
-        for pl in 1..3usize {
-            let mut y = 0;
-            while y < ch4ss {
-                let mut x = 0;
-                while x < cw4ss {
-                    inter_residual_tx_8bpc(
-                        recon,
-                        msac,
-                        cdf_m,
-                        a,
-                        l,
-                        b,
-                        pl,
-                        uvtx,
-                        cbx + (x << ss_hor),
-                        cby + (y << ss_ver),
-                        true,
-                        uv_txtp_seed,
-                        fi,
-                    )?;
-                    x += txw;
-                }
-                y += txh;
-            }
-        }
+        let cbw4ss = (cbw4 + ss_hor) >> ss_hor;
+        let cbh4ss = (cbh4 + ss_ver) >> ss_ver;
+        inter_chroma_residual_8bpc(
+            recon, msac, cdf_m, a, l, b, uvtx, cbx, cby, cbw4ss, cbh4ss, cw4ss, ch4ss,
+            uv_txtp_seed, fi,
+        )?;
     }
     Ok(())
 }
@@ -9073,7 +9258,7 @@ fn recon_b_inter(
             }
         }
 
-        // Chroma residual per uvtx TU.
+        // Chroma residual per uvtx TU (both planes + CCTX).
         let seg_id = b.seg_id as usize;
         let lossless = recon.frame.seg_lossless[seg_id] != 0;
         let uvtx = if lossless {
@@ -9083,37 +9268,15 @@ fn recon_b_inter(
                 (crate::headers::PixelLayout::I444 as i32 - recon.frame.layout as i32) as usize;
             crate::tables::MAX_TXFM_SIZE_FOR_BS[cbs as u8 as usize][layout_idx] as usize
         };
-        let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
-        let (txw, txh) = (uv_t_dim.w as i32, uv_t_dim.h as i32);
-        recon.scratch_u_has_cf = 0;
         // Seed the inter chroma transform type from the co-located luma 4x4's
         // recorded txtp (dav2d `y_txtp = txtp_map[...]`, recon_tmpl.c:3540/3553).
         let uv_txtp_seed = recon.scratch.txtp_map[(by & 15) as usize * 16 + (bx & 15) as usize];
-        for pl in 1..3usize {
-            let mut y = 0;
-            while y < ch4ss {
-                let mut x = 0;
-                while x < cw4ss {
-                    inter_residual_tx_8bpc(
-                        recon,
-                        msac,
-                        cdf_m,
-                        a,
-                        l,
-                        b,
-                        pl,
-                        uvtx,
-                        cbx + (x << ss_hor),
-                        cby + (y << ss_ver),
-                        true,
-                        uv_txtp_seed,
-                        fi,
-                    )?;
-                    x += txw;
-                }
-                y += txh;
-            }
-        }
+        let cbw4ss = (cbw4 + ss_hor) >> ss_hor;
+        let cbh4ss = (cbh4 + ss_ver) >> ss_ver;
+        inter_chroma_residual_8bpc(
+            recon, msac, cdf_m, a, l, b, uvtx, cbx, cby, cbw4ss, cbh4ss, cw4ss, ch4ss,
+            uv_txtp_seed, fi,
+        )?;
     }
     Ok(())
 }
