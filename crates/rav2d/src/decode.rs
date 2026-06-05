@@ -5444,14 +5444,27 @@ fn decode_b(
             if final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8 {
                 let is_joint = final_inter_mode == CompInterPredMode::JointNewMv as u8
                     || final_inter_mode == CompInterPredMode::OpflJointNewMv as u8;
+                // refdist[0] = |refdist(ref0)|, refdist[1] = ±|refdist(ref1)| with
+                // the sign set when the two references point in opposite temporal
+                // directions (decode.c:2765-2770). Used for the joint-MV residual
+                // projection of the non-decoded reference.
+                let rd0 = fi.absrefdist[ref0 as usize] as i32;
+                let mut rd1 = fi.absrefdist[ref1 as usize] as i32;
                 let (start, end) = if is_joint {
-                    let rd0 = fi.absrefdist[ref0 as usize] as i32;
-                    let rd1 = fi.absrefdist[ref1 as usize] as i32;
                     let s = (rd0 < rd1) as usize;
+                    if (fi.refdir[ref0 as usize] ^ fi.refdir[ref1 as usize]) != 0 {
+                        rd1 = -rd1;
+                    }
                     (s, s + 1)
                 } else {
                     (0usize, 2usize)
                 };
+                // dav2d ZERO2MVs both MVs before reading residuals so the
+                // non-decoded joint reference starts from zero (decode.c:2774).
+                unsafe {
+                    b.data.inter.mv[0].n = 0;
+                    b.data.inter.mv[1].n = 0;
+                }
                 let mut sum_mvd = 0i32;
                 let mut nnzc = 0i32;
                 for n in start..end {
@@ -5531,6 +5544,44 @@ fn decode_b(
                                     b.data.inter.mv[n].c.x = -cur_x;
                                 }
                             }
+                        }
+                    }
+
+                    // Joint-MV residual derivation (decode.c:2827-2838): for
+                    // JOINT/OPFL_JOINT modes only one MV residual is coded; the
+                    // other is the temporal projection of it (scaled by the
+                    // ref-distance ratio) then jmvd-scaled.
+                    if is_joint {
+                        let derived = start ^ 1;
+                        let source = start;
+                        // pack per-ref precision: derived ref uses prec 6.
+                        let prec_packed = if derived == 0 {
+                            6 | ((mv_prec as u8) << 4)
+                        } else {
+                            (mv_prec as u8) | (6 << 4)
+                        };
+                        unsafe {
+                            b.data.inter.mv_prec = prec_packed as i8;
+                        }
+                        let proj = crate::refmvs::mv_projection(
+                            unsafe { b.data.inter.mv[source] },
+                            rd1,
+                            rd0,
+                            -0xffff,
+                            0xffff,
+                        );
+                        let mut dmv = unsafe { proj.c };
+                        jmvd_scale(&mut dmv, amvd_val != 0, jmvd_scale_mode as i32);
+                        unsafe {
+                            b.data.inter.mv[derived].c = dmv;
+                        }
+                    } else {
+                        // Replicate the single precision into both nibbles
+                        // (decode.c:2837, b->mv_prec *= 0x11) so the per-ref read
+                        // in the resolution loop yields the same value for n=0,1.
+                        let p = (mv_prec as u8) & 0xf;
+                        unsafe {
+                            b.data.inter.mv_prec = (p | (p << 4)) as i8;
                         }
                     }
                 }
@@ -6489,8 +6540,10 @@ fn decode_b(
         let mv_prec = unsafe { b.data.inter.mv_prec } as i32;
         let amvd = unsafe { b.data.inter.amvd };
 
-        if !is_comp && refs[0] != TIP_FRAME as i8 {
-            // Resolve the single-ref block MV.
+        if !is_comp {
+            // Resolve the single-ref block MV (including TIP single-ref, ref0 ==
+            // TIP_FRAME: dav2d resolves and splats these via splat_oneref_mv so
+            // neighbouring blocks see ref[0] == TIP_FRAME in the refmvs grid).
             if inter_mode == InterPredMode::GlobalMv as u8 {
                 let gmv = crate::env::get_gmv_2d(
                     &recon.frm_hdr.gmv.m[refs[0] as usize],
@@ -7044,13 +7097,17 @@ fn decode_b(
                 let mode_idx =
                     (inter_mode - CompInterPredMode::NearMvNearMv as u8) as usize;
                 let m_pair = COMP_INTER_PRED_MODES[mode_idx.min(COMP_INTER_PRED_MODES.len() - 1)];
+                let packed_prec = unsafe { b.data.inter.mv_prec } as i32;
                 for n in 0..2 {
                     let diff = unsafe { b.data.inter.mv[n] };
                     let drl = unsafe { b.data.inter.drl_idx[n] } as usize;
                     let mut mv = unsafe { mvstack[drl].mv[n].c };
                     if m_pair[n] == InterPredMode::NewMv as u8 {
-                        if amvd == 0 && mv_prec <= 3 {
-                            crate::env::mv_reduce_prec(&mut mv, mv_prec);
+                        // Per-ref precision (decode.c:1275); for joint modes the
+                        // derived reference carries precision 6 (no reduction).
+                        let prec_n = (packed_prec >> (n * 4)) & 0xf;
+                        if amvd == 0 && prec_n <= 3 {
+                            crate::env::mv_reduce_prec(&mut mv, prec_n);
                         }
                         unsafe {
                             mv.x += diff.c.x;
@@ -15528,12 +15585,16 @@ mod tests {
             switchable_comp_refs: true,
             num_same_ref_comp: 0,
             refdir: [0; 8],
-            refdist: [0; 8],
+            // Non-zero, valid ref distances: joint compound modes project the
+            // non-coded MV residual through mv_projection(num, den) which requires
+            // den (absrefdist) in (0, 32). Real compound streams always carry
+            // valid distances; all-zero would be a degenerate stream.
+            refdist: [1, 2, 3, 4, 5, 6, 7, 0],
             opfl_refine_type: 0,
             masked_compound: false,
             cwp: false,
             refine_mv_enabled: false,
-            absrefdist: [0; 8],
+            absrefdist: [1, 2, 3, 4, 5, 6, 7, 0],
             tile_col_start: 0,
             tile_col_end: 64,
             tile_row_start: 0,
