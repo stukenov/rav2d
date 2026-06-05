@@ -6986,7 +6986,7 @@ fn inter_residual_tx_8bpc(
     };
     let dst_off = 4 * ((by >> ss_ver) as usize * stride + (bx >> ss_hor) as usize);
 
-    if stx != 0 {
+    if stx != 0 && (stx & 3) != 0 {
         // Inter never matches the intra y_mode transpose mask -> transpose = true.
         let transpose = true;
         let stype = (stx & 3) - 1;
