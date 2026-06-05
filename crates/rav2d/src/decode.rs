@@ -9276,8 +9276,71 @@ fn recon_b_inter(
         let ch4ss = (ch4 + ss_ver) >> ss_ver;
 
         // Chroma MV: for cbs==lbs or imin(bw4,bh4)>=16 the single block MV is
-        // used directly. Sub-8x8 (averaged) chroma MVs are deferred.
+        // used directly. For sub-8x8 luma coding (cbs != lbs && imin(bw4,bh4)<16)
+        // the chroma covers several luma sub-blocks, each with its own MV; chroma
+        // MC is done per luma sub-block reading ref/MV/filter from the spatial
+        // refmvs (recon_tmpl.c:3603-3655, single-pass branch).
         let uv_stride = recon.frame.uv_stride_px;
+        let (luma_bw4, luma_bh4) = {
+            let ld = &BLOCK_DIMENSIONS[lbs as u8 as usize];
+            (ld[0] as i32, ld[1] as i32)
+        };
+        let sub8x8 = lbs != BlockSize::Invalid
+            && cbs != lbs
+            && imin(luma_bw4, luma_bh4) < 16
+            && !warp_block;
+        if sub8x8 {
+            // Per-sub-block chroma MC from spatial refmvs. cw4/ch4 are chroma
+            // 4x4 extents; for each origin sub-block (ox4==oy4==0) MC both planes.
+            let base = ((cby & 63) as usize) * 128 + ((cbx & 127) as usize);
+            for y in 0..ch4 {
+                for x in 0..cw4 {
+                    let idx = base + (y as usize) * 128 + (x as usize);
+                    let r2 = &recon.rt.r[idx];
+                    if r2.ox4 != 0 || r2.oy4 != 0 {
+                        continue;
+                    }
+                    let s_ref0 = unsafe { r2.r#ref.r[0] };
+                    if s_ref0 < 0 || s_ref0 as usize >= 7 {
+                        continue;
+                    }
+                    let s_mv = if r2.mf & 2 != 0 {
+                        unsafe { r2.lmv[0].c }
+                    } else {
+                        unsafe { r2.mv[0].c }
+                    };
+                    let s_filter = r2.subpel_filter;
+                    let sdim = &BLOCK_DIMENSIONS[r2.bs as usize];
+                    let s_bw4 = sdim[0] as i32;
+                    let s_bh4 = sdim[1] as i32;
+                    let s_refp = match recon.refp[s_ref0 as usize].clone() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let s_cbx = cbx + x;
+                    let s_cby = cby + y;
+                    // Chroma destination pixel: block-origin chroma px plus the
+                    // per-sub-block offset (recon_tmpl.c: uvoff + (x*4 >> ss_hor),
+                    // uvoff advances by 4*stride >> ss_ver per luma-4-unit row).
+                    let base_off = 4
+                        * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
+                    let dst_off = base_off
+                        + ((y * 4 >> ss_ver) as usize) * uv_stride
+                        + ((x * 4 >> ss_hor) as usize);
+                    for pl in 1..3usize {
+                        let dst: &mut [u8] = if pl == 1 {
+                            &mut recon.dst_u[dst_off..]
+                        } else {
+                            &mut recon.dst_v[dst_off..]
+                        };
+                        inter_mc_plane_8bpc(
+                            dst, uv_stride, &s_refp, pl, s_cbx, s_cby, s_bw4, s_bh4, s_mv.x,
+                            s_mv.y, s_filter, ss_hor, ss_ver, fi.bw, fi.bh,
+                        );
+                    }
+                }
+            }
+        }
         // Warp dispatch for chroma uses cb_dim and (>=8px-after-subsample affine).
         let c_wmp = if use_local_warp {
             recon.warpmv[0]
@@ -9288,7 +9351,7 @@ fn recon_b_inter(
         // block dims after subsampling (dav2d warp_affine, recon_tmpl.c:1817).
         let c_affine = c_wmp.affine != 0
             && imin(cbw4 * (4 >> ss_hor), cbh4 * (4 >> ss_ver)) >= 8;
-        for pl in 1..3 {
+        for pl in (1..3).filter(|_| !sub8x8) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let dst: &mut [u8] = if pl == 1 {
                 &mut recon.dst_u[dst_off..]
@@ -9328,12 +9391,26 @@ fn recon_b_inter(
             }
         }
 
-        // Inter-intra blend for chroma (recon_tmpl.c:3688).
-        if motion_mode == MotionMode::InterIntra as u8 || unsafe { b.data.inter.warp_ii } != 0 {
+        // Inter-intra blend for chroma (recon_tmpl.c:3682). Only on the
+        // single-ref / compound branches, never on sub8x8 chroma coding (the
+        // sub8x8 branch in dav2d_recon_b has no iiblend). The II-mask block size
+        // is the chroma-subsampled block size SS_BS[cbs][layout-1] (wedge keeps
+        // cbs), matching the C `dav2d_ss_bs[cbs][layout-1]` argument.
+        if !sub8x8
+            && (motion_mode == MotionMode::InterIntra as u8 || unsafe { b.data.inter.warp_ii } != 0)
+        {
+            let ii_ss_bs = if unsafe { b.data.inter.wedge_idx } == -1 {
+                let layout_idx = (recon.frame.layout as usize) - 1;
+                unsafe {
+                    BlockSize::from_raw(crate::tables::SS_BS[cbs as usize][layout_idx] as i8)
+                }
+            } else {
+                cbs
+            };
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             for pl in 1..3usize {
                 iiblend_chroma_8bpc(
-                    recon, &b, pl, dst_off, uv_stride, cbw4, cbh4, cby, cbx, cbs, fi,
+                    recon, &b, pl, dst_off, uv_stride, cbw4, cbh4, cby, cbx, ii_ss_bs, fi,
                 );
             }
         }

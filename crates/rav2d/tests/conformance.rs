@@ -697,21 +697,10 @@ fn inter_frame1_diag() {
 /// decode order; the matching dav2d output frame is poc=4, the last output
 /// frame for this clip's display order.
 ///
-/// CURRENTLY IGNORED: single-ref warp-affine MC is bit-exact (block(0,0) and
-/// other warp blocks reconstruct exactly), and the warp/inter-frame entropy
-/// parse contexts are fixed. However this frame is NOT purely single-ref: it
-/// contains same-ref COMPOUND blocks (NewMvNewMv / NearMvNearMv / NearMvNewMv;
-/// e.g. block(0,6) is NewMvNewMv). The compound entropy parse is stubbed
-/// (comp reference context, comp DRL, dual MVs) and the compound MC kernels
-/// (avg / w_avg / dist-wtd, mask/wedge/seg) are not implemented, so the parse
-/// desyncs at the first compound block and the rest of the frame diverges.
-/// Compound + single-ref interintra (iiblend) are the remaining work; per the
-/// porting plan compound is a separate follow-up. Un-ignore once compound
-/// single-ref-pair MC + parse land. See `inter_frame1_diag`.
+/// All planes (Y/U/V) are bit-exact: single-ref + same-ref compound MC,
+/// warp-affine / warp-delta / warp-extend, inter-intra blend, sub-8x8 chroma
+/// MC and the inter-chroma CCTX residual all match the C decoder.
 #[test]
-#[ignore = "M3 WIP: same-ref compound parse + MC + interintra now bit-exact \
-            (rows 0-23); remaining diffs are warp-delta warp-candidate derivation \
-            in the lower-right quadrant (single-ref warp subsystem)"]
 fn bit_exact_first_inter_frame() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
     if !path.exists() {
