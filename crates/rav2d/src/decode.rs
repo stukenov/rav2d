@@ -5034,8 +5034,46 @@ fn decode_b(
             && fi.switchable_comp_refs
             && bw4 * bh4 >= 4
         {
-            // simplified comp context
-            let ctx = 0usize;
+            // get_comp_ctx (env.h:140). refdir(ref): ref==-1 -> intra (-1), else
+            // fi.refdir[ref] (refdir_intra is -1 from lib init).
+            // refdir_intra is -1 (lib.c init); intra/intrabc neighbours use it.
+            let refdir = |r: i8| -> i32 {
+                if r < 0 {
+                    -1
+                } else {
+                    fi.refdir[r as usize] as i32
+                }
+            };
+            let ctx = match n_ctx {
+                2 => {
+                    let refa2 = nx_ref1[0];
+                    let refb2 = nx_ref1[1];
+                    if refa2 == -1 {
+                        let refa1 = nx_ref0[0];
+                        if refb2 == -1 {
+                            let refb1 = nx_ref0[1];
+                            ((refdir(refa1) == 1) ^ (refdir(refb1) == 1)) as usize
+                        } else {
+                            2 + ((nx_intrabc[0] == 0) && refdir(refa1) != 0) as usize
+                        }
+                    } else if refb2 == -1 {
+                        let refb1 = nx_ref0[1];
+                        2 + ((nx_intrabc[1] == 0) && refdir(refb1) != 0) as usize
+                    } else {
+                        4
+                    }
+                }
+                1 => {
+                    let ref2 = nx_ref1[0];
+                    if ref2 == -1 {
+                        let ref1 = nx_ref0[0];
+                        ((nx_intrabc[0] == 0) && refdir(ref1) != 0) as usize
+                    } else {
+                        3
+                    }
+                }
+                _ => 1,
+            };
             msac.decode_bool_adapt(cdf_m.comp(ctx)) != 0
         } else {
             false
