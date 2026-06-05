@@ -228,7 +228,7 @@ pub fn reset_context(ctx: &mut BlockContext, keyframe: bool, is_tip_frame: bool)
 
 pub fn decode_frame_init(
     frame_hdr: &FrameHeader,
-    _seq_hdr: &crate::headers::SequenceHeader,
+    seq_hdr: &crate::headers::SequenceHeader,
     lf: &mut LoopFilterState,
     frame_thread: &mut crate::internal::FrameThread,
     ts: &mut Vec<crate::internal::TileState>,
@@ -280,6 +280,26 @@ pub fn decode_frame_init(
 
     init_wiener(frame_hdr, lf);
     lf.restore_planes = compute_restore_planes(frame_hdr);
+
+    // Chroma segmentation map for the deblock UV thresholds (decode.c:5634).
+    // Allocated only when segmentation is on and chroma deblock is enabled.
+    if frame_hdr.segmentation.enabled != 0
+        && seq_hdr.layout != crate::headers::PixelLayout::I400
+        && (frame_hdr.deblock.level_u != 0 || frame_hdr.deblock.level_v != 0)
+    {
+        let ss_hor = (seq_hdr.layout != crate::headers::PixelLayout::I444) as i32;
+        let ss_ver = (seq_hdr.layout == crate::headers::PixelLayout::I420) as i32;
+        let stride = (sb256w * (64 >> ss_hor)) as isize;
+        let size = stride as usize * sb256h as usize * (64 >> ss_ver) as usize;
+        lf.uv_segmap_stride = stride;
+        if lf.segmap_uv.len() != size {
+            lf.segmap_uv.resize(size, 0);
+        }
+        lf.segmap_uv.fill(0);
+    } else {
+        lf.uv_segmap_stride = 0;
+        lf.segmap_uv.clear();
+    }
 
     if frame_hdr.gdf.enabled != AdaptiveBoolean::Off {
         lf.gdf_ref_dst_idx = compute_gdf_ref_dst_idx(frame_hdr, absrefdist);
@@ -2057,6 +2077,11 @@ pub struct ReconCtx<'a, 'f> {
     pub prev_segmap: Option<&'a [u8]>,
     /// `f->b4_stride` — row stride of the segment maps (in 4x4 units).
     pub b4_stride: isize,
+    /// Chroma segment-id map (`f->lf.segmap_uv`), written per chroma block when
+    /// segmentation + chroma deblock are on; consumed by the deblock UV pass.
+    pub segmap_uv: &'a mut [u8],
+    /// `f->lf.uv_segmap_stride`; 0 when `segmap_uv` is unused.
+    pub segmap_uv_stride: isize,
     /// Running per-superblock quantizer index (`ts->last_qidx`). Updated by the
     /// per-SB delta-q parse; seeded from `frame_hdr.quant.yac` at tile start.
     pub last_qidx: i32,
@@ -2132,6 +2157,8 @@ pub fn decode_tile_sbrow_entropy(
     recon_frame: &ReconFrameCtx,
     cur_segmap: &mut [u8],
     prev_segmap: Option<&[u8]>,
+    segmap_uv: &mut [u8],
+    segmap_uv_stride: isize,
     cur_ccsomap: &mut [u8],
     prev_ccsomap: [Option<&[u8]>; 3],
     part_w: &mut Vec<u8>,
@@ -2333,6 +2360,8 @@ pub fn decode_tile_sbrow_entropy(
             cur_segmap: &mut *cur_segmap,
             prev_segmap,
             b4_stride: fi.b4_stride,
+            segmap_uv: &mut *segmap_uv,
+            segmap_uv_stride,
             last_qidx: sb_last_qidx,
             dqmem: sb_dqmem,
             dq_active: dq_active_init,
@@ -2560,6 +2589,8 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
 
     // bitdepth in bits from bitdepth_max (255 -> 8, 1023 -> 10, 4095 -> 12).
     let bitdepth_v: u32 = (crate::intops::ulog2((bitdepth_max_v + 1) as u32)) as u32;
+    // `f->seq_hdr->hbd` (0 for 8bpc, 1 for 10/12bpc); used by deblock thresholds.
+    let hbd_v: i32 = (bitdepth_v > 8) as i32;
     // Inter-intra / wedge / segmentation prediction masks (`dav2d_masks`), built
     // once per frame for the compound + interintra recon paths.
     let masks = crate::wedge::init_masks();
@@ -2816,6 +2847,8 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     &recon_frame,
                     &mut cur_segmap[..],
                     prev_segmap_ref,
+                    &mut lf.segmap_uv,
+                    lf.uv_segmap_stride,
                     &mut cur_ccsomap[..],
                     prev_ccsomap_ref,
                     &mut part_ws[tc],
@@ -2856,6 +2889,9 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                 &mut *dst_u,
                 &mut *dst_v,
                 &filter_params,
+                cur_segmap,
+                b4_stride_v,
+                hbd_v,
                 fc_inloop_filters,
                 fc_sbh,
                 sb_step,
@@ -2961,6 +2997,9 @@ fn filter_sbrow(
     dst_u: &mut [u8],
     dst_v: &mut [u8],
     fp: &FilterFrameParams,
+    cur_segmap: &[u8],
+    b4_stride: isize,
+    hbd: i32,
     inloop: u32,
     sbh: i32,
     sb_step: i32,
@@ -2981,43 +3020,56 @@ fn filter_sbrow(
     // mask row for this sbrow: dav2d uses (sby >> (2 - sb128)) * sb256w.
     let mask_row = ((sby >> (2 - sb128)) * sb256w) as usize;
 
-    // (1) deblock cols. The deblock primitives consume a flattened per-4px mask
-    // layout (`[[[u16;4];5]]`) that does not yet have an `Av2Filter` adapter and
-    // hardcode their thresholds, so they are only correct for the level==0 no-op
-    // path (the M2 clip). Wiring the real mask/threshold plumbing is deferred to
-    // the deblock-conformance follow-up; here the call is gated on a non-zero
-    // level and given empty mask/segmap when (rarely) reached during bring-up.
-    let empty_masks: &[[[u16; 4]; 5]] = &[];
-    let empty_segmap: &[u8] = &[];
-    let _ = mask_row;
+    // The sbrow's first-pixel offsets into the whole-plane slices (dav2d offsets
+    // `f->lf.p[i]` per sby; rav2d primitives take the whole plane + offset).
+    let y_off0 = (sby * sb_step * 4) as isize * fp.y_stride;
+    let uv_off0 = ((sby * sb_step * 4) as isize * fp.uv_stride) >> fp.ss_ver as i32;
+
+    // (1) + (2): deblock cols then rows (Av2Filter-driven, db_apply_tmpl.c).
     if deblock_on {
         let start_of_tile_row =
             (lf.start_of_tile_row.get(sby as usize).copied().unwrap_or(0) & 1) != 0;
-        crate::deblock::deblock_sbrow_cols_8bpc(
+        // Bottom-of-frame tx-edge crop must run before the rows pass; it mutates
+        // the mask, so it is driven here while we hold `&mut lf.mask`.
+        crate::deblock::deblock_crop_bottom_edge(
+            &mut lf.mask, mask_row, sb256w, bw, bh, sb128, sby,
+        );
+        let mut dctx = crate::deblock::DeblockCtx {
+            frame_hdr,
+            mask: &lf.mask,
+            mask_row,
+            sb256w,
+            cur_segmap,
+            b4_stride,
+            segmap_uv: &lf.segmap_uv,
+            uv_segmap_stride: lf.uv_segmap_stride,
+            hbd,
+            ss_hor: fp.ss_hor as i32,
+            ss_ver: fp.ss_ver as i32,
+            bw,
+            bh,
+            sb128,
+            y_stride: fp.y_stride,
+            uv_stride: fp.uv_stride,
+            layout: seq_hdr.layout,
+        };
+        crate::deblock::deblock_sbrow_cols(
+            &mut dctx,
             dst_y,
+            y_off0 as usize,
             dst_u,
             dst_v,
-            &fp.deblock,
-            empty_masks,
-            empty_segmap,
-            &fp.thr_lut_y,
-            &fp.thr_lut_uv,
+            uv_off0 as usize,
             sby,
             start_of_tile_row,
         );
-    }
-
-    // (2) deblock rows, then copy_db (store post-deblock / pre-CDEF lines).
-    if deblock_on {
-        crate::deblock::deblock_sbrow_rows_8bpc(
+        crate::deblock::deblock_sbrow_rows(
+            &mut dctx,
             dst_y,
+            y_off0 as usize,
             dst_u,
             dst_v,
-            &fp.deblock,
-            empty_masks,
-            empty_segmap,
-            &fp.thr_lut_y,
-            &fp.thr_lut_uv,
+            uv_off0 as usize,
             sby,
         );
     }
@@ -4384,6 +4436,21 @@ fn decode_b(
         } else if new_qidx != prev_qidx {
             init_quant_tables_fi(fi, new_qidx, &mut recon.dqmem);
             recon.dq_active = recon.dqmem;
+        }
+
+        // Splat the SB's quant index into the loop-filter mask (decode.c:1953-
+        // 1959) so deblock can recompute its per-64px thresholds per block.
+        let bx4 = (bx & 63) as usize;
+        let by4 = (by & 63) as usize;
+        let qbase = (bx4 >> 4) + ((by4 & 0x30) >> 2);
+        let sbsz64 = 1usize << fi.sb128;
+        let m = &mut recon.lf_mask[recon.lf_idx];
+        let mut qoff = qbase;
+        for _ in 0..sbsz64 {
+            for x64 in 0..sbsz64 {
+                m.qidx[qoff + x64] = new_qidx as u16;
+            }
+            qoff += 4;
         }
     }
 
@@ -6374,6 +6441,150 @@ fn decode_b(
         for _ in 0..bh4u {
             recon.cur_segmap[off..off + bw4u].fill(seg_id);
             off = (off as isize + stride) as usize;
+        }
+    }
+
+    // ---- Loop-filter mask construction (decode.c:3329-3420) ----------------
+    // Builds the per-4px deblock edge masks (filter_y/filter_uv), the lossless
+    // and chroma-seg maps, and the LR no-skip mask. These feed the deferred
+    // deblock/LR filter pass. Chroma masks only when chroma deblock is enabled.
+    {
+        let deblock = recon.frm_hdr.deblock;
+        let level_y_on = deblock.level_y[0] != 0 || deblock.level_y[1] != 0;
+        let level_uv_on = deblock.level_u != 0 || deblock.level_v != 0;
+        let layout = recon.seq_hdr.layout;
+        let ss_ver = fi.ss_ver;
+        let ss_hor = fi.ss_hor;
+        let cbx4 = (cbx & 63) as usize;
+        let cby4 = (cby & 63) as usize;
+        let cb_dim = if has_chroma {
+            &BLOCK_DIMENSIONS[cbs as u8 as usize]
+        } else {
+            b_dim
+        };
+        let cbw4 = (imin(cb_dim[0] as i32, fi.bw - cbx) >> ss_hor) as usize;
+        let cbh4 = (imin(cb_dim[1] as i32, fi.bh - cby) >> ss_ver) as usize;
+
+        // segmap_uv: per-4px chroma seg id used by chroma deblock thresholds.
+        if fi.seg_enabled && has_chroma && level_uv_on && recon.segmap_uv_stride != 0 {
+            let seg_id = b.seg_id;
+            let seg_stride = recon.segmap_uv_stride;
+            let mut off = (((cby >> ss_ver) as isize) * seg_stride
+                + ((cbx >> ss_hor) as isize)) as usize;
+            for _ in 0..cbh4 {
+                recon.segmap_uv[off..off + cbw4].fill(seg_id);
+                off = (off as isize + seg_stride) as usize;
+            }
+        }
+
+        // lossless_mask: blocks coded losslessly skip the deblock delta entirely.
+        if fi.seg_enabled && fi.seg_lossless[b.seg_id as usize] != 0 {
+            let m = &mut recon.lf_mask[recon.lf_idx];
+            if has_luma {
+                let bw4u = 1usize << b_dim[2];
+                let mask: u64 = (!0u64 >> (64 - bw4u)) << bx4;
+                let parts = [
+                    (mask & 0xffff) as u16,
+                    ((mask >> 16) & 0xffff) as u16,
+                    ((mask >> 32) & 0xffff) as u16,
+                    ((mask >> 48) & 0xffff) as u16,
+                ];
+                let bh4u = bh4 as usize;
+                for y in 0..bh4u {
+                    let row = &mut m.lossless_mask_y[by4 + y];
+                    for k in 0..4 {
+                        if parts[k] != 0 {
+                            row[k] |= parts[k];
+                        }
+                    }
+                }
+            }
+            if has_chroma {
+                let cbw4u = 1usize << cb_dim[2];
+                let mask: u64 = (!0u64 >> (64 - cbw4u)) << cbx4;
+                let ss_mask: u64 = if ss_hor != 0 { 0xff } else { 0xffff };
+                let sh = 16 >> ss_hor;
+                let parts = [
+                    (mask & ss_mask) as u16,
+                    ((mask >> sh) & ss_mask) as u16,
+                    ((mask >> (sh * 2)) & ss_mask) as u16,
+                    ((mask >> (sh * 3)) & ss_mask) as u16,
+                ];
+                let cbh4u = 1usize << cb_dim[3];
+                for y in 0..cbh4u {
+                    let row = &mut m.lossless_mask_uv[cby4 + y];
+                    for k in 0..4 {
+                        if parts[k] != 0 {
+                            row[k] |= parts[k];
+                        }
+                    }
+                }
+            }
+        }
+
+        // create_db_mask: the per-edge filter strength masks (filter_y/uv).
+        if level_y_on {
+            if has_luma {
+                let m = &mut recon.lf_mask[recon.lf_idx];
+                crate::lf_mask::create_db_mask(
+                    &mut m.filter_y,
+                    &b,
+                    bs,
+                    bx,
+                    by,
+                    fi.bw,
+                    fi.bh,
+                    layout,
+                    false,
+                    &mut a.tx_lpf_y[bx4..],
+                    &mut l.tx_lpf_y[by4..],
+                    recon.frm_hdr,
+                    recon.seq_hdr,
+                );
+            }
+            if has_chroma && level_uv_on {
+                let m = &mut recon.lf_mask[recon.lf_idx];
+                crate::lf_mask::create_db_mask(
+                    &mut m.filter_uv,
+                    &b,
+                    cbs,
+                    cbx,
+                    cby,
+                    fi.bw,
+                    fi.bh,
+                    layout,
+                    true,
+                    &mut a.tx_lpf_uv[cbx4..],
+                    &mut l.tx_lpf_uv[cby4..],
+                    recon.frm_hdr,
+                    recon.seq_hdr,
+                );
+            }
+        }
+
+        // noskip_mask (decode.c:3407-3420): records 4x4 units that coded a
+        // residual; consumed by the multi-class Wiener / GDF LR stages.
+        if has_luma && b.skip_txfm == 0 {
+            let m = &mut recon.lf_mask[recon.lf_idx];
+            let bw4u = b_dim[0] as i32;
+            let bh4u = b_dim[1] as i32;
+            let mask: u32 = (!0u32 >> imax(0, 32 - bw4u)) << (bx4 & 15);
+            let bx_idx = ((bx4 & 0x30) >> 4) as usize;
+            let mut nmi = by4 >> 1;
+            let mut y = 0;
+            while y < bh4u {
+                let nm = &mut m.noskip_mask[nmi];
+                nm[bx_idx] |= mask as u16;
+                if bw4u >= 32 {
+                    nm[bx_idx + 1] = mask as u16;
+                    if bw4u == 64 {
+                        nm[2] = mask as u16;
+                        nm[3] = mask as u16;
+                    }
+                }
+                nmi += 1;
+                y += 2;
+            }
         }
     }
 
@@ -12811,6 +13022,7 @@ mod tests {
             let mut __scratch = ReconScratch::default();
             let mut __edge = vec![0u8; 2048];
             let mut __segmap = vec![0u8; 64 * 64];
+            let mut __segmap_uv = vec![0u8; 0];
             let mut __lf_mask: Vec<crate::lf_mask::Av2Filter> = vec![Default::default(); 4];
             let mut __ccsomap = vec![0u8; 0];
             let __rmf = crate::refmvs::Frame::default();
@@ -12860,6 +13072,8 @@ mod tests {
                 cur_segmap: &mut __segmap,
                 prev_segmap: None,
                 b4_stride: 64,
+                segmap_uv: &mut __segmap_uv,
+                segmap_uv_stride: 0,
                 last_qidx: 0,
                 dqmem: [[[0; 2]; 3]; crate::headers::MAX_SEGMENTS],
                 dq_active: [[[0; 2]; 3]; crate::headers::MAX_SEGMENTS],
