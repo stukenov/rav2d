@@ -975,7 +975,6 @@ pub fn cdef_brow_8bpc(
                     prev_flag |= do_right;
                 }
                 // lossless masks for the add (zero for non-segmented-lossless).
-                static ZERO_LL: [[u16; 4]; 64] = [[0u16; 4]; 64];
                 let by_idx_ll = (2 * by_idx) as usize;
                 for pl in 0..3 {
                     if ccm[pl] == 0 {
@@ -992,22 +991,28 @@ pub fn cdef_brow_8bpc(
                     } else {
                         (v, sb_uv, uv_ls)
                     };
-                    // ll_mask slice: for non-lossless frames it is all-zero. The
-                    // ccso_add indexes [yy>>2][0], so build a 2-row window matching
-                    // dav2d's y/uv ll_mask pointer.
-                    let ll: &[[u16; 4]] = if p.any_lossless {
+                    // ll_mask: dav2d points y/uv_ll_mask at lossless_mask[row][
+                    // sb64x_idx] and the kernel reads [yy>>2][0]. Build a per-row
+                    // view whose column 0 is the sb64x_idx column (all-zero unless
+                    // segmented-lossless). 2 rows (8px) cover one CCSO band.
+                    let mut ll_buf = [[0u16; 4]; 2];
+                    if p.any_lossless {
                         let src = if pl == 0 {
                             p.mask_ll_y.get(sb256x)
                         } else {
                             p.mask_ll_uv.get(sb256x)
                         };
-                        match src {
-                            Some(m) => &m[(by_idx_ll >> pl_ss_ver)..],
-                            None => &ZERO_LL,
+                        if let Some(m) = src {
+                            let base = by_idx_ll >> pl_ss_ver;
+                            for (r, slot) in ll_buf.iter_mut().enumerate() {
+                                let row = base + r;
+                                if row < 64 {
+                                    slot[0] = m[row][sb64x_idx];
+                                }
+                            }
                         }
-                    } else {
-                        &ZERO_LL
-                    };
+                    }
+                    let ll: &[[u16; 4]] = &ll_buf;
                     ccso_add_8bpc(
                         &mut dst[dst_off..],
                         dst_ls,
