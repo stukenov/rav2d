@@ -1264,7 +1264,6 @@ fn bit_exact_first_inter_frame() {
 /// a correct decoder that is its true counterpart, diff 0) before the bit-exact
 /// assertion. A residual diff is a real reconstruction bug, not a reorder.
 #[test]
-#[ignore = "WIP: full-clip entropy + compound warp-affine MC bit-exact; residual pixel diffs remain in TIP / OPFL-refine / compound-AVG translation recon"]
 fn bit_exact_full_clip_bus64() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
     if !path.exists() {

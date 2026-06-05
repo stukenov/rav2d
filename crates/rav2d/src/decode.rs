@@ -9794,7 +9794,6 @@ fn recon_b_inter_compound(
     }
 
     // ---- luma ----
-    let mut luma_bacp = 0i32; // shared with chroma AVG path (bacpu)
     let mut seg_mask = vec![0u8; 128 * 128];
     let mut seg_mask_stride = 0usize;
     if has_luma {
@@ -9930,7 +9929,6 @@ fn recon_b_inter_compound(
                             fi.bh * 4,
                         ) as i32;
                     }
-                    luma_bacp = bacp;
                     if bacp != 0 {
                         crate::mc::mask_8bpc(
                             &mut recon.dst_y[dst_off..],
@@ -10029,7 +10027,69 @@ fn recon_b_inter_compound(
         let o_step = 4 >> opfl_mode as i32;
         let r_pair = b.ref_pair;
         let mut chroma_bacp = false;
-        for pl in 1..3usize {
+
+        // Sub-8x8 chroma coding (recon_tmpl.c:3650): when the chroma block spans
+        // several luma sub-blocks (cbs != lbs, smallest luma dim < 16), chroma MC
+        // is performed per luma 4x4 using each sub-block's own ref/MV/filter read
+        // from the spatial refmvs grid (single-ref MC, not compound). This branch
+        // takes priority over the compound chroma MC, so the per-plane compound
+        // prediction loop is skipped when it applies.
+        let (luma_bw4, luma_bh4) = {
+            let ld = &BLOCK_DIMENSIONS[lbs as u8 as usize];
+            (ld[0] as i32, ld[1] as i32)
+        };
+        let sub8x8 = lbs != BlockSize::Invalid
+            && cbs != lbs
+            && imin(luma_bw4, luma_bh4) < 16;
+        if sub8x8 {
+            let base = ((cby & 63) as usize) * 128 + ((cbx & 127) as usize);
+            for y in 0..ch4 {
+                for x in 0..cw4 {
+                    let idx = base + (y as usize) * 128 + (x as usize);
+                    let r2 = &recon.rt.r[idx];
+                    if r2.ox4 != 0 || r2.oy4 != 0 {
+                        continue;
+                    }
+                    let s_ref0 = unsafe { r2.r#ref.r[0] };
+                    if s_ref0 < 0 || s_ref0 as usize >= 7 {
+                        continue;
+                    }
+                    let s_mv = if r2.mf & 2 != 0 {
+                        unsafe { r2.lmv[0].c }
+                    } else {
+                        unsafe { r2.mv[0].c }
+                    };
+                    let s_filter = r2.subpel_filter;
+                    let sdim = &BLOCK_DIMENSIONS[r2.bs as usize];
+                    let s_bw4 = sdim[0] as i32;
+                    let s_bh4 = sdim[1] as i32;
+                    let s_refp = match recon.refp[s_ref0 as usize].clone() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let s_cbx = cbx + x;
+                    let s_cby = cby + y;
+                    let base_off =
+                        4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
+                    let dst_off = base_off
+                        + (((y * 4) >> ss_ver) as usize) * uv_stride
+                        + (((x * 4) >> ss_hor) as usize);
+                    for pl in 1..3usize {
+                        let dst: &mut [u8] = if pl == 1 {
+                            &mut recon.dst_u[dst_off..]
+                        } else {
+                            &mut recon.dst_v[dst_off..]
+                        };
+                        inter_mc_plane_8bpc(
+                            dst, uv_stride, &s_refp, pl, s_cbx, s_cby, s_bw4, s_bh4, s_mv.x,
+                            s_mv.y, s_filter, ss_hor, ss_ver, fi.bw, fi.bh,
+                        );
+                    }
+                }
+            }
+        }
+
+        for pl in (1..3usize).filter(|_| !sub8x8) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let mut tmp = [vec![0i16; cw * ch], vec![0i16; cw * ch]];
             let mut opfl_bacp_chroma = false;
@@ -10122,16 +10182,49 @@ fn recon_b_inter_compound(
                 }
                 _ => {
                     if cwp_idx == 8 {
-                        // For OPFL the per-plane BACP comes from `rmv_uvpred`
-                        // (carried U->V via `bacpu`); otherwise it follows the
-                        // luma plane's bacp.
-                        let use_mask = if is_opfl { chroma_bacp } else { luma_bacp != 0 };
-                        if use_mask {
-                            crate::mc::mask_8bpc(
-                                dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask,
-                            );
+                        // BACP (implicit masked blend) for chroma. For OPFL the
+                        // per-plane mask is derived by `rmv_uvpred`. For plain
+                        // compound AVG the chroma mask is recomputed from the
+                        // block MVs with chroma-subsampled parameters on the U
+                        // plane and reused for V (recon_tmpl.c:3804-3823); it is
+                        // NOT inherited from the luma plane.
+                        if is_opfl {
+                            if chroma_bacp {
+                                crate::mc::mask_8bpc(
+                                    dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask,
+                                );
+                            } else {
+                                crate::mc::avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
+                            }
                         } else {
-                            crate::mc::avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
+                            if pl == 1 {
+                                chroma_bacp = if imp_base {
+                                    crate::recon::get_mask(
+                                        &mut seg_mask,
+                                        (cbw4 * 4 >> ss_hor) as usize,
+                                        cbx >> ss_hor,
+                                        0,
+                                        cby >> ss_ver,
+                                        0,
+                                        &mv_pair,
+                                        3 + ss_hor,
+                                        3 + ss_ver,
+                                        cbw4 >> ss_hor,
+                                        cbh4 >> ss_ver,
+                                        fi.bw * 4 >> ss_hor,
+                                        fi.bh * 4 >> ss_ver,
+                                    )
+                                } else {
+                                    false
+                                };
+                            }
+                            if chroma_bacp {
+                                crate::mc::mask_8bpc(
+                                    dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask,
+                                );
+                            } else {
+                                crate::mc::avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
+                            }
                         }
                     } else {
                         crate::mc::w_avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, cwp_idx);

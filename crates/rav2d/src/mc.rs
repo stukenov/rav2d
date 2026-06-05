@@ -18,10 +18,18 @@ pub fn put_8bpc(
     }
 }
 
-pub fn prep_8bpc(tmp: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize) {
+pub fn prep_8bpc(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
     for y in 0..h {
         for x in 0..w {
-            tmp[y * w + x] = ((src[y * src_stride + x] as i32) << INTERMEDIATE_BITS_8BPC) as i16;
+            tmp[y * tmp_stride + x] =
+                ((src[y * src_stride + x] as i32) << INTERMEDIATE_BITS_8BPC) as i16;
         }
     }
 }
@@ -381,7 +389,7 @@ pub fn prep_8tap_8bpc(
             }
         }
         (None, None) => {
-            prep_8bpc(tmp, &src[src_off..], src_stride, w, h);
+            prep_8bpc(tmp, tmp_stride, &src[src_off..], src_stride, w, h);
         }
     }
 }
@@ -567,7 +575,7 @@ pub fn prep_bilin_8bpc(
             }
         }
     } else {
-        prep_8bpc(tmp, src, src_stride, w, h);
+        prep_8bpc(tmp, tmp_stride, src, src_stride, w, h);
     }
 }
 
@@ -1182,7 +1190,7 @@ mod tests {
     fn test_prep_shift() {
         let src = vec![128u8; 16];
         let mut tmp = vec![0i16; 16];
-        prep_8bpc(&mut tmp, &src, 4, 4, 4);
+        prep_8bpc(&mut tmp, 4, &src, 4, 4, 4);
         for &v in &tmp {
             assert_eq!(v, (128 << INTERMEDIATE_BITS_8BPC) as i16);
         }
