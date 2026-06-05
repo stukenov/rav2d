@@ -1147,9 +1147,11 @@ pub fn add_derived(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn add_temporal_candidate(
     rf: &Frame,
     rp_proj: &[SnglMvBlock],
+    rp_base: isize,
     rp_traj: &[Vec<Mv>; 7],
     st: &mut MvSearchState,
     mvstack: &mut [Candidate; 6],
@@ -1163,9 +1165,14 @@ pub fn add_temporal_candidate(
         return false;
     }
 
-    let off = off_8x8 as usize;
-    let mv = if seq_mv_traj && unsafe { rp_traj[ref0 as usize][off].c.y } != INVALID_MV {
-        rp_traj[ref0 as usize][off]
+    // `rp_proj` is the full frame buffer; the per-sbrow base (`rp_base` == dav2d's
+    // `off3`) is added so negative-row (top SB-boundary) accesses stay in bounds,
+    // matching dav2d's pointer-into-buffer (`rt->rp_proj = &rf->rp_proj[off3]`).
+    // `rp_traj` already carries its own per-sbrow base (`off2`, == 0 single-thread).
+    let off = (rp_base + off_8x8) as usize;
+    let traj_off = off_8x8 as usize;
+    let mv = if seq_mv_traj && unsafe { rp_traj[ref0 as usize][traj_off].c.y } != INVALID_MV {
+        rp_traj[ref0 as usize][traj_off]
     } else {
         let proj_mv = rp_proj[off].mv;
         if unsafe { proj_mv.c.y } == INVALID_MV {
@@ -1185,8 +1192,8 @@ pub fn add_temporal_candidate(
         return add_candidate_sngl(mvstack, cnt, 6, weight, mv, 0, 0, &mut st.iter_cntr, 16);
     }
 
-    let mv2 = if seq_mv_traj && unsafe { rp_traj[ref1 as usize][off].c.y } != INVALID_MV {
-        rp_traj[ref1 as usize][off]
+    let mv2 = if seq_mv_traj && unsafe { rp_traj[ref1 as usize][traj_off].c.y } != INVALID_MV {
+        rp_traj[ref1 as usize][traj_off]
     } else {
         let proj_mv = rp_proj[off].mv;
         if unsafe { proj_mv.c.y } == INVALID_MV {
@@ -1205,11 +1212,13 @@ pub fn add_temporal_candidate(
     add_candidate_comp(mvstack, cnt, 6, 1, 8, &cand_mv, &mut st.iter_cntr, 16)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn add_spatial_candidate(
     y_off: i32,
     x_off: i32,
     rf: &Frame,
     rp_proj: &[SnglMvBlock],
+    rp_base: isize,
     rp_traj: &[Vec<Mv>; 7],
     st: &mut MvSearchState,
     mvstack: &mut [Candidate; 6],
@@ -1244,7 +1253,10 @@ pub fn add_spatial_candidate(
         off_y_8x8 &= tip16m;
         off_x_8x8 &= tip16m;
     }
-    let off_8x8 = (rf.rp_stride * off_y_8x8 + off_x_8x8) as usize;
+    // Add the per-sbrow base (`rp_base`, == dav2d's `off3`) so negative-row
+    // (top SB-boundary) projected-MV accesses land in valid buffer memory,
+    // matching dav2d's `rt->rp_proj = &rf->rp_proj[off3]` pointer semantics.
+    let off_8x8 = (rp_base + rf.rp_stride * off_y_8x8 + off_x_8x8) as usize;
     let (ref0, ref1) = unsafe { (r#ref.r[0], r#ref.r[1]) };
 
     if ref1 == -1 {
@@ -1592,10 +1604,12 @@ pub fn add_spatial_candidate(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn refmvs_find(
     rt: &Tile,
     rf: &Frame,
     rp_proj: &[SnglMvBlock],
+    rp_base: isize,
     rp_traj: &[Vec<Mv>; 7],
     mvstack: &mut [Candidate; 6],
     mut warp: Option<&mut [[i32; 7]]>,
@@ -1908,6 +1922,7 @@ pub fn refmvs_find(
             -1,
             rf,
             rp_proj,
+            rp_base,
             rp_traj,
             &mut st,
             mvstack,
@@ -1937,6 +1952,7 @@ pub fn refmvs_find(
             xpos,
             rf,
             rp_proj,
+            rp_base,
             rp_traj,
             &mut st,
             mvstack,
@@ -1961,8 +1977,8 @@ pub fn refmvs_find(
     if let Some(tml_b) = tml {
         add_matrix!(tml_b);
         add_spatial_candidate(
-            0, -1, rf, rp_proj, rp_traj, &mut st, mvstack, cnt, 1, tml_b, tms_8x8y, left_8x8x,
-            r#ref, &gmv, seq_hdr, frm_hdr,
+            0, -1, rf, rp_proj, rp_base, rp_traj, &mut st, mvstack, cnt, 1, tml_b, tms_8x8y,
+            left_8x8x, r#ref, &gmv, seq_hdr, frm_hdr,
         );
     }
 
@@ -1975,6 +1991,7 @@ pub fn refmvs_find(
             xpos,
             rf,
             rp_proj,
+            rp_base,
             rp_traj,
             &mut st,
             mvstack,
@@ -1999,6 +2016,7 @@ pub fn refmvs_find(
             -1,
             rf,
             rp_proj,
+            rp_base,
             rp_traj,
             &mut st,
             mvstack,
@@ -2023,6 +2041,7 @@ pub fn refmvs_find(
             xpos,
             rf,
             rp_proj,
+            rp_base,
             rp_traj,
             &mut st,
             mvstack,
@@ -2051,6 +2070,7 @@ pub fn refmvs_find(
             && add_temporal_candidate(
                 rf,
                 rp_proj,
+                rp_base,
                 rp_traj,
                 &mut st,
                 mvstack,
@@ -2064,6 +2084,7 @@ pub fn refmvs_find(
             add_temporal_candidate(
                 rf,
                 rp_proj,
+                rp_base,
                 rp_traj,
                 &mut st,
                 mvstack,
@@ -2085,6 +2106,7 @@ pub fn refmvs_find(
             xpos,
             rf,
             rp_proj,
+            rp_base,
             rp_traj,
             &mut st,
             mvstack,
@@ -2119,6 +2141,7 @@ pub fn refmvs_find(
                         -adj,
                         rf,
                         rp_proj,
+                        rp_base,
                         rp_traj,
                         &mut st,
                         mvstack,
@@ -2147,6 +2170,7 @@ pub fn refmvs_find(
                         -adj,
                         rf,
                         rp_proj,
+                        rp_base,
                         rp_traj,
                         &mut st,
                         mvstack,

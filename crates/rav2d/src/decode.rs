@@ -2140,6 +2140,13 @@ pub struct ReconCtx<'a, 'f> {
     /// Per-block derived warp motion parameters (`t->warpmv[0..2]`), computed in
     /// the inter MV-resolution step and consumed by `recon_b_inter`'s warp MC.
     pub warpmv: [crate::headers::WarpedMotionParams; 2],
+    /// Above-superblock-row edge context snapshot (`t->a_sb_cache`). Taken at the
+    /// start of each superblock from the above-row block context, before the
+    /// current SB's blocks overwrite it. Inter warp/single-ref/has_cs_ext context
+    /// derivations consult this (at 8x8 resolution) for blocks at the SB top edge,
+    /// because the 8x8 rounding can otherwise read `a` entries already clobbered
+    /// by a left neighbour in the same SB (decode.c:4630-4641, AVM #1091).
+    pub a_sb_cache: crate::env::SBEdgeCtx,
 }
 
 /// Decode one superblock row of a tile (entropy/parse pass).
@@ -2391,7 +2398,26 @@ pub fn decode_tile_sbrow_entropy(
             seq_hdr,
             frm_hdr,
             warpmv: [crate::headers::WarpedMotionParams::default(); 2],
+            a_sb_cache: crate::env::SBEdgeCtx::default(),
         };
+
+        // Snapshot the above-row block context into `a_sb_cache` before the
+        // superblock's blocks overwrite it (decode.c:4630-4641). Inter warp /
+        // single-ref / has_cs_ext context derivations read this at the SB top
+        // edge at 8x8 resolution. `ref` is always copied; `motion_mode` only
+        // when there is a superblock above (otherwise the SB-top path is gated
+        // off by `have_top`).
+        if fi.is_inter_or_switch {
+            let a_src = &a_arr[a_idx];
+            recon.a_sb_cache.r#ref[0].copy_from_slice(&a_src.r#ref[0]);
+            recon.a_sb_cache.r#ref[1].copy_from_slice(&a_src.r#ref[1]);
+            if by > row_start {
+                recon
+                    .a_sb_cache
+                    .motion_mode
+                    .copy_from_slice(&a_src.motion_mode);
+            }
+        }
 
         decode_sb(
             fi,
@@ -2422,33 +2448,34 @@ pub fn decode_tile_sbrow_entropy(
         sb_dqmem = recon.dqmem;
         sb_seg_err |= recon.seg_id_err;
 
-        bx += sb_step;
-    }
+        // Save THIS superblock's bottom row into the above-row `ra` buffer (and
+        // its top-left backup `ra_tl`) for the next SB row's neighbour access.
+        // dav2d does this per-superblock (decode.c:4654) with the SB's own column
+        // range so that `ra_tl` captures the correct per-SB top-left value; a
+        // once-per-row save would leave `ra_tl` reflecting only the row's far
+        // right edge and corrupt the SB-boundary top-left MV candidate.
+        if refmvs_active {
+            let crate::refmvs::Tile {
+                r,
+                ra,
+                ra_tl,
+                ra_off,
+                ..
+            } = &mut *recon.rt;
+            crate::refmvs::save_tmvs(
+                r,
+                &mut ra[*ra_off..],
+                ra_tl,
+                bx >> 1,
+                (bx + sb_step) >> 1,
+                row_start >> 1,
+                (by + sb_step) >> 1,
+                rf.ih8,
+                rf.iw8,
+            );
+        }
 
-    // Save the bottom row of this SB row into the above-row `ra` buffer for the
-    // next SB row's neighbour access (decode.c:4511 `dav2d_refmvs_save_tmvs`,
-    // single-thread `ra` portion).
-    if refmvs_active {
-        let crate::refmvs::Tile {
-            r,
-            ra,
-            ra_tl,
-            ra_off,
-            ..
-        } = &mut *rt;
-        let col_start8 = col_start >> 1;
-        let col_end8 = (col_end + 1) >> 1;
-        crate::refmvs::save_tmvs(
-            r,
-            &mut ra[*ra_off..],
-            ra_tl,
-            col_start8,
-            col_end8,
-            row_start >> 1,
-            (by + sb_step) >> 1,
-            rf.ih8,
-            rf.iw8,
-        );
+        bx += sb_step;
     }
 
     // Write back the running per-tile delta-q state.
@@ -6143,11 +6170,10 @@ fn decode_b(
                 let mut allow_warp = false;
                 if imin(bw4, bh4) >= 2 && fi.warp_motion {
                     // get_warp_ctx (decode.c:2984): neighbour warp-motion ctx.
-                    // a_sb_cache (above-SB-row cache) is only consulted for blocks
-                    // at the top SB boundary; rav2d's `a` carries above-row ctx for
-                    // non-boundary blocks (the bring-up clip is a single 64x64 SB,
-                    // so warp blocks never hit the boundary path). Default cache.
-                    let a_sb_cache = crate::env::SBEdgeCtx::default();
+                    // At the top SB boundary the above neighbour is read from the
+                    // SB-edge cache snapshot (taken before this SB's blocks ran)
+                    // at 8x8 resolution; elsewhere from the live `a` context.
+                    let a_sb_cache = &recon.a_sb_cache;
                     let is_sb_boundary = (by & (fi.sb_step - 1)) == 0;
                     let warp_thr = if is_sb_boundary {
                         ((bx + bw4 - 2) & !1) < fi.tile_col_end
@@ -6156,7 +6182,7 @@ fn decode_b(
                     };
                     let warp_ctx = crate::env::get_warp_ctx(
                         a,
-                        &a_sb_cache,
+                        a_sb_cache,
                         l,
                         by4,
                         bx4,
@@ -6868,6 +6894,7 @@ fn decode_b(
                 recon.rt,
                 recon.rf,
                 &[],
+                0,
                 &Default::default(),
                 &mut mvstack,
                 None,
@@ -7040,15 +7067,12 @@ fn decode_b(
                 let want_warp = inter_mode > InterPredMode::NewMv as u8;
                 let mut warp_arr = [[0i32; 7]; 6];
                 let rp_proj_off = recon.rt.rp_proj_off;
-                let rp_proj_slice: &[crate::refmvs::SnglMvBlock] = if recon.rf.rp_proj.is_empty() {
-                    &[]
-                } else {
-                    &recon.rf.rp_proj[rp_proj_off..]
-                };
+                let rp_proj_slice: &[crate::refmvs::SnglMvBlock] = &recon.rf.rp_proj;
                 crate::refmvs::refmvs_find(
                     recon.rt,
                     recon.rf,
                     rp_proj_slice,
+                    rp_proj_off as isize,
                     &recon.rf.rp_traj,
                     &mut mvstack,
                     if want_warp {
@@ -7450,15 +7474,12 @@ fn decode_b(
             let mut n_mvs = 0i32;
             let mut warp_cnt = 0i32;
             let rp_proj_off = recon.rt.rp_proj_off;
-            let rp_proj_slice: &[crate::refmvs::SnglMvBlock] = if recon.rf.rp_proj.is_empty() {
-                &[]
-            } else {
-                &recon.rf.rp_proj[rp_proj_off..]
-            };
+            let rp_proj_slice: &[crate::refmvs::SnglMvBlock] = &recon.rf.rp_proj;
             crate::refmvs::refmvs_find(
                 recon.rt,
                 recon.rf,
                 rp_proj_slice,
+                rp_proj_off as isize,
                 &recon.rf.rp_traj,
                 &mut mvstack,
                 None,
@@ -7519,11 +7540,7 @@ fn decode_b(
                 let mut n_mvs = 0i32;
                 let mut warp_cnt = 0i32;
                 let rp_proj_off = recon.rt.rp_proj_off;
-                let rp_proj_slice: &[crate::refmvs::SnglMvBlock] = if recon.rf.rp_proj.is_empty() {
-                    &[]
-                } else {
-                    &recon.rf.rp_proj[rp_proj_off..]
-                };
+                let rp_proj_slice: &[crate::refmvs::SnglMvBlock] = &recon.rf.rp_proj;
                 // decode.c:1228-1262. For NEW/JOINT modes (inter_mode >
                 // NEARMV_NEWMV) the full compound ref pair is used. For NEAR
                 // modes with equal refs, single-ref find then mirror mv[0]->mv[1].
@@ -7534,6 +7551,7 @@ fn decode_b(
                         recon.rt,
                         recon.rf,
                         rp_proj_slice,
+                        rp_proj_off as isize,
                         &recon.rf.rp_traj,
                         &mut mvstack,
                         None,
@@ -7556,6 +7574,7 @@ fn decode_b(
                         recon.rt,
                         recon.rf,
                         rp_proj_slice,
+                        rp_proj_off as isize,
                         &recon.rf.rp_traj,
                         &mut mvstack,
                         None,
@@ -7580,6 +7599,7 @@ fn decode_b(
                         recon.rt,
                         recon.rf,
                         rp_proj_slice,
+                        rp_proj_off as isize,
                         &recon.rf.rp_traj,
                         &mut mvstack,
                         None,
@@ -7600,6 +7620,7 @@ fn decode_b(
                         recon.rt,
                         recon.rf,
                         rp_proj_slice,
+                        rp_proj_off as isize,
                         &recon.rf.rp_traj,
                         &mut mvstack2,
                         None,
@@ -10038,9 +10059,7 @@ fn recon_b_inter_compound(
             let ld = &BLOCK_DIMENSIONS[lbs as u8 as usize];
             (ld[0] as i32, ld[1] as i32)
         };
-        let sub8x8 = lbs != BlockSize::Invalid
-            && cbs != lbs
-            && imin(luma_bw4, luma_bh4) < 16;
+        let sub8x8 = lbs != BlockSize::Invalid && cbs != lbs && imin(luma_bw4, luma_bh4) < 16;
         if sub8x8 {
             let base = ((cby & 63) as usize) * 128 + ((cbx & 127) as usize);
             for y in 0..ch4 {
@@ -15718,6 +15737,7 @@ mod tests {
                 seq_hdr: &__seqh,
                 frm_hdr: &__frmh,
                 warpmv: [crate::headers::WarpedMotionParams::default(); 2],
+                a_sb_cache: crate::env::SBEdgeCtx::default(),
             };
         };
     }

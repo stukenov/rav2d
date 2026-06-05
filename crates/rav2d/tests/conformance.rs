@@ -1337,3 +1337,96 @@ fn bit_exact_full_clip_bus64() {
         panic!("full clip not bit-exact:\n  {}", failures.join("\n  "));
     }
 }
+
+/// Full-clip gate for the multi-superblock-row 352x288 inter clip
+/// `avm-v14.1.0-bus.352x288.l5.seg1.obu`: EVERY coding-order frame must
+/// reconstruct bit-exact vs dav2d (in-loop filters off on both decoders).
+///
+/// Same harness as `bit_exact_full_clip_bus64`: rav2d emits in DECODE order;
+/// dav2d runs with `output_invisible_frames` so its non-shown reference frames
+/// are emitted in coding order too. Each rav2d frame is matched to the dav2d
+/// frame with identical dimensions and fewest pixel diffs before the bit-exact
+/// assertion.
+///
+/// Status: the keyframe (poc0) and the first inter frame (poc4 — single-ref MC,
+/// warp-affine, OBMC/interintra, segmentation) are bit-exact. The three
+/// frame_mode=2 TIP frames (poc2/1/3) are NOT yet bit-exact across multiple
+/// superblock rows: dav2d reconstructs a frame_mode=2 TIP frame with a dedicated
+/// no-entropy `tip_frame_recon_sb` path (decode.c:4418/4516), and rav2d's TIP
+/// frame recon currently completes only the first 128px superblock row before
+/// the multi-SB-row TIP MV grid / trajectory handling diverges and the frame
+/// errors out. Un-ignore once frame_mode=2 TIP multi-SB-row recon is bit-exact.
+#[test]
+#[ignore = "WIP: frame_mode=2 TIP frames (poc2/1/3) not yet bit-exact across multiple superblock rows"]
+fn bit_exact_full_clip_seg1() {
+    let path = media("avm-v14.1.0-bus.352x288.l5.seg1.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode_invisible(&path);
+    let got = rav2d_decode(&path);
+    assert!(!reference.is_empty(), "dav2d produced no frames");
+    assert_eq!(
+        got.len(),
+        reference.len(),
+        "frame count mismatch (rav2d={}, dav2d={})",
+        got.len(),
+        reference.len()
+    );
+
+    let mut used = vec![false; reference.len()];
+    let mut failures = Vec::new();
+    for (gi, g) in got.iter().enumerate() {
+        let mut best: Option<(usize, usize)> = None;
+        for (ri, r) in reference.iter().enumerate() {
+            if used[ri] || (r.w, r.h, r.bpc, r.layout) != (g.w, g.h, g.bpc, g.layout) {
+                continue;
+            }
+            let diff: usize = (0..3)
+                .map(|pl| {
+                    r.planes[pl]
+                        .iter()
+                        .zip(g.planes[pl].iter())
+                        .filter(|(a, b)| a != b)
+                        .count()
+                })
+                .sum();
+            if best.is_none_or(|(_, bd)| diff < bd) {
+                best = Some((ri, diff));
+            }
+        }
+        let (ri, _) = best.unwrap_or_else(|| panic!("rav2d frame {gi}: no dav2d match"));
+        used[ri] = true;
+        let r = &reference[ri];
+        let (ssh, _ssv) = ss(r.layout);
+        for pl in 0..3 {
+            let rp = &r.planes[pl];
+            let gp = &g.planes[pl];
+            if rp.len() != gp.len() {
+                failures.push(format!(
+                    "rav2d[{gi}]~dav2d[{ri}] plane {pl} size differs ({} vs {})",
+                    rp.len(),
+                    gp.len()
+                ));
+                continue;
+            }
+            let diff = rp.iter().zip(gp.iter()).filter(|(a, b)| a != b).count();
+            if diff != 0 {
+                let first = rp.iter().zip(gp.iter()).position(|(a, b)| a != b).unwrap();
+                let stride = if pl == 0 { r.w } else { (r.w + ssh) >> ssh } as usize;
+                failures.push(format!(
+                    "rav2d[{gi}]~dav2d[{ri}] plane {pl}: {diff}/{} bytes differ; first @ ({},{}) ref={} got={}",
+                    rp.len(),
+                    first % stride,
+                    first / stride,
+                    rp[first],
+                    gp[first]
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        panic!("seg1 full clip not bit-exact:\n  {}", failures.join("\n  "));
+    }
+}
