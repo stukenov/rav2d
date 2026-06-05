@@ -2082,6 +2082,9 @@ pub struct ReconCtx<'a, 'f> {
     /// Sequence/frame headers needed by `refmvs_find` for IntraBC candidates.
     pub seq_hdr: &'a crate::headers::SequenceHeader,
     pub frm_hdr: &'a crate::headers::FrameHeader,
+    /// Per-block derived warp motion parameters (`t->warpmv[0..2]`), computed in
+    /// the inter MV-resolution step and consumed by `recon_b_inter`'s warp MC.
+    pub warpmv: [crate::headers::WarpedMotionParams; 2],
 }
 
 /// Decode one superblock row of a tile (entropy/parse pass).
@@ -2326,6 +2329,7 @@ pub fn decode_tile_sbrow_entropy(
             scratch_u_has_cf: 0,
             seq_hdr,
             frm_hdr,
+            warpmv: [crate::headers::WarpedMotionParams::default(); 2],
         };
 
         decode_sb(
@@ -3671,7 +3675,8 @@ fn decode_b(
 
     if std::env::var("RAV2D_TRACE").is_ok() {
         eprintln!(
-            "BLK y={} x={} cby={} cbx={} bs={} lbs={} cbs={} hasL={} hasC={} ireg={} rng={}",
+            "BLK poc={} y={} x={} cby={} cbx={} bs={} lbs={} cbs={} hasL={} hasC={} ireg={} rng={}",
+            recon.frm_hdr.frame_offset,
             by,
             bx,
             cby,
@@ -3888,11 +3893,25 @@ fn decode_b(
         if fi.has_chroma_layout && lbs != cbs {
             b.is_intra = 0;
         } else {
-            let ictx = (nx_intra[0] + nx_intra[1]) as i32 + n_ctx as i32;
+            // get_intra_ctx (env.h:72): sum of intra(&!intrabc) over the
+            // gathered neighbours (nx[0], nx[n_ctx-1]), plus 1 if all are intra.
+            let ictx = if n_ctx == 0 {
+                0
+            } else {
+                let i = (n_ctx - 1) as usize;
+                let sum = nx_intra[0] as i32 + nx_intra[i] as i32;
+                sum + (sum == n_ctx as i32) as i32
+            };
             b.is_intra = (msac.decode_bool_adapt(cdf_m.intra(ictx as usize)) == 0) as u8;
         }
     } else {
         b.is_intra = 1;
+    }
+    if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
+        eprintln!(
+            "RISI y={} x={} intra={} ictx_intra={:?} n_ctx={} skipmode={} rng={}",
+            by, bx, b.is_intra, nx_intra, n_ctx, b.skip_mode, msac.dbg_rng()
+        );
     }
 
     // Pre-compute spatial neighbour (nb) context values within SB.
@@ -5547,6 +5566,12 @@ fn decode_b(
                         }
                     }
                     let mut cnt_rem = (n_ctx as i32) * 2 - cnt[0] as i32 - cnt[8] as i32;
+                    if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
+                        eprintln!(
+                            "RSREF y={} x={} n_ctx={} nx_r0={:?} nx_r1={:?} cnt={:?} rng={}",
+                            by, bx, n_ctx, nx_ref0, nx_ref1, cnt, msac.dbg_rng()
+                        );
+                    }
                     loop {
                         let cnt_cur = cnt[i as usize + 1] as i32;
                         cnt_rem -= cnt_cur;
@@ -5565,6 +5590,9 @@ fn decode_b(
             unsafe {
                 b.ref_pair.r[0] = ref0;
                 b.ref_pair.r[1] = -1;
+            }
+            if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
+                eprintln!("RREF y={} x={} ref0={} post_ref_rng={}", by, bx, ref0, msac.dbg_rng());
             }
 
             // --- sngl_ctx ---
@@ -5590,12 +5618,55 @@ fn decode_b(
                     + 2 * msac.decode_bool_adapt(cdf_m.tip_mode()) as u8;
             } else {
                 let mut allow_warp = false;
+                if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
+                    eprintln!("RWPRE y={} x={} pre_warp_rng={}", by, bx, msac.dbg_rng());
+                }
                 if imin(bw4, bh4) >= 2 && fi.warp_motion {
-                    let warp_ctx = sngl_ctx.min(4);
-                    allow_warp = msac.decode_bool_adapt(cdf_m.warp(warp_ctx)) != 0;
+                    // get_warp_ctx (decode.c:2984): neighbour warp-motion ctx.
+                    // a_sb_cache (above-SB-row cache) is only consulted for blocks
+                    // at the top SB boundary; rav2d's `a` carries above-row ctx for
+                    // non-boundary blocks (the bring-up clip is a single 64x64 SB,
+                    // so warp blocks never hit the boundary path). Default cache.
+                    let a_sb_cache = crate::env::SBEdgeCtx::default();
+                    let is_sb_boundary = (by & (fi.sb_step - 1)) == 0;
+                    let warp_thr = if is_sb_boundary {
+                        ((bx + bw4 - 2) & !1) < fi.tile_col_end
+                    } else {
+                        have_top_right
+                    };
+                    let warp_ctx = crate::env::get_warp_ctx(
+                        a,
+                        &a_sb_cache,
+                        l,
+                        by4,
+                        bx4,
+                        have_top,
+                        have_left,
+                        warp_thr,
+                        have_bottom_left,
+                        is_sb_boundary,
+                        b_dim,
+                        ref0,
+                    );
+                    allow_warp = msac.decode_bool_adapt(cdf_m.warp(warp_ctx as usize)) != 0;
+                    if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
+                        eprintln!(
+                            "RWCTX y={} x={} warp_ctx={} allow_warp={} a.mm[{}]={} a.ref0[{}]={}",
+                            by, bx, warp_ctx, allow_warp, bx4, a.motion_mode[bx4], bx4, a.r#ref[0][bx4]
+                        );
+                    }
                 }
                 if allow_warp {
-                    if !fi.force_integer_mv && msac.decode_bool_adapt(cdf_m.warp_newmv()) == 0 {
+                    let dbg_wn = std::env::var("RAV2D_WCTX").is_ok()
+                        && recon.frm_hdr.frame_offset == 4;
+                    if dbg_wn {
+                        eprintln!("RWNMV y={} x={} fim={} pre_rng={}", by, bx, fi.force_integer_mv, msac.dbg_rng());
+                    }
+                    let wn = !fi.force_integer_mv && msac.decode_bool_adapt(cdf_m.warp_newmv()) == 0;
+                    if dbg_wn {
+                        eprintln!("RWNMV y={} x={} wn={} post_rng={}", by, bx, wn, msac.dbg_rng());
+                    }
+                    if wn {
                         inter_mode = InterPredMode::WarpNewMv as u8;
                     } else {
                         inter_mode = InterPredMode::WarpMv as u8;
@@ -5928,10 +5999,13 @@ fn decode_b(
                 };
                 let step = 2i8 >> prec;
                 for n in 0..np {
-                    let ctx = if n == 0 || n == 3 { 1 } else { 0 };
-                    let mut val = msac.decode_symbol_adapt(cdf_m.warp_delta_param(0, ctx), 7) as i8;
+                    // dav2d: ctx = (n - 1U > 1U); cdf index is `!ctx`
+                    // -> n=0 -> idx 0, n=1 -> idx 1, n=2 -> idx 1, n=3 -> idx 0.
+                    let ctx = ((n as u32).wrapping_sub(1) > 1) as usize;
+                    let idx = (ctx == 0) as usize;
+                    let mut val = msac.decode_symbol_adapt(cdf_m.warp_delta_param(0, idx), 7) as i8;
                     if val == 7 && prec != 0 {
-                        val += msac.decode_symbol_adapt(cdf_m.warp_delta_param(1, ctx), 7) as i8;
+                        val += msac.decode_symbol_adapt(cdf_m.warp_delta_param(1, idx), 7) as i8;
                     }
                     if val != 0 {
                         if msac.decode_bool_adapt(cdf_m.warp_delta_sign()) != 0 {
@@ -6023,6 +6097,18 @@ fn decode_b(
                 unsafe {
                     b.data.inter.filter = fi.subpel_filter_mode;
                 }
+            }
+            if std::env::var("RAV2D_IP").is_ok() && recon.frm_hdr.frame_offset == 4 {
+                eprintln!(
+                    "IPARSE y={} x={} im={} mm={} wri={} wmvd={} filter={} ii={} warpii={} iimode={} wedge={} rng={}",
+                    by, bx,
+                    unsafe { b.data.inter.inter_mode }, unsafe { b.data.inter.motion_mode },
+                    unsafe { b.data.inter.warp_ref_idx }, unsafe { b.data.inter.warpmv_with_mvd },
+                    unsafe { b.data.inter.filter },
+                    (unsafe { b.data.inter.motion_mode } == MotionMode::InterIntra as u8) as i32,
+                    unsafe { b.data.inter.warp_ii }, unsafe { b.data.inter.interintra_mode },
+                    unsafe { b.data.inter.wedge_idx }, msac.dbg_rng()
+                );
             }
         }
 
@@ -6370,6 +6456,167 @@ fn decode_b(
                 unsafe {
                     b.data.inter.mv[0] = Mv { c: mv };
                 }
+
+                // --- warpmv derivation (decode.c:1113-1196) ----------------
+                // Build t->warpmv[0] for the warp motion modes so recon can do
+                // warp-affine MC. WARP_DELTA applies the parsed matrix deltas to
+                // the base warp candidate; WARP_CAUSAL re-estimates from
+                // neighbour samples; WARP_EXTEND extends a neighbour's matrix.
+                let motion_mode_v = unsafe { b.data.inter.motion_mode };
+                if motion_mode_v == MotionMode::WarpDelta as u8 {
+                    let wri = unsafe { b.data.inter.warp_ref_idx } as usize;
+                    let base = &warp_arr[wri];
+                    let m = &mut recon.warpmv[0].matrix;
+                    let bmat = unsafe { b.data.inter.matrix };
+                    let mut n = 0usize;
+                    while n < 4 && bmat[n] != -0x80 {
+                        if bmat[n] != 0 {
+                            let bb = ((n.wrapping_sub(1)) >= 2) as i32 * 0x10000;
+                            m[2 + n] = iclip(
+                                base[n + 2] + bmat[n] as i32 * (1 << 10),
+                                bb - 0x7fc0,
+                                bb + 0x7fc0,
+                            );
+                        } else {
+                            m[2 + n] = base[n + 2];
+                        }
+                        n += 1;
+                    }
+                    if bmat[2] == -0x80 {
+                        m[5] = m[2];
+                        m[4] = -m[3];
+                    }
+                    crate::warpmv::set_affine_mv2d(
+                        bw4,
+                        bh4,
+                        unsafe { b.data.inter.mv[0].c },
+                        &mut recon.warpmv[0],
+                        bx,
+                        by,
+                    );
+                    recon.warpmv[0].wm_type =
+                        if crate::warpmv::get_shear_params(&mut recon.warpmv[0]) != 0 {
+                            crate::headers::WarpedMotionType::Invalid
+                        } else {
+                            crate::env::warp_type(&recon.warpmv[0].matrix)
+                        };
+                    if bx == 0 && by == 0 && std::env::var("RAV2D_WARP").is_ok() {
+                        let mm = &recon.warpmv[0].matrix;
+                        eprintln!(
+                            "RWDELTA wri={} bmat={:?} base={},{},{},{} mv={},{} final={:?} type={:?}",
+                            wri, bmat, base[2], base[3], base[4], base[5],
+                            unsafe { b.data.inter.mv[0].c.y }, unsafe { b.data.inter.mv[0].c.x },
+                            mm, recon.warpmv[0].wm_type
+                        );
+                    }
+                } else if motion_mode_v == MotionMode::WarpCausal as u8 {
+                    let w4 = imin(bw4, fi.bw - bx);
+                    let h4 = imin(bh4, fi.bh - by);
+                    derive_warpmv(
+                        recon.rt,
+                        bx,
+                        by,
+                        have_top,
+                        have_left,
+                        bw4,
+                        bh4,
+                        w4,
+                        h4,
+                        refs[0],
+                        unsafe { b.data.inter.mv[0] },
+                        &mut recon.warpmv[0],
+                        fi.sb_step,
+                        fi.tile_col_end,
+                    );
+                } else if motion_mode_v == MotionMode::WarpExtend as u8 {
+                    let is_sb_boundary = (by & (fi.sb_step - 1)) == 0;
+                    let mut y_off = 0i32;
+                    let mut x_off = 0i32;
+                    let cand = &mvstack[drl];
+                    if cand.x_off == -1 || cand.y_off == -1 {
+                        y_off = cand.y_off as i32;
+                        x_off = cand.x_off as i32;
+                        let sb_mask = fi.sb_step - 1;
+                        let r = if is_sb_boundary && y_off == -1 {
+                            if (bx & sb_mask) != 0 || x_off >= 0 {
+                                &recon.rt.ra[recon.rt.ra_off + ((bx + x_off) >> 1) as usize]
+                            } else {
+                                &recon.rt.ra_tl
+                            }
+                        } else {
+                            &recon.rt.r
+                                [((by + y_off) & 63) as usize * 128 + ((bx + x_off) & 127) as usize]
+                        };
+                        if unsafe { r.r#ref.r[0] } == TIP_FRAME as i8 {
+                            x_off = 0;
+                            y_off = 0;
+                        }
+                    }
+                    let r_idx = |yo: i32, xo: i32| -> usize {
+                        ((by + yo) & 63) as usize * 128 + ((bx + xo) & 127) as usize
+                    };
+                    let ref0 = refs[0];
+                    let match_ref = |r: &crate::refmvs::Block| -> bool {
+                        unsafe { r.r#ref.r[0] == ref0 || r.r#ref.r[1] == ref0 }
+                    };
+                    let bml_ok = have_left && by + bh4 <= fi.tile_row_end && {
+                        let r = &recon.rt.r[r_idx(bh4 - 1, -1)];
+                        match_ref(r)
+                    };
+                    let rmt_ok = have_top && bx + bw4 <= fi.tile_col_end && {
+                        let r = if is_sb_boundary {
+                            &recon.rt.ra[recon.rt.ra_off + (((bx & !1) + bw4 - 2) >> 1) as usize]
+                        } else {
+                            &recon.rt.r[((by - 1) & 63) as usize * 128 + ((bx + bw4 - 1) & 127) as usize]
+                        };
+                        match_ref(r)
+                    };
+                    let tml_ok = have_top && {
+                        let r = if is_sb_boundary {
+                            &recon.rt.ra[recon.rt.ra_off + ((bx & !1) >> 1) as usize]
+                        } else {
+                            &recon.rt.r[((by - 1) & 63) as usize * 128 + (bx & 127) as usize]
+                        };
+                        match_ref(r)
+                    };
+                    let lmt_ok = have_left && {
+                        let r = &recon.rt.r[(by & 63) as usize * 128 + ((bx - 1) & 127) as usize];
+                        match_ref(r)
+                    };
+                    if x_off != 0 || y_off != 0 {
+                        // already set above
+                    } else if bml_ok {
+                        y_off = bh4 - 1;
+                        x_off = -1;
+                    } else if rmt_ok {
+                        y_off = -1;
+                        x_off = -(bx & is_sb_boundary as i32) + bw4 - (1 + is_sb_boundary as i32);
+                    } else if tml_ok {
+                        y_off = 0;
+                        x_off = -1;
+                    } else if lmt_ok {
+                        y_off = -1;
+                        x_off = -(bx & is_sb_boundary as i32);
+                    }
+                    if x_off != 0 || y_off != 0 {
+                        let b_dim_e = &BLOCK_DIMENSIONS[bs as usize];
+                        extend_warpmv(
+                            recon.rt,
+                            bx,
+                            by,
+                            x_off,
+                            y_off,
+                            b_dim_e,
+                            refs[0],
+                            unsafe { b.data.inter.mv[0] },
+                            &mut recon.warpmv[0],
+                            fi.sb_step,
+                            &recon.frm_hdr.gmv.m[refs[0] as usize].matrix,
+                        );
+                    } else {
+                        recon.warpmv[0].wm_type = crate::headers::WarpedMotionType::Invalid;
+                    }
+                }
             }
 
             // refmv bank + splat (decode.c:1307-1322 single-ref).
@@ -6449,6 +6696,88 @@ fn decode_b(
                         bh4,
                     );
                 }
+            } else {
+                // Warp / global-affine splat (decode.c:564-588, splat_warpmv).
+                let s_off = by4r * 128 + (bx & 127) as usize;
+                let use_local = motion_mode > MotionMode::InterIntra as u8;
+                let wm = if use_local {
+                    recon.warpmv[0]
+                } else {
+                    recon.frm_hdr.gmv.m[refs[0] as usize]
+                };
+                let mut s_src = crate::refmvs::Block {
+                    mv: [
+                        blk_mv,
+                        Mv {
+                            c: MvXY {
+                                y: crate::levels::INVALID_MV,
+                                x: 0,
+                            },
+                        },
+                    ],
+                    r#ref: RefPair { r: [refs[0], -1] },
+                    bs: bs as u8,
+                    subpel_filter: unsafe { b.data.inter.filter },
+                    ..Default::default()
+                };
+                if use_local {
+                    s_src.lmv[0] = blk_mv;
+                    s_src.lmv[1] = Mv {
+                        c: MvXY {
+                            y: crate::levels::INVALID_MV,
+                            x: 0,
+                        },
+                    };
+                    s_src.mf = 2;
+                    s_src.m = wm.matrix;
+                    s_src.warp_type = wm.wm_type as i8;
+                } else {
+                    s_src.mf = 1;
+                }
+                let mat = &wm.matrix;
+                let mvx = (mat[2] as i64 - 0x10000) * (bx as i64 + 1) * 4
+                    + mat[3] as i64 * (by as i64 + 1) * 4
+                    + mat[0] as i64;
+                let mvy = mat[4] as i64 * (bx as i64 + 1) * 4
+                    + mat[1] as i64
+                    + (mat[5] as i64 - 0x10000) * (by as i64 + 1) * 4;
+                let mut t_src = crate::refmvs::TemporalBlock::default();
+                unsafe {
+                    t_src.r#ref.r[0] = refs[0];
+                    t_src.r#ref.r[1] = refs[0];
+                }
+                let write_temporal = recon.seq_hdr.ref_frame_mvs
+                    && refs[0] != TIP_FRAME as i8
+                    && !recon.cur_mvs.is_empty();
+                if write_temporal {
+                    let t_stride = recon.rf.rp_stride;
+                    let t_off = (by >> 1) as isize * t_stride + (bx >> 1) as isize;
+                    crate::refmvs::splat_warpmv(
+                        &mut recon.rt.r[s_off..],
+                        &mut s_src,
+                        Some(&mut recon.cur_mvs[t_off as usize..]),
+                        t_stride,
+                        &mut t_src,
+                        mvy,
+                        mvx,
+                        &wm,
+                        bw4,
+                        bh4,
+                    );
+                } else {
+                    crate::refmvs::splat_warpmv(
+                        &mut recon.rt.r[s_off..],
+                        &mut s_src,
+                        None,
+                        0,
+                        &mut t_src,
+                        mvy,
+                        mvx,
+                        &wm,
+                        bw4,
+                        bh4,
+                    );
+                }
             }
         }
     }
@@ -6459,6 +6788,14 @@ fn decode_b(
     // (recon_tmpl.c:3482-3942). Inter, IntraBC and palette are NOT handled here.
     if trace_blk {
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
+    }
+    if std::env::var("RAV2D_WARP2").is_ok() && recon.frm_hdr.frame_offset == 4 {
+        eprintln!(
+            "REC poc={} y={} x={} intra={} intrabc={} im={} mm={} rng={}",
+            recon.frm_hdr.frame_offset, by, bx, b.is_intra, intrabc as i32,
+            unsafe { b.data.inter.inter_mode }, unsafe { b.data.inter.motion_mode },
+            msac.dbg_rng()
+        );
     }
     if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
         recon_b_intra(
@@ -6488,6 +6825,9 @@ fn decode_b(
         if trace_blk {
             eprintln!("  CK post_inter_recon rng={}", msac.dbg_rng());
         }
+    }
+    if std::env::var("RAV2D_PR").is_ok() && recon.frm_hdr.frame_offset == 4 {
+        eprintln!("RPR y={} x={} intra={} post_recon_rng={}", by, bx, b.is_intra, msac.dbg_rng());
     }
 
     // SDP: record the luma-only block's intra direction mode + FSC flag into the
@@ -6903,6 +7243,122 @@ fn inter_mc_plane_8bpc(
     }
 }
 
+/// Warp-affine motion compensation for a block plane (recon_tmpl.c
+/// `warp_affine`, affine path). Predicts the block in 8x8 sub-tiles using the
+/// derived warp matrix `wmp`. Only the affine sub-path is implemented (block is
+/// >= 8px and `wmp.affine`); callers gate on those conditions, falling back to
+/// translational MC otherwise. 8bpc luma + chroma (with subsampling).
+#[allow(clippy::too_many_arguments)]
+fn warp_affine_plane_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    ref_pic: &crate::picture::Picture,
+    pl: usize,
+    bx: i32,
+    by: i32,
+    b_dim: &[u8],
+    wmp: &crate::headers::WarpedMotionParams,
+    ss_hor: i32,
+    ss_ver: i32,
+    frame_bw: i32,
+    frame_bh: i32,
+) {
+    let plss_ver = if pl != 0 { ss_ver } else { 0 };
+    let plss_hor = if pl != 0 { ss_hor } else { 0 };
+    let h_mul = 4 >> plss_hor;
+    let v_mul = 4 >> plss_ver;
+    let mat = &wmp.matrix;
+    let width = frame_bw * 4 >> plss_hor;
+    let height = frame_bh * 4 >> plss_ver;
+    let ref_stride = ref_pic.stride[(pl != 0) as usize].unsigned_abs();
+    let ref_data: &[u8] = match ref_pic.data[pl] {
+        Some(p) => {
+            let ph = if pl == 0 {
+                ref_pic.p.h
+            } else {
+                (ref_pic.p.h + ss_ver) >> ss_ver
+            };
+            unsafe { std::slice::from_raw_parts(p.as_ptr(), ref_stride * ph as usize) }
+        }
+        None => return,
+    };
+
+    let blk_w = b_dim[0] as i32 * h_mul;
+    let blk_h = b_dim[1] as i32 * v_mul;
+    let abcd: [i16; 4] = wmp.abcd;
+
+    let mut emu = [0u8; 32 * 32];
+    let mut y = 0;
+    while y < blk_h {
+        let src_y = by * 4 + ((y + 4) << plss_ver);
+        let mat3_y = mat[3] as i64 * src_y as i64 + mat[0] as i64;
+        let mat5_y = mat[5] as i64 * src_y as i64 + mat[1] as i64;
+        let mut x = 0;
+        while x < blk_w {
+            let src_x = bx * 4 + ((x + 4) << plss_hor);
+            let mvx = (mat[2] as i64 * src_x as i64 + mat3_y) >> plss_hor;
+            let mvy = (mat[4] as i64 * src_x as i64 + mat5_y) >> plss_ver;
+
+            let dx = (mvx >> 16) as i32 - 4;
+            let mx = (((mvx as i32) & 0xffff)
+                - wmp.abcd[0] as i32 * 4
+                - wmp.abcd[1] as i32 * 7)
+                & !0x3f;
+            let dy = (mvy >> 16) as i32 - 4;
+            let my = (((mvy as i32) & 0xffff)
+                - wmp.abcd[2] as i32 * 4
+                - wmp.abcd[3] as i32 * 4)
+                & !0x3f;
+
+            let (src, src_off, src_stride): (&[u8], usize, usize) =
+                if dx < 3 || dx + 8 + 4 > width || dy < 3 || dy + 8 + 4 > height {
+                    crate::mc::emu_edge_8bpc(
+                        15,
+                        15,
+                        width as usize,
+                        height as usize,
+                        (dx - 3) as isize,
+                        (dy - 3) as isize,
+                        &mut emu,
+                        32,
+                        ref_data,
+                        ref_stride,
+                    );
+                    (&emu[..], 32 * 3 + 3, 32)
+                } else {
+                    (ref_data, ref_stride * dy as usize + dx as usize, ref_stride)
+                };
+
+            let dst_sub = (y as usize) * dst_stride + x as usize;
+            crate::mc::warp_affine_8x8_8bpc(
+                &mut dst[dst_sub..],
+                dst_stride,
+                src,
+                src_stride,
+                src_off,
+                &abcd,
+                mx,
+                my,
+            );
+            if pl == 0 && bx == 0 && by == 0 && std::env::var("RAV2D_WARP").is_ok() {
+                eprintln!(
+                    "RWARP y={} x={} dx={} dy={} mx={} my={} abcd={:?} mat={:?}",
+                    y, x, dx, dy, mx, my, abcd, mat
+                );
+                for yy in 0..8 {
+                    let mut s = String::from("RWROW");
+                    for xx in 0..8 {
+                        s.push_str(&format!(" {}", dst[dst_sub + yy * dst_stride + xx]));
+                    }
+                    eprintln!("{s}");
+                }
+            }
+            x += 8;
+        }
+        y += 8;
+    }
+}
+
 /// Emulated-edge fetch for inter MC (recon_tmpl.c emu_edge): clamp source reads
 /// to the plane bounds. Identical semantics to mc.rs's private `emu_edge`.
 #[allow(clippy::too_many_arguments)]
@@ -7006,6 +7462,7 @@ fn inter_residual_tx_8bpc(
         } else {
             (&a.ccoef[pl - 1][bx4..], &l.ccoef[pl - 1][by4..])
         };
+        let pre_rng = msac.dbg_rng();
         let eob = crate::recon::decode_coefs(
             msac,
             recon.cdf_coef,
@@ -7017,6 +7474,12 @@ fn inter_residual_tx_8bpc(
             &mut txtp,
             &mut res_ctx,
         );
+        if std::env::var("RAV2D_COEF").is_ok() && recon.frm_hdr.frame_offset == 4 {
+            eprintln!(
+                "RCOEF pl={} bx={} by={} tx={} eob={} txtp={} pre={} post={}",
+                pl, bx, by, tx, eob, txtp, pre_rng, msac.dbg_rng()
+            );
+        }
         if eob == i32::MIN {
             return Err(());
         }
@@ -7135,6 +7598,13 @@ fn recon_b_inter(
 ) -> Result<(), ()> {
     let refs = unsafe { b.ref_pair.r };
     let ref0 = refs[0];
+    if std::env::var("RAV2D_WARP2").is_ok() {
+        eprintln!(
+            "RB by={} bx={} ref0={} ref1={} mm={} im={} intra={} has_luma={}",
+            by, bx, ref0, refs[1], unsafe { b.data.inter.motion_mode },
+            unsafe { b.data.inter.inter_mode }, b.is_intra, has_luma
+        );
+    }
     if ref0 < 0 || ref0 as usize >= 7 {
         return Ok(());
     }
@@ -7150,6 +7620,38 @@ fn recon_b_inter(
         None => return Ok(()),
     };
 
+    // Warp-affine vs translational MC dispatch (recon_tmpl.c:3163-3176).
+    let motion_mode = unsafe { b.data.inter.motion_mode };
+    let inter_mode = unsafe { b.data.inter.inter_mode };
+    let warp_block = {
+        let bdim = &BLOCK_DIMENSIONS[lbs as u8 as usize];
+        let bw4 = bdim[0] as i32;
+        let bh4 = bdim[1] as i32;
+        let mut gmv = recon.frm_hdr.gmv.m[ref0 as usize];
+        let gmv_warp_allowed = gmv.wm_type > crate::headers::WarpedMotionType::Translation
+            && recon.frm_hdr.force_integer_mv == 0
+            && crate::warpmv::get_shear_params(&mut gmv) == 0
+            && recon.svc[ref0 as usize][0].scale == 0;
+        recon.frm_hdr.force_integer_mv == 0
+            && ((inter_mode == crate::levels::InterPredMode::GlobalMv as u8
+                && imin(bw4, bh4) > 1
+                && gmv_warp_allowed)
+                || (motion_mode >= MotionMode::WarpCausal as u8
+                    && recon.warpmv[0].wm_type > crate::headers::WarpedMotionType::Invalid))
+    };
+    // Pick which warp params to use: local warpmv for warp motion modes, the
+    // frame global motion otherwise (GLOBALMV warp).
+    let use_local_warp = motion_mode >= MotionMode::WarpCausal as u8;
+
+    if std::env::var("RAV2D_WARP").is_ok() {
+        eprintln!(
+            "WARP by={} bx={} mm={} im={} warp_block={} use_local={} wm_type={:?} affine={} mat={:?} abcd={:?} mv=({},{})",
+            by, bx, motion_mode, inter_mode, warp_block, use_local_warp,
+            recon.warpmv[0].wm_type, recon.warpmv[0].affine,
+            recon.warpmv[0].matrix, recon.warpmv[0].abcd, mv.y, mv.x
+        );
+    }
+
     // ---- luma MC + residual -----------------------------------------------
     if has_luma {
         let bs = lbs;
@@ -7158,23 +7660,47 @@ fn recon_b_inter(
         let bh4 = b_dim[1] as i32;
         let y_stride = recon.frame.y_stride_px;
         let dst_off = 4 * (by as usize * y_stride + bx as usize);
-        inter_mc_plane_8bpc(
-            &mut recon.dst_y[dst_off..],
-            y_stride,
-            &refp,
-            0,
-            bx,
-            by,
-            bw4,
-            bh4,
-            mv.x,
-            mv.y,
-            filter,
-            ss_hor,
-            ss_ver,
-            fi.bw,
-            fi.bh,
-        );
+        let wmp = if use_local_warp {
+            recon.warpmv[0]
+        } else {
+            recon.frm_hdr.gmv.m[ref0 as usize]
+        };
+        let do_affine_warp =
+            warp_block && wmp.affine != 0 && imin(bw4 * 4, bh4 * 4) >= 8;
+        if do_affine_warp {
+            warp_affine_plane_8bpc(
+                &mut recon.dst_y[dst_off..],
+                y_stride,
+                &refp,
+                0,
+                bx,
+                by,
+                b_dim,
+                &wmp,
+                ss_hor,
+                ss_ver,
+                fi.bw,
+                fi.bh,
+            );
+        } else {
+            inter_mc_plane_8bpc(
+                &mut recon.dst_y[dst_off..],
+                y_stride,
+                &refp,
+                0,
+                bx,
+                by,
+                bw4,
+                bh4,
+                mv.x,
+                mv.y,
+                filter,
+                ss_hor,
+                ss_ver,
+                fi.bw,
+                fi.bh,
+            );
+        }
 
         // Luma residual: walk b.tx_part geometry (same tp[] as intra,
         // recon_tmpl.c:3293).
@@ -7221,6 +7747,15 @@ fn recon_b_inter(
         // Chroma MV: for cbs==lbs or imin(bw4,bh4)>=16 the single block MV is
         // used directly. Sub-8x8 (averaged) chroma MVs are deferred.
         let uv_stride = recon.frame.uv_stride_px;
+        // Warp dispatch for chroma uses cb_dim and (>=8px-after-subsample affine).
+        let c_wmp = if use_local_warp {
+            recon.warpmv[0]
+        } else {
+            recon.frm_hdr.gmv.m[ref0 as usize]
+        };
+        let c_do_warp = warp_block
+            && c_wmp.affine != 0
+            && imin(cbw4 * (4 >> ss_hor), cbh4 * (4 >> ss_ver)) >= 8;
         for pl in 1..3 {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let dst: &mut [u8] = if pl == 1 {
@@ -7228,23 +7763,40 @@ fn recon_b_inter(
             } else {
                 &mut recon.dst_v[dst_off..]
             };
-            inter_mc_plane_8bpc(
-                dst,
-                uv_stride,
-                &refp,
-                pl,
-                cbx,
-                cby,
-                cbw4,
-                cbh4,
-                mv.x,
-                mv.y,
-                filter,
-                ss_hor,
-                ss_ver,
-                fi.bw,
-                fi.bh,
-            );
+            if c_do_warp {
+                warp_affine_plane_8bpc(
+                    dst,
+                    uv_stride,
+                    &refp,
+                    pl,
+                    cbx,
+                    cby,
+                    cb_dim,
+                    &c_wmp,
+                    ss_hor,
+                    ss_ver,
+                    fi.bw,
+                    fi.bh,
+                );
+            } else {
+                inter_mc_plane_8bpc(
+                    dst,
+                    uv_stride,
+                    &refp,
+                    pl,
+                    cbx,
+                    cby,
+                    cbw4,
+                    cbh4,
+                    mv.x,
+                    mv.y,
+                    filter,
+                    ss_hor,
+                    ss_ver,
+                    fi.bw,
+                    fi.bh,
+                );
+            }
         }
 
         // Chroma residual per uvtx TU.
@@ -9230,9 +9782,9 @@ pub fn decode_sb(
                 } else {
                     msac.decode_bool_adapt(cdf_m.part_split(pl, ctx2))
                 };
-                if std::env::var("RAV2D_PART").is_ok() {
+                if std::env::var("RAV2D_PART").is_ok() && recon.frm_hdr.frame_offset == 4 {
                     eprintln!(
-                        "PART y={} x={} bs={} pl={} ctx1={} ctx2={} is_split={} L0={:?} rng={}",
+                        "RPART y={} x={} bs={} pl={} ctx1={} ctx2={} is_split={} mix={} hh={} hv={} rng={}",
                         *by,
                         *bx,
                         bs as i32,
@@ -9240,7 +9792,9 @@ pub fn decode_sb(
                         ctx1,
                         ctx2,
                         is_split,
-                        &l.partition[0][0..8],
+                        mix_inter as i32,
+                        have_h_split as i32,
+                        have_v_split as i32,
                         msac.dbg_rng()
                     );
                 }
@@ -9278,6 +9832,13 @@ pub fn decode_sb(
                         } else {
                             let ctx4 = (ctx1 + pcc.ctx[1] as i32 * 4) as usize;
                             dir = msac.decode_bool_adapt(cdf_m.part_dir(pl, ctx4)) as i32;
+                        }
+                        if std::env::var("RAV2D_DIR").is_ok() && recon.frm_hdr.frame_offset == 4 {
+                            eprintln!(
+                                "RDIR y={} x={} bs={} asp={} va={} ha={} bwh4ss={:?} dir={} pccctx1={} rng={}",
+                                *by, *bx, bs as i32, aspect, v_aspect as i32, h_aspect as i32,
+                                bwh4ss, dir, pcc.ctx[1], msac.dbg_rng()
+                            );
                         }
                         assert!(pcc.part[dir as usize][0] != -1);
                         bp = if dir != 0 {
@@ -10330,6 +10891,7 @@ mod tests {
                 scratch_u_has_cf: 0,
                 seq_hdr: &__seqh,
                 frm_hdr: &__frmh,
+                warpmv: [crate::headers::WarpedMotionParams::default(); 2],
             };
         };
     }

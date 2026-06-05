@@ -602,6 +602,59 @@ fn diff_loc() {
 /// 1) find the closest-matching dav2d output frame and report per-plane diffs.
 /// Run with `--ignored --nocapture`.
 #[test]
+#[ignore = "block-grid diff map for first inter frame"]
+fn inter_frame1_blockmap() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    let reference = dav2d_decode(&path);
+    let got = rav2d_decode(&path);
+    let g = &got[1];
+    let r = reference.last().unwrap();
+    let w = r.w as usize;
+    let h = r.h as usize;
+    for pl in 0..3 {
+        let (ssh, ssv) = ss(r.layout);
+        let (ssh, ssv) = (ssh as usize, ssv as usize);
+        let pw = if pl == 0 { w } else { (w + ssh) >> ssh };
+        let ph = if pl == 0 { h } else { (h + ssv) >> ssv };
+        let rp = &r.planes[pl];
+        let gp = &g.planes[pl];
+        eprintln!("== plane {pl} {pw}x{ph} ==");
+        // 8x8 grid of diff counts
+        let mut total = 0;
+        for by in (0..ph).step_by(8) {
+            let mut row = String::new();
+            for bx in (0..pw).step_by(8) {
+                let mut c = 0;
+                for y in by..(by + 8).min(ph) {
+                    for x in bx..(bx + 8).min(pw) {
+                        if rp[y * pw + x] != gp[y * pw + x] {
+                            c += 1;
+                        }
+                    }
+                }
+                total += c;
+                row.push_str(&format!("{c:3} "));
+            }
+            eprintln!("y={by:3}: {row}");
+        }
+        eprintln!("plane {pl} total diffs {total}");
+        if pl == 0 {
+            eprintln!("block(0,4) cols16-31 rows0-3 REF then GOT:");
+            for y in 0..4 {
+                let mut rs = String::from("R");
+                let mut gs = String::from("G");
+                for x in 16..32 {
+                    rs.push_str(&format!(" {}", rp[y * pw + x]));
+                    gs.push_str(&format!(" {}", gp[y * pw + x]));
+                }
+                eprintln!("{rs}");
+                eprintln!("{gs}");
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "first-inter-frame diff diagnostic"]
 fn inter_frame1_diag() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
