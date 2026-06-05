@@ -708,6 +708,12 @@ pub fn decode_coefs(
     if std::env::var("RAV2D_CF").is_ok() {
         eprintln!("CF pl={} eob={} rng={}", p.plane, eob, msac.dbg_rng());
     }
+    if std::env::var("RAV2D_CF_TRACE").is_ok() {
+        eprintln!(
+            "DCF cby={} cbx={} pl={} tx={} sctx={} uhc={} skip={} eob={} rng={}",
+            p.cby, p.cbx, p.plane, p.tx, sctx, p.u_has_cf, all_skip, eob, msac.dbg_rng()
+        );
+    }
 
     // transform type selection
     static TXTP_LONG_TBL: [[[u8; 4]; 2]; 2] = [

@@ -2009,6 +2009,11 @@ pub struct ReconScratch {
     pub chroma_txtp: [[u16; 2]; 256],
     pub chroma_eob: [[i16; 2]; 256],
     pub chroma_u_has_cf: i32,
+    /// Per-4x4 luma transform type map (full txtp incl. secondary-tx bits),
+    /// indexed `(by & 15) * 16 + (bx & 15)`. Written by the luma residual walk
+    /// and read back to seed the inter chroma transform type (dav2d `txtp_map`,
+    /// recon_tmpl.c:2502 / 3540).
+    pub txtp_map: [u16; 256],
 }
 
 impl Default for ReconScratch {
@@ -2021,6 +2026,7 @@ impl Default for ReconScratch {
             chroma_txtp: [[0u16; 2]; 256],
             chroma_eob: [[-1i16; 2]; 256],
             chroma_u_has_cf: 0,
+            txtp_map: [0u16; 256],
         }
     }
 }
@@ -6617,15 +6623,27 @@ fn decode_b(
                             y_off = 0;
                         }
                     }
-                    let r_idx = |yo: i32, xo: i32| -> usize {
-                        ((by + yo) & 63) as usize * 128 + ((bx + xo) & 127) as usize
-                    };
                     let ref0 = refs[0];
                     let match_ref = |r: &crate::refmvs::Block| -> bool {
                         unsafe { r.r#ref.r[0] == ref0 || r.r#ref.r[1] == ref0 }
                     };
+                    // Neighbours mirror dav2d (decode.c:1155-1168): tml is the
+                    // left neighbour on the current row, lmt the top neighbour.
+                    let tml_ok = have_left && {
+                        let r = &recon.rt.r[(by & 63) as usize * 128 + ((bx - 1) & 127) as usize];
+                        match_ref(r)
+                    };
                     let bml_ok = have_left && by + bh4 <= fi.tile_row_end && {
-                        let r = &recon.rt.r[r_idx(bh4 - 1, -1)];
+                        let r = &recon.rt.r
+                            [((by + bh4 - 1) & 63) as usize * 128 + ((bx - 1) & 127) as usize];
+                        match_ref(r)
+                    };
+                    let lmt_ok = have_top && {
+                        let r = if is_sb_boundary {
+                            &recon.rt.ra[recon.rt.ra_off + ((bx & !1) >> 1) as usize]
+                        } else {
+                            &recon.rt.r[((by - 1) & 63) as usize * 128 + (bx & 127) as usize]
+                        };
                         match_ref(r)
                     };
                     let rmt_ok = have_top && bx + bw4 <= fi.tile_col_end && {
@@ -6634,18 +6652,6 @@ fn decode_b(
                         } else {
                             &recon.rt.r[((by - 1) & 63) as usize * 128 + ((bx + bw4 - 1) & 127) as usize]
                         };
-                        match_ref(r)
-                    };
-                    let tml_ok = have_top && {
-                        let r = if is_sb_boundary {
-                            &recon.rt.ra[recon.rt.ra_off + ((bx & !1) >> 1) as usize]
-                        } else {
-                            &recon.rt.r[((by - 1) & 63) as usize * 128 + (bx & 127) as usize]
-                        };
-                        match_ref(r)
-                    };
-                    let lmt_ok = have_left && {
-                        let r = &recon.rt.r[(by & 63) as usize * 128 + ((bx - 1) & 127) as usize];
                         match_ref(r)
                     };
                     if x_off != 0 || y_off != 0 {
@@ -6975,6 +6981,34 @@ fn decode_b(
     // (recon_tmpl.c:3482-3942). Inter, IntraBC and palette are NOT handled here.
     if trace_blk {
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
+    }
+    if std::env::var("RAV2D_BLK_TRACE").is_ok() {
+        let (r0, r1, mm, mvy, mvx) = if b.is_intra != 0 {
+            (-2i32, -2i32, -1i32, 0i32, 0i32)
+        } else {
+            unsafe {
+                (
+                    b.ref_pair.r[0] as i32,
+                    b.ref_pair.r[1] as i32,
+                    b.data.inter.motion_mode as i32,
+                    b.data.inter.mv[0].c.y as i32,
+                    b.data.inter.mv[0].c.x as i32,
+                )
+            }
+        };
+        eprintln!(
+            "DBLK y={} x={} bs={} intra={} ref0={} ref1={} mm={} mvy={} mvx={} rng={}",
+            by,
+            bx,
+            bs as i32,
+            b.is_intra as i32,
+            r0,
+            r1,
+            mm,
+            mvy,
+            mvx,
+            msac.dbg_rng()
+        );
     }
     if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
         recon_b_intra(
@@ -7682,6 +7716,7 @@ fn inter_residual_tx_8bpc(
     bx: i32,
     by: i32,
     dst_is_uv: bool,
+    txtp_seed: u16,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     use crate::levels::IntraPredMode;
@@ -7701,7 +7736,7 @@ fn inter_residual_tx_8bpc(
     let cf_n = tw * th;
     recon.cf[..cf_n].fill(0);
 
-    let mut txtp: u16 = 0;
+    let mut txtp: u16 = txtp_seed;
     let mut res_ctx: u8 = 0;
     let (mut eob, stx, mut txtp) = if b.skip_txfm != 0 {
         res_ctx = 0x40;
@@ -7756,9 +7791,38 @@ fn inter_residual_tx_8bpc(
         if eob == i32::MIN {
             return Err(());
         }
+        // Mirror dav2d's `txtp_map` (recon_tmpl.c:2502): record the full luma
+        // transform type (base | secondary-tx << 8) for each covered 4x4 so the
+        // inter chroma path can seed its transform type from it.
+        if pl == 0 {
+            let by15 = (by & 15) as usize;
+            let bx15 = (bx & 15) as usize;
+            for dy in 0..t_dim.h as usize {
+                for dx in 0..t_dim.w as usize {
+                    let yy = by15 + dy;
+                    let xx = bx15 + dx;
+                    if yy < 16 && xx < 16 {
+                        recon.scratch.txtp_map[yy * 16 + xx] = txtp;
+                    }
+                }
+            }
+        }
         let stx = (txtp >> 8) as i32;
         (eob, stx, (txtp & 0xff) as u32)
     };
+    if std::env::var("RAV2D_COEF_TRACE").is_ok() {
+        if pl == 0 {
+            eprintln!(
+                "DCOEF y={} x={} tx={} txtp={} stx={} eob={} rng={}",
+                by, bx, tx, txtp, stx, eob, msac.dbg_rng()
+            );
+        } else {
+            eprintln!(
+                "DCHROMA y={} x={} pl={} uvtx={} txtp={} eob={} rng={}",
+                by, bx, pl - 1, tx, txtp, eob, msac.dbg_rng()
+            );
+        }
+    }
     if pl == 1 {
         recon.scratch_u_has_cf = (eob >= 0) as i32;
     }
@@ -8373,7 +8437,7 @@ fn recon_b_inter_compound(
                 let mut x = 0;
                 while x < w4 {
                     inter_residual_tx_8bpc(
-                        recon, msac, cdf_m, a, l, b, 0, tx, bx + x, by + y, false, fi,
+                        recon, msac, cdf_m, a, l, b, 0, tx, bx + x, by + y, false, 0, fi,
                     )?;
                     x += tw4;
                 }
@@ -8482,6 +8546,9 @@ fn recon_b_inter_compound(
         let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
         let (txw, txh) = (uv_t_dim.w as i32, uv_t_dim.h as i32);
         recon.scratch_u_has_cf = 0;
+        // Seed the inter chroma transform type from the co-located luma 4x4's
+        // recorded txtp (dav2d `y_txtp = txtp_map[...]`, recon_tmpl.c:3540/3553).
+        let uv_txtp_seed = recon.scratch.txtp_map[(by & 15) as usize * 16 + (bx & 15) as usize];
         for pl in 1..3usize {
             let mut y = 0;
             while y < ch4ss {
@@ -8499,6 +8566,7 @@ fn recon_b_inter_compound(
                         cbx + (x << ss_hor),
                         cby + (y << ss_ver),
                         true,
+                        uv_txtp_seed,
                         fi,
                     )?;
                     x += txw;
@@ -8674,7 +8742,7 @@ fn recon_b_inter(
                 let mut x = 0;
                 while x < w4 {
                     inter_residual_tx_8bpc(
-                        recon, msac, cdf_m, a, l, b, 0, tx, bx + x, by + y, false, fi,
+                        recon, msac, cdf_m, a, l, b, 0, tx, bx + x, by + y, false, 0, fi,
                     )?;
                     x += tw4;
                 }
@@ -8775,6 +8843,9 @@ fn recon_b_inter(
         let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
         let (txw, txh) = (uv_t_dim.w as i32, uv_t_dim.h as i32);
         recon.scratch_u_has_cf = 0;
+        // Seed the inter chroma transform type from the co-located luma 4x4's
+        // recorded txtp (dav2d `y_txtp = txtp_map[...]`, recon_tmpl.c:3540/3553).
+        let uv_txtp_seed = recon.scratch.txtp_map[(by & 15) as usize * 16 + (bx & 15) as usize];
         for pl in 1..3usize {
             let mut y = 0;
             while y < ch4ss {
@@ -8792,6 +8863,7 @@ fn recon_b_inter(
                         cbx + (x << ss_hor),
                         cby + (y << ss_ver),
                         true,
+                        uv_txtp_seed,
                         fi,
                     )?;
                     x += txw;
@@ -8803,10 +8875,11 @@ fn recon_b_inter(
     Ok(())
 }
 
-/// Inter luma transform-partition walk (recon_tmpl.c:3293-3478). Mirrors the
-/// intra `recon_b_intra_luma_geom` partition geometry but invokes the inter
-/// residual path. Only NONE/SPLIT/H/V partitions are handled; deeper nestings
-/// fall back to a single transform of the resolved size.
+/// Inter luma transform-partition walk. Mirrors dav2d's `switch (b->tx_part)`
+/// in `dav2d_recon_b` (recon_tmpl.c:3309-3478) exactly: the transform-partition
+/// type defines the visitation order and per-tile transform size, which is
+/// load-bearing for the per-4x4 coefficient neighbour context (and hence the
+/// entropy stream). A naive raster tiling desyncs for non-square partitions.
 #[allow(clippy::too_many_arguments)]
 fn inter_luma_tx_walk(
     recon: &mut ReconCtx,
@@ -8820,25 +8893,110 @@ fn inter_luma_tx_walk(
     by: i32,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
-    let t_dim = &TXFM_DIMENSIONS[tx];
-    let tw4 = t_dim.w as i32;
-    let th4 = t_dim.h as i32;
-    let bs = b.bs as usize;
-    let bw4 = BLOCK_DIMENSIONS[bs][0] as i32;
-    let bh4 = BLOCK_DIMENSIONS[bs][1] as i32;
-    let w4 = imin(bw4, fi.bw - bx);
-    let h4 = imin(bh4, fi.bh - by);
-    // Raster walk of the resolved transform size across the block (handles
-    // NONE as a single tx and SPLIT/H/V as a uniform tiling — bit-exact for the
-    // uniform-partition cases the bring-up clip uses).
-    let mut y = 0;
-    while y < h4 {
-        let mut x = 0;
-        while x < w4 {
-            inter_residual_tx_8bpc(recon, msac, cdf_m, a, l, b, 0, tx, bx + x, by + y, false, fi)?;
-            x += tw4;
+    let tp = &crate::tables::TX_PART_TBL[b.bs as usize];
+    macro_rules! resid {
+        ($tx:expr, $x:expr, $y:expr) => {
+            inter_residual_tx_8bpc(recon, msac, cdf_m, a, l, b, 0, $tx, $x, $y, false, 0, fi)?
+        };
+    }
+    match unsafe { TxPartition::from_raw(b.tx_part) } {
+        TxPartition::None => {
+            resid!(tx, bx, by);
         }
-        y += th4;
+        TxPartition::Split => {
+            let t_dim = &TXFM_DIMENSIONS[tx];
+            let (tw4, th4) = (t_dim.w as i32, t_dim.h as i32);
+            resid!(tx, bx, by);
+            let have_v_split = bx + tw4 < fi.bw;
+            if have_v_split {
+                resid!(tx, bx + tw4, by);
+            }
+            if by + th4 >= fi.bh {
+                return Ok(());
+            }
+            resid!(tx, bx, by + th4);
+            if have_v_split {
+                resid!(tx, bx + tw4, by + th4);
+            }
+        }
+        TxPartition::H => {
+            let th4 = TXFM_DIMENSIONS[tx].h as i32;
+            resid!(tx, bx, by);
+            if by + th4 >= fi.bh {
+                return Ok(());
+            }
+            resid!(tx, bx, by + th4);
+        }
+        TxPartition::V => {
+            let tw4 = TXFM_DIMENSIONS[tx].w as i32;
+            resid!(tx, bx, by);
+            if bx + tw4 >= fi.bw {
+                return Ok(());
+            }
+            resid!(tx, bx + tw4, by);
+        }
+        TxPartition::H4 => {
+            let th4 = TXFM_DIMENSIONS[tx].h as i32;
+            for i in 0..4 {
+                let yy = by + i * th4;
+                resid!(tx, bx, yy);
+                if yy + th4 >= fi.bh {
+                    break;
+                }
+            }
+        }
+        TxPartition::V4 => {
+            let tw4 = TXFM_DIMENSIONS[tx].w as i32;
+            for i in 0..4 {
+                let xx = bx + i * tw4;
+                resid!(tx, xx, by);
+                if xx + tw4 >= fi.bw {
+                    break;
+                }
+            }
+        }
+        TxPartition::H5 => {
+            let tx_big = tp[TxPartition::H as usize] as usize;
+            let t_dim_small = &TXFM_DIMENSIONS[tx];
+            let (tw4_small, th4_small) = (t_dim_small.w as i32, t_dim_small.h as i32);
+            let th4_big = TXFM_DIMENSIONS[tx_big].h as i32;
+            resid!(tx, bx, by);
+            let have_v_split = bx + tw4_small < fi.bw;
+            if have_v_split {
+                resid!(tx, bx + tw4_small, by);
+            }
+            if by + th4_small >= fi.bh {
+                return Ok(());
+            }
+            resid!(tx_big, bx, by + th4_small);
+            if by + th4_small + th4_big < fi.bh {
+                resid!(tx, bx, by + th4_small + th4_big);
+                if have_v_split {
+                    resid!(tx, bx + tw4_small, by + th4_small + th4_big);
+                }
+            }
+        }
+        TxPartition::V5 => {
+            let tx_big = tp[TxPartition::V as usize] as usize;
+            let t_dim_small = &TXFM_DIMENSIONS[tx];
+            let (tw4_small, th4_small) = (t_dim_small.w as i32, t_dim_small.h as i32);
+            let tw4_big = TXFM_DIMENSIONS[tx_big].w as i32;
+            resid!(tx, bx, by);
+            let have_h_split = by + th4_small < fi.bh;
+            if have_h_split {
+                resid!(tx, bx, by + th4_small);
+            }
+            if bx + tw4_small >= fi.bw {
+                return Ok(());
+            }
+            resid!(tx_big, bx + tw4_small, by);
+            if bx + tw4_small + tw4_big < fi.bw {
+                resid!(tx, bx + tw4_small + tw4_big, by);
+                if have_h_split {
+                    resid!(tx, bx + tw4_small + tw4_big, by + th4_small);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -10738,6 +10896,13 @@ pub fn decode_sb(
                 let mix_inter = fi.is_inter_or_switch && *intra_region == 0;
                 let ctx1 = get_partition_ctx(a, l, b_dim, pl, by4, bx4);
                 let ctx2 = (ctx1 + pcc.ctx[0] as i32 * 4) as usize;
+                if std::env::var("RAV2D_PART_TRACE").is_ok() {
+                    eprintln!(
+                        "DSPLIT y={} x={} bs={} ctx2={} hh={} hv={} rng_in={}",
+                        *by, *bx, bs as i32, ctx2, have_h_split as i32,
+                        have_v_split as i32, msac.dbg_rng()
+                    );
+                }
                 let is_split = if mix_inter && b_dim[2] + b_dim[3] == 1 {
                     0u32
                 } else if !have_h_split || !have_v_split {
@@ -10778,6 +10943,12 @@ pub fn decode_sb(
                             dir = v_aspect as i32;
                         } else {
                             let ctx4 = (ctx1 + pcc.ctx[1] as i32 * 4) as usize;
+                            if std::env::var("RAV2D_PART_TRACE").is_ok() {
+                                eprintln!(
+                                    "DDIR y={} x={} bs={} ctx1={} pccctx1={} ctx4={} rng_in={}",
+                                    *by, *bx, bs as i32, ctx1, pcc.ctx[1], ctx4, msac.dbg_rng()
+                                );
+                            }
                             dir = msac.decode_bool_adapt(cdf_m.part_dir(pl, ctx4)) as i32;
                         }
                         assert!(pcc.part[dir as usize][0] != -1);
@@ -10858,6 +11029,16 @@ pub fn decode_sb(
             }
         }
 
+        if std::env::var("RAV2D_PART_TRACE").is_ok() {
+            eprintln!(
+                "DPART y={} x={} bs={} bp={} rng={}",
+                *by,
+                *bx,
+                bs as i32,
+                bp as i32,
+                msac.dbg_rng()
+            );
+        }
         dir += (dir != -1) as i32;
         if lbs == BlockSize::Invalid && cbs == BlockSize::Bs64x64 {
             *sdp_cfl_disallowed = (dir != -1 && dir != (*dir_ptr & 0x3)) as i32;

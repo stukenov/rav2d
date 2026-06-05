@@ -1772,9 +1772,11 @@ pub fn refmvs_find(
     // warp from corners
     if warp.is_some()
         && let Some(bml_b) = bml
-        && bml_b.mf & 2 != 0
-        && unsafe { bml_b.r#ref.r[0] } == ref0
-        && bml_b.warp_type != WarpedMotionType::Invalid as i8
+        && {
+            let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
+            bl_ref_idx == 0
+                || (unsafe { bml_b.r#ref.r[1] } == ref0 && bml_b.mf & 2 == 0)
+        }
     {
         let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
         let bl_mv = if bml_b.mf & 2 == 0 {
@@ -2322,7 +2324,7 @@ pub fn refmvs_find(
     }
 
     // warp bank + gmv + defaults
-    if let Some(warp_out) = warp
+    if let Some(ref mut warp_out) = warp
         && *warp_cnt < 4
     {
         debug_assert!((ref0 as usize) < TIP_FRAME && ref1 == -1);
@@ -2422,6 +2424,21 @@ pub fn refmvs_find(
         mvstack[n].cwp_idx = 8;
         mvstack[n].x_off = 0;
         mvstack[n].y_off = 0;
+    }
+
+    if let Some(ref w) = warp
+        && std::env::var("RAV2D_WARP_TRACE").is_ok()
+    {
+        eprintln!(
+            "WTRACE by4={} bx4={} ref0={} ref1={} warp_cnt={}",
+            by4, bx4, ref0, ref1, *warp_cnt
+        );
+        for n in 0..*warp_cnt as usize {
+            eprintln!(
+                "  WC[{}]: {} {} {} {} {} {} t={}",
+                n, w[n][0], w[n][1], w[n][2], w[n][3], w[n][4], w[n][5], w[n][6]
+            );
+        }
     }
 }
 
