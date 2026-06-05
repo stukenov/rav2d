@@ -3907,12 +3907,6 @@ fn decode_b(
     } else {
         b.is_intra = 1;
     }
-    if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
-        eprintln!(
-            "RISI y={} x={} intra={} ictx_intra={:?} n_ctx={} skipmode={} rng={}",
-            by, bx, b.is_intra, nx_intra, n_ctx, b.skip_mode, msac.dbg_rng()
-        );
-    }
 
     // Pre-compute spatial neighbour (nb) context values within SB.
     // These are used by intrabc, FSC, MRL, multi_mrl, DIP, morph_pred.
@@ -5566,12 +5560,6 @@ fn decode_b(
                         }
                     }
                     let mut cnt_rem = (n_ctx as i32) * 2 - cnt[0] as i32 - cnt[8] as i32;
-                    if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
-                        eprintln!(
-                            "RSREF y={} x={} n_ctx={} nx_r0={:?} nx_r1={:?} cnt={:?} rng={}",
-                            by, bx, n_ctx, nx_ref0, nx_ref1, cnt, msac.dbg_rng()
-                        );
-                    }
                     loop {
                         let cnt_cur = cnt[i as usize + 1] as i32;
                         cnt_rem -= cnt_cur;
@@ -5590,9 +5578,6 @@ fn decode_b(
             unsafe {
                 b.ref_pair.r[0] = ref0;
                 b.ref_pair.r[1] = -1;
-            }
-            if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
-                eprintln!("RREF y={} x={} ref0={} post_ref_rng={}", by, bx, ref0, msac.dbg_rng());
             }
 
             // --- sngl_ctx ---
@@ -5618,9 +5603,6 @@ fn decode_b(
                     + 2 * msac.decode_bool_adapt(cdf_m.tip_mode()) as u8;
             } else {
                 let mut allow_warp = false;
-                if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
-                    eprintln!("RWPRE y={} x={} pre_warp_rng={}", by, bx, msac.dbg_rng());
-                }
                 if imin(bw4, bh4) >= 2 && fi.warp_motion {
                     // get_warp_ctx (decode.c:2984): neighbour warp-motion ctx.
                     // a_sb_cache (above-SB-row cache) is only consulted for blocks
@@ -5649,24 +5631,9 @@ fn decode_b(
                         ref0,
                     );
                     allow_warp = msac.decode_bool_adapt(cdf_m.warp(warp_ctx as usize)) != 0;
-                    if std::env::var("RAV2D_WCTX").is_ok() && recon.frm_hdr.frame_offset == 4 {
-                        eprintln!(
-                            "RWCTX y={} x={} warp_ctx={} allow_warp={} a.mm[{}]={} a.ref0[{}]={}",
-                            by, bx, warp_ctx, allow_warp, bx4, a.motion_mode[bx4], bx4, a.r#ref[0][bx4]
-                        );
-                    }
                 }
                 if allow_warp {
-                    let dbg_wn = std::env::var("RAV2D_WCTX").is_ok()
-                        && recon.frm_hdr.frame_offset == 4;
-                    if dbg_wn {
-                        eprintln!("RWNMV y={} x={} fim={} pre_rng={}", by, bx, fi.force_integer_mv, msac.dbg_rng());
-                    }
-                    let wn = !fi.force_integer_mv && msac.decode_bool_adapt(cdf_m.warp_newmv()) == 0;
-                    if dbg_wn {
-                        eprintln!("RWNMV y={} x={} wn={} post_rng={}", by, bx, wn, msac.dbg_rng());
-                    }
-                    if wn {
+                    if !fi.force_integer_mv && msac.decode_bool_adapt(cdf_m.warp_newmv()) == 0 {
                         inter_mode = InterPredMode::WarpNewMv as u8;
                     } else {
                         inter_mode = InterPredMode::WarpMv as u8;
@@ -6098,18 +6065,6 @@ fn decode_b(
                     b.data.inter.filter = fi.subpel_filter_mode;
                 }
             }
-            if std::env::var("RAV2D_IP").is_ok() && recon.frm_hdr.frame_offset == 4 {
-                eprintln!(
-                    "IPARSE y={} x={} im={} mm={} wri={} wmvd={} filter={} ii={} warpii={} iimode={} wedge={} rng={}",
-                    by, bx,
-                    unsafe { b.data.inter.inter_mode }, unsafe { b.data.inter.motion_mode },
-                    unsafe { b.data.inter.warp_ref_idx }, unsafe { b.data.inter.warpmv_with_mvd },
-                    unsafe { b.data.inter.filter },
-                    (unsafe { b.data.inter.motion_mode } == MotionMode::InterIntra as u8) as i32,
-                    unsafe { b.data.inter.warp_ii }, unsafe { b.data.inter.interintra_mode },
-                    unsafe { b.data.inter.wedge_idx }, msac.dbg_rng()
-                );
-            }
         }
 
         // TX partition for inter
@@ -6500,15 +6455,6 @@ fn decode_b(
                         } else {
                             crate::env::warp_type(&recon.warpmv[0].matrix)
                         };
-                    if bx == 0 && by == 0 && std::env::var("RAV2D_WARP").is_ok() {
-                        let mm = &recon.warpmv[0].matrix;
-                        eprintln!(
-                            "RWDELTA wri={} bmat={:?} base={},{},{},{} mv={},{} final={:?} type={:?}",
-                            wri, bmat, base[2], base[3], base[4], base[5],
-                            unsafe { b.data.inter.mv[0].c.y }, unsafe { b.data.inter.mv[0].c.x },
-                            mm, recon.warpmv[0].wm_type
-                        );
-                    }
                 } else if motion_mode_v == MotionMode::WarpCausal as u8 {
                     let w4 = imin(bw4, fi.bw - bx);
                     let h4 = imin(bh4, fi.bh - by);
@@ -6789,14 +6735,6 @@ fn decode_b(
     if trace_blk {
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
     }
-    if std::env::var("RAV2D_WARP2").is_ok() && recon.frm_hdr.frame_offset == 4 {
-        eprintln!(
-            "REC poc={} y={} x={} intra={} intrabc={} im={} mm={} rng={}",
-            recon.frm_hdr.frame_offset, by, bx, b.is_intra, intrabc as i32,
-            unsafe { b.data.inter.inter_mode }, unsafe { b.data.inter.motion_mode },
-            msac.dbg_rng()
-        );
-    }
     if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
         recon_b_intra(
             recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
@@ -6825,9 +6763,6 @@ fn decode_b(
         if trace_blk {
             eprintln!("  CK post_inter_recon rng={}", msac.dbg_rng());
         }
-    }
-    if std::env::var("RAV2D_PR").is_ok() && recon.frm_hdr.frame_offset == 4 {
-        eprintln!("RPR y={} x={} intra={} post_recon_rng={}", by, bx, b.is_intra, msac.dbg_rng());
     }
 
     // SDP: record the luma-only block's intra direction mode + FSC flag into the
@@ -7340,19 +7275,6 @@ fn warp_affine_plane_8bpc(
                 mx,
                 my,
             );
-            if pl == 0 && bx == 0 && by == 0 && std::env::var("RAV2D_WARP").is_ok() {
-                eprintln!(
-                    "RWARP y={} x={} dx={} dy={} mx={} my={} abcd={:?} mat={:?}",
-                    y, x, dx, dy, mx, my, abcd, mat
-                );
-                for yy in 0..8 {
-                    let mut s = String::from("RWROW");
-                    for xx in 0..8 {
-                        s.push_str(&format!(" {}", dst[dst_sub + yy * dst_stride + xx]));
-                    }
-                    eprintln!("{s}");
-                }
-            }
             x += 8;
         }
         y += 8;
@@ -7462,7 +7384,6 @@ fn inter_residual_tx_8bpc(
         } else {
             (&a.ccoef[pl - 1][bx4..], &l.ccoef[pl - 1][by4..])
         };
-        let pre_rng = msac.dbg_rng();
         let eob = crate::recon::decode_coefs(
             msac,
             recon.cdf_coef,
@@ -7474,12 +7395,6 @@ fn inter_residual_tx_8bpc(
             &mut txtp,
             &mut res_ctx,
         );
-        if std::env::var("RAV2D_COEF").is_ok() && recon.frm_hdr.frame_offset == 4 {
-            eprintln!(
-                "RCOEF pl={} bx={} by={} tx={} eob={} txtp={} pre={} post={}",
-                pl, bx, by, tx, eob, txtp, pre_rng, msac.dbg_rng()
-            );
-        }
         if eob == i32::MIN {
             return Err(());
         }
@@ -7576,8 +7491,10 @@ fn inter_residual_tx_8bpc(
 }
 
 /// Reconstruct a single-reference inter block (8bpc): motion-compensate luma +
-/// chroma from the reference picture, then add the parsed residual transforms.
-/// Compound, warp, OBMC, interintra, TIP and scaled references are deferred.
+/// chroma from the reference picture (translational or warp-affine, dispatched
+/// on the block's motion_mode / derived warp params), then add the parsed
+/// residual transforms. Compound (ref pair), interintra blend, TIP and scaled
+/// references are deferred.
 #[allow(clippy::too_many_arguments)]
 fn recon_b_inter(
     recon: &mut ReconCtx,
@@ -7598,13 +7515,6 @@ fn recon_b_inter(
 ) -> Result<(), ()> {
     let refs = unsafe { b.ref_pair.r };
     let ref0 = refs[0];
-    if std::env::var("RAV2D_WARP2").is_ok() {
-        eprintln!(
-            "RB by={} bx={} ref0={} ref1={} mm={} im={} intra={} has_luma={}",
-            by, bx, ref0, refs[1], unsafe { b.data.inter.motion_mode },
-            unsafe { b.data.inter.inter_mode }, b.is_intra, has_luma
-        );
-    }
     if ref0 < 0 || ref0 as usize >= 7 {
         return Ok(());
     }
@@ -9782,22 +9692,6 @@ pub fn decode_sb(
                 } else {
                     msac.decode_bool_adapt(cdf_m.part_split(pl, ctx2))
                 };
-                if std::env::var("RAV2D_PART").is_ok() && recon.frm_hdr.frame_offset == 4 {
-                    eprintln!(
-                        "RPART y={} x={} bs={} pl={} ctx1={} ctx2={} is_split={} mix={} hh={} hv={} rng={}",
-                        *by,
-                        *bx,
-                        bs as i32,
-                        pl,
-                        ctx1,
-                        ctx2,
-                        is_split,
-                        mix_inter as i32,
-                        have_h_split as i32,
-                        have_v_split as i32,
-                        msac.dbg_rng()
-                    );
-                }
 
                 if is_split == 0 {
                     bp = BlockPartition::None;
@@ -9832,13 +9726,6 @@ pub fn decode_sb(
                         } else {
                             let ctx4 = (ctx1 + pcc.ctx[1] as i32 * 4) as usize;
                             dir = msac.decode_bool_adapt(cdf_m.part_dir(pl, ctx4)) as i32;
-                        }
-                        if std::env::var("RAV2D_DIR").is_ok() && recon.frm_hdr.frame_offset == 4 {
-                            eprintln!(
-                                "RDIR y={} x={} bs={} asp={} va={} ha={} bwh4ss={:?} dir={} pccctx1={} rng={}",
-                                *by, *bx, bs as i32, aspect, v_aspect as i32, h_aspect as i32,
-                                bwh4ss, dir, pcc.ctx[1], msac.dbg_rng()
-                            );
                         }
                         assert!(pcc.part[dir as usize][0] != -1);
                         bp = if dir != 0 {
