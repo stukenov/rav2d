@@ -709,7 +709,9 @@ fn inter_frame1_diag() {
 /// porting plan compound is a separate follow-up. Un-ignore once compound
 /// single-ref-pair MC + parse land. See `inter_frame1_diag`.
 #[test]
-#[ignore = "M3 WIP: frame needs same-ref compound MC+parse (out of single-ref scope)"]
+#[ignore = "M3 WIP: same-ref compound parse + MC + interintra now bit-exact \
+            (rows 0-23); remaining diffs are warp-delta warp-candidate derivation \
+            in the lower-right quadrant (single-ref warp subsystem)"]
 fn bit_exact_first_inter_frame() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
     if !path.exists() {
