@@ -1449,15 +1449,18 @@ pub fn cfl_gen_y_420_8bpc(
             for x in 0..n_left {
                 let c = x * 2;
                 let r = c + 1;
-                let l_idx = if n_left & 1 != 0 {
-                    if c > 0 { c - 1 } else { 0 }
+                // C (ipred_tmpl.c:1156): `(n_left & 1) ? c - 1 : imax(c - 1, 0)`.
+                // For odd n_left the left tap is NOT clamped at column 0 (reads the
+                // pixel one column left, i.e. relative -1); only the even case clamps.
+                let l_off: isize = if n_left & 1 != 0 {
+                    c as isize - 1
                 } else {
-                    imax(c as i32 - 1, 0) as usize
+                    imax(c as i32 - 1, 0) as isize
                 };
                 dst[dst_lp + x] = cfl_filter(
                     top_buf,
                     top_sp + c,
-                    top_sp + l_idx,
+                    (top_sp as isize + l_off) as usize,
                     top_sp + r,
                     b as usize,
                     top_buf,
@@ -1516,15 +1519,16 @@ pub fn cfl_gen_y_420_8bpc(
         for x in 0..n_left {
             let c = x * 2;
             let r = c + 1;
-            let l_idx = if n_left & 1 != 0 {
-                if c > 0 { c - 1 } else { 0 }
+            // C (ipred_tmpl.c:1201): odd n_left does not clamp the left tap at 0.
+            let l_off: isize = if n_left & 1 != 0 {
+                c as isize - 1
             } else {
-                imax(c as i32 - 1, 0) as usize
+                imax(c as i32 - 1, 0) as isize
             };
             dst[dst_lp + x] = cfl_filter(
                 src,
                 sp + c,
-                sp + l_idx,
+                (sp as isize + l_off) as usize,
                 sp + r,
                 b as usize,
                 tb,
@@ -1563,15 +1567,16 @@ pub fn cfl_gen_y_420_8bpc(
         for x in 0..n_left {
             let c = x * 2;
             let r = c + 1;
-            let l_idx = if n_left & 1 != 0 {
-                if c > 0 { c - 1 } else { 0 }
+            // C (ipred_tmpl.c:1240): odd n_left does not clamp the left tap at 0.
+            let l_off: isize = if n_left & 1 != 0 {
+                c as isize - 1
             } else {
-                imax(c as i32 - 1, 0) as usize
+                imax(c as i32 - 1, 0) as isize
             };
             dst[dst_lp + x] = cfl_filter(
                 src,
                 sp + c,
-                sp + l_idx,
+                (sp as isize + l_off) as usize,
                 sp + r,
                 b as usize,
                 src,
@@ -1915,12 +1920,18 @@ fn cfl_luma_left(
 fn cfl_luma_top(
     ytop: &[u8],
     xl: usize,
+    base: usize,
     ystride: isize,
     ss_hor: usize,
     ss_ver: usize,
     flags: u32,
     is_top_sb: bool,
 ) -> i32 {
+    // `xl` is an absolute index into `ytop`; `base` is the block's left-edge index
+    // so the left-neighbour clamp matches dav2d's block-relative `imax(0, xl - 1)`
+    // (dav2d's `ytop` pointer is pre-offset to the block, so its column 0 is the
+    // clamp boundary — here that boundary is `base`).
+    let left = imax(base as i32, xl as i32 - 1) as usize;
     if ss_hor | ss_ver == 0 {
         return (ytop[xl] as i32) << 3;
     }
@@ -1929,10 +1940,7 @@ fn cfl_luma_top(
         return if flt == CFL_FLT_TYPE_GAUSS as u32 {
             (ytop[xl] as i32) << 3
         } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
-            (ytop[imax(0, xl as i32 - 1) as usize] as i32
-                + 2 * ytop[xl] as i32
-                + ytop[xl + 1] as i32)
-                << 1
+            (ytop[left] as i32 + 2 * ytop[xl] as i32 + ytop[xl + 1] as i32) << 1
         } else {
             (ytop[xl] as i32 + ytop[xl + 1] as i32) << 2
         };
@@ -1940,16 +1948,16 @@ fn cfl_luma_top(
     let bottom = if is_top_sb { 0isize } else { ystride };
     let flt = flags & 3;
     if flt == CFL_FLT_TYPE_GAUSS as u32 {
-        ytop[imax(0, xl as i32 - 1) as usize] as i32
+        ytop[left] as i32
             + 4 * ytop[xl] as i32
             + ytop[xl + 1] as i32
             + ytop[(xl as isize - bottom) as usize] as i32
             + ytop[(xl as isize + bottom) as usize] as i32
     } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
-        ytop[imax(0, xl as i32 - 1) as usize] as i32
+        ytop[left] as i32
             + 2 * ytop[xl] as i32
             + ytop[xl + 1] as i32
-            + ytop[(imax(0, xl as i32 - 1) as isize + bottom) as usize] as i32
+            + ytop[(left as isize + bottom) as usize] as i32
             + 2 * ytop[(xl as isize + bottom) as usize] as i32
             + ytop[(xl as isize + bottom) as usize + 1] as i32
     } else {
@@ -2129,6 +2137,7 @@ pub fn cfl_pred_8bpc(
             l = cfl_luma_top(
                 ytop,
                 ytop_off + xl,
+                ytop_off,
                 ystride,
                 ss_hor,
                 ss_ver,

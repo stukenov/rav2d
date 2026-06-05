@@ -10768,9 +10768,21 @@ fn cfl_predict_8bpc(
         // ---- CFL EXPLICIT / IMPLICIT (recon_tmpl.c:2936-2970) --------------
         let implicit = cfl_type == 1; // CFL_IMPLICIT
         let coff = (ssby * cstride + ssbx) * 4;
-        // ytop / utop / vtop: row above current src (top-SB-edge prefilter not
-        // wired; only reachable at frame top where has_top is false → unused).
-        let ytop_off = (ysrc_off as isize - ((1 + ss_ver) as isize) * ystride as isize) as usize;
+        // ytop / utop / vtop: source rows above the current block used for the CfL
+        // top-edge reference (recon_tmpl.c:2955-2962). At an internal SB top-edge
+        // dav2d reads `ytop_sb_edge` (the `prefilter_data` copy of the row just
+        // above the SB). In single-thread / filters-off decode `prefilter_data`
+        // aliases the current plane with `prefilter_data_full_frame` set, so the
+        // luma SB-edge row resolves to `ysrc - ystride` (one luma row up) and is
+        // downsampled with `bottom = 0` via the CFL_IS_TOP_SB_EDGE flag; the
+        // in-plane fallback instead starts `1 + ss_ver` rows up with
+        // `bottom = ystride`. The chroma `utop`/`vtop` offsets are `coff - cstride`
+        // in both branches (single-thread alias), so only `ytop_off` differs.
+        let ytop_off = if is_top_sb_edge && has_top {
+            (ysrc_off as isize - ystride as isize) as usize
+        } else {
+            (ysrc_off as isize - ((1 + ss_ver) as isize) * ystride as isize) as usize
+        };
         let utop_off = (coff as isize - cstride as isize) as usize;
         let vtop_off = utop_off;
 
@@ -10905,12 +10917,24 @@ fn cfl_predict_8bpc(
     // SAFETY: luma plane is a disjoint allocation from chroma planes.
     let ysrc: &[u8] =
         unsafe { std::slice::from_raw_parts(recon.dst_y.as_ptr(), recon.dst_y.len()) };
+    // Top-SB-edge prefilter source. In single-thread / filters-off decode dav2d's
+    // `prefilter_data` aliases the current plane (decode.c:4950-4952, 5026-5029)
+    // and `prefilter_data_full_frame` is set, so `ytop_sb_edge` resolves to the
+    // luma row directly above this block (recon_tmpl.c:2945-2948). Passing it
+    // explicitly makes `cfl_gen_y` take the `top_sb_edge != NULL` branch (b=0),
+    // which differs from the in-plane fallback (b=src_stride) at internal SB
+    // top-edges. Only set at `is_top_sb_edge`; otherwise dav2d passes NULL.
+    let ytop_sb_edge: Option<(&[u8], usize)> = if is_top_sb_edge && has_top {
+        Some((ysrc, ysrc_off - ystride))
+    } else {
+        None
+    };
     cfl_gen_y_420_8bpc(
         &mut luma,
         luma_top_stride,
         ysrc,
         ysrc_off,
-        None, // ytop_sb_edge (top-SB-edge prefilter not wired; frame-top only)
+        ytop_sb_edge,
         ystride,
         (refw - subleft) as usize,
         refh as usize,
