@@ -6924,7 +6924,7 @@ fn decode_b(
     // to the DRL-selected predictor from the spatial refmvs candidate list, then
     // splat the final BV into the refmvs grid. For intra (non-IntraBC) blocks:
     // splat an "intra" entry (invalid mv) so later IntraBC blocks skip them.
-    if fi.allow_intrabc && has_luma && b.is_intra != 0 {
+    if (fi.allow_intrabc || fi.is_inter_or_switch) && has_luma && b.is_intra != 0 {
         let by4r = (by & 63) as usize;
         if intrabc {
             use crate::levels::{Mv, MvXY, RefPair};
@@ -7045,16 +7045,39 @@ fn decode_b(
                 ..Default::default()
             };
             let s_off = by4r * 128 + (bx & 127) as usize;
-            let t_src = crate::refmvs::TemporalBlock::default();
-            crate::refmvs::splat_mv(
-                &mut recon.rt.r[s_off..],
-                &mut s_src,
-                None,
-                0,
-                &t_src,
-                bw4,
-                bh4,
-            );
+            // splat_intraref temporal block: ref=-1, mv=INVALID_TRAJ
+            // (decode.c:727-731). Written into the temporal grid (rf.rp) for
+            // inter/switch frames so later frames don't read stale candidates at
+            // this position; matches dav2d gating on seq_hdr->ref_frame_mvs.
+            let mut t_src = crate::refmvs::TemporalBlock::default();
+            unsafe {
+                t_src.r#ref.pair = -1;
+                t_src.mv.n = crate::refmvs::INVALID_TRAJ as u32 * 0x10001;
+            }
+            let write_temporal = recon.seq_hdr.ref_frame_mvs && !recon.cur_mvs.is_empty();
+            if write_temporal {
+                let t_stride = recon.rf.rp_stride;
+                let t_off = (by >> 1) as isize * t_stride + (bx >> 1) as isize;
+                crate::refmvs::splat_mv(
+                    &mut recon.rt.r[s_off..],
+                    &mut s_src,
+                    Some(&mut recon.cur_mvs[t_off as usize..]),
+                    t_stride,
+                    &t_src,
+                    bw4,
+                    bh4,
+                );
+            } else {
+                crate::refmvs::splat_mv(
+                    &mut recon.rt.r[s_off..],
+                    &mut s_src,
+                    None,
+                    0,
+                    &t_src,
+                    bw4,
+                    bh4,
+                );
+            }
             if recon.seq_hdr.refmv_bank {
                 crate::refmvs::bank_update(
                     &mut recon.rt.bank,
