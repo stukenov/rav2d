@@ -1605,3 +1605,124 @@ fn bit_exact_full_clip_filmgrain() {
         );
     }
 }
+
+/// Reconstruct-and-compare a full clip (in-loop filters off on both decoders);
+/// returns one failure string per non-bit-exact plane. Same coding-order
+/// best-match harness as the per-clip `bit_exact_full_clip_*` gates.
+fn full_clip_failures(path: &PathBuf) -> Vec<String> {
+    let reference = dav2d_decode_invisible(path);
+    let got = rav2d_decode(path);
+    let mut failures = Vec::new();
+    if reference.is_empty() {
+        failures.push("dav2d produced no frames".into());
+        return failures;
+    }
+    if got.len() != reference.len() {
+        failures.push(format!(
+            "frame count mismatch (rav2d={}, dav2d={})",
+            got.len(),
+            reference.len()
+        ));
+        return failures;
+    }
+    let mut used = vec![false; reference.len()];
+    for (gi, g) in got.iter().enumerate() {
+        let mut best: Option<(usize, usize)> = None;
+        for (ri, r) in reference.iter().enumerate() {
+            if used[ri] || (r.w, r.h, r.bpc, r.layout) != (g.w, g.h, g.bpc, g.layout) {
+                continue;
+            }
+            let diff: usize = (0..3)
+                .map(|pl| {
+                    r.planes[pl]
+                        .iter()
+                        .zip(g.planes[pl].iter())
+                        .filter(|(a, b)| a != b)
+                        .count()
+                })
+                .sum();
+            if best.is_none_or(|(_, bd)| diff < bd) {
+                best = Some((ri, diff));
+            }
+        }
+        let Some((ri, _)) = best else {
+            failures.push(format!("rav2d frame {gi}: no dav2d match"));
+            continue;
+        };
+        used[ri] = true;
+        let r = &reference[ri];
+        let (ssh, _ssv) = ss(r.layout);
+        for pl in 0..3 {
+            let rp = &r.planes[pl];
+            let gp = &g.planes[pl];
+            if rp.len() != gp.len() {
+                failures.push(format!(
+                    "frame[{gi}] plane {pl} size differs ({} vs {})",
+                    rp.len(),
+                    gp.len()
+                ));
+                continue;
+            }
+            let diff = rp.iter().zip(gp.iter()).filter(|(a, b)| a != b).count();
+            if diff != 0 {
+                let first = rp.iter().zip(gp.iter()).position(|(a, b)| a != b).unwrap();
+                let stride = if pl == 0 { r.w } else { (r.w + ssh) >> ssh } as usize;
+                failures.push(format!(
+                    "frame[{gi}] plane {pl}: {diff}/{} bytes differ; first @ ({},{}) ref={} got={}",
+                    rp.len(),
+                    first % stride,
+                    first / stride,
+                    rp[first],
+                    gp[first]
+                ));
+            }
+        }
+    }
+    failures
+}
+
+/// Full-corpus reconstruction gate (in-loop filters off): EVERY coding-order
+/// frame of EVERY shipped conformance clip must reconstruct bit-exact vs dav2d.
+/// The dedicated `bit_exact_full_clip_*` gates above pin individual multi-frame
+/// inter clips; this sweep guarantees the whole corpus stays bit-exact end to
+/// end (intra + inter: single-ref/compound MC, warp, OBMC/interintra, TIP,
+/// opfl_pred, delta-q, segmentation, lossless, palette, multi-superblock-row).
+///
+/// WIP (#[ignore]d): 7/9 clips are full-clip bit-exact. The remaining two have
+/// inter-frame reconstruction diffs — `bus.64x64.l5.lossless` (inter WHT residual
+/// path) and `bus.64x64.l5.opfl0-refinemv0` (frame[2+], opfl-refine-disabled
+/// config). Keyframes of both are bit-exact.
+#[test]
+#[ignore = "WIP: lossless + opfl0 inter frames not yet bit-exact (7/9 clips pass)"]
+fn bit_exact_full_clip_sweep() {
+    let clips = [
+        "avm-v14.1.0-bus.64x64.l5.obu",
+        "avm-v14.1.0-bus.64x64.l5.lossless.obu",
+        "avm-v14.1.0-bus.64x64.l5.opfl0-refinemv0.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp0.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp1.obu",
+        "avm-v14.1.0-bus.352x288.l5.seg1.obu",
+        "avm-v14.1.0-bus.352x288.l10.deltaq1.obu",
+        "avm-v14.1.0-bus.352x288.l1.partial_lossless.obu",
+        "avm-v14.1.0-hm.64x64.l5.filmgrain.obu",
+    ];
+    let mut all = Vec::new();
+    for clip in clips {
+        let path = media(clip);
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            continue;
+        }
+        let failures = full_clip_failures(&path);
+        if failures.is_empty() {
+            eprintln!("{clip}: full clip bit-exact");
+        } else {
+            for f in &failures {
+                all.push(format!("{clip}: {f}"));
+            }
+        }
+    }
+    if !all.is_empty() {
+        panic!("full-clip sweep not bit-exact:\n  {}", all.join("\n  "));
+    }
+}
