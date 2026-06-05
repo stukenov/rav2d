@@ -3063,15 +3063,44 @@ fn filter_sbrow(
             sby,
             start_of_tile_row,
         );
-        crate::deblock::deblock_sbrow_rows(
-            &mut dctx,
-            dst_y,
-            y_off0 as usize,
-            dst_u,
-            dst_v,
-            uv_off0 as usize,
-            sby,
-        );
+        if std::env::var("RAV2D_DBCOLSTRACE").is_ok()
+            && sby <= 1
+            && frame_hdr.frame_type == crate::headers::FrameType::Key
+        {
+            let s = fp.uv_stride.unsigned_abs();
+            for gy in 26..40 {
+                for xx in 40..56 {
+                    let idx = gy as usize * s + xx as usize;
+                    if idx < dst_u.len() {
+                        eprintln!("DBCOLU {} {} {}", xx, gy, dst_u[idx]);
+                    }
+                }
+            }
+        }
+        if std::env::var("RAV2D_NO_DBROWS").is_err() {
+            crate::deblock::deblock_sbrow_rows(
+                &mut dctx,
+                dst_y,
+                y_off0 as usize,
+                dst_u,
+                dst_v,
+                uv_off0 as usize,
+                sby,
+            );
+        }
+        if std::env::var("RAV2D_DBTRACE").is_ok()
+            && frame_hdr.frame_type == crate::headers::FrameType::Key
+        {
+            let s = fp.uv_stride.unsigned_abs();
+            for gy in 26..40 {
+                for xx in 40..56 {
+                    let idx = gy as usize * s + xx as usize;
+                    if idx < dst_u.len() {
+                        eprintln!("DBPXU {} {} {}", xx, gy, dst_u[idx]);
+                    }
+                }
+            }
+        }
     }
     // dav2d's gate also enables copy_db when CDEF is on, because the *multi*-
     // threaded CDEF path reads `lr_db_line` across the sbrow/tile-row seam. In
@@ -3377,6 +3406,13 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
             frame_hdr.skip_mode_enabled, frame_hdr.warp_motion, seq_hdr.masked_compound,
             frame_hdr.motion_modes, frame_hdr.tip.frame_mode, frame_hdr.show_immediate,
             frame_hdr.disable_cdf_update, frame_hdr.subpel_filter_mode,
+        );
+        eprintln!(
+            "FINFO2 sb128={} sbh={} sb256w={} bw={} bh={} w={} h={} cdef={} restore_planes_hdr lr={:?} ccso={:?}",
+            frame_hdr.sb128, fc.sbh, fc.sb256w, fc.bw, fc.bh,
+            frame_hdr.width, frame_hdr.height, seq_hdr.cdef,
+            [frame_hdr.restoration.p[0].restoration_type, frame_hdr.restoration.p[1].restoration_type, frame_hdr.restoration.p[2].restoration_type],
+            [frame_hdr.ccso.p[0].enabled, frame_hdr.ccso.p[1].enabled, frame_hdr.ccso.p[2].enabled],
         );
     }
 
@@ -6500,8 +6536,16 @@ fn decode_b(
                 }
             }
             if has_chroma {
-                let cbw4u = 1usize << cb_dim[2];
-                let mask: u64 = (!0u64 >> (64 - cbw4u)) << cbx4;
+                // lossless_mask_uv is a subsampled-chroma grid, so it must be
+                // written with subsampled coordinates and dimensions (dav2d
+                // decode.c:1554-1558,3372-3385: cbx4/cby4 = (cbx&63)/(cby&63) >>
+                // ss, cbw4/cbh4 = cb_dim >> ss). Using the non-subsampled x/dims
+                // corrupted the chroma lossless mask on subsampled (4:2:0) clips.
+                let ccbx4 = ((cbx & 63) >> ss_hor) as usize;
+                let ccby4 = ((cby & 63) >> ss_ver) as usize;
+                let ccbw4 = (cb_dim[0] as i32 >> ss_hor) as usize;
+                let ccbh4 = (cb_dim[1] as i32 >> ss_ver) as usize;
+                let mask: u64 = (!0u64 >> (64 - ccbw4)) << ccbx4;
                 let ss_mask: u64 = if ss_hor != 0 { 0xff } else { 0xffff };
                 let sh = 16 >> ss_hor;
                 let parts = [
@@ -6510,9 +6554,8 @@ fn decode_b(
                     ((mask >> (sh * 2)) & ss_mask) as u16,
                     ((mask >> (sh * 3)) & ss_mask) as u16,
                 ];
-                let cbh4u = 1usize << cb_dim[3];
-                for y in 0..cbh4u {
-                    let row = &mut m.lossless_mask_uv[cby4 + y];
+                for y in 0..ccbh4 {
+                    let row = &mut m.lossless_mask_uv[ccby4 + y];
                     for k in 0..4 {
                         if parts[k] != 0 {
                             row[k] |= parts[k];
