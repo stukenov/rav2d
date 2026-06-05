@@ -3534,7 +3534,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
 
 /// Clone a `Picture`'s pixel planes into a fresh independently-owned allocation
 /// (the output path takes ownership while references keep the shared `Arc`).
-fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
+pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
     let allocator: std::sync::Arc<dyn crate::picture::PicAllocator> =
         std::sync::Arc::new(crate::picture::DefaultPicAllocator::new());
     let dst = match crate::picture::Picture::alloc(

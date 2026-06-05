@@ -2667,10 +2667,22 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             if c.refs[idx].p.frame_hdr.is_none() {
                 return Err(Rav2dError::InvalidData);
             }
+            // dav2d obu.c: requires the referenced picture's pixel data
+            // (`c->refs[idx].p.p.data[0]`) to be present before it can be queued.
+            let ref_pic = match c.refs[idx].p.pic.as_ref() {
+                Some(p) if p.has_data() => p.clone(),
+                _ => return Err(Rav2dError::InvalidData),
+            };
             if c.strict_std_compliance && !c.refs[idx].p.showable {
                 return Err(Rav2dError::InvalidData);
             }
-            // STUB: queue referenced frame for display output (show_existing_frame path)
+            // dav2d obu.c: dav2d_queue_output(c, &c->refs[idx].p) re-displays the
+            // referenced stored picture. With output_invisible_frames this is a
+            // plain append; rav2d emits in decode order, so push an independently
+            // owned clone of the referenced reconstruction onto the output queue.
+            c.frame_out.push(crate::decode::clone_picture(&ref_pic));
+            // dav2d obu.c: a key-frame show_existing_frame copies the referenced
+            // slot into every other ref slot and clears its showable flag.
             if c.refs[idx]
                 .p
                 .frame_hdr
@@ -2684,7 +2696,11 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                         continue;
                     }
                     c.refs[i].p = c.refs[r].p.clone();
+                    c.refs[i].cdf = c.refs[r].cdf.clone();
                     c.refs[i].segmap = c.refs[r].segmap.clone();
+                    // dav2d obu.c: dav2d_ref_dec(&c->refs[i].refmvs) drops the
+                    // motion field for the overwritten slot (no inc back).
+                    c.refs[i].refmvs = None;
                 }
             }
             c.frame_hdr = None;
