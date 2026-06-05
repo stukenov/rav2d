@@ -2530,7 +2530,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     // into that padding (matching dav2d, whose plane buffers are likewise
     // padded). Span the slices over the *allocated* height so those overhang
     // writes stay in bounds rather than panicking on the cropped height.
-    let aligned_h: usize = ((cur_pic.p.h as usize).max(0) + 127) & !127;
+    let aligned_h: usize = ((cur_pic.p.h.max(0) as usize) + 127) & !127;
     let y_h: usize = aligned_h;
     let uv_h: usize = if seq_hdr.layout == crate::headers::PixelLayout::I400 {
         0
@@ -9325,8 +9325,8 @@ fn recon_b_inter(
                     let base_off = 4
                         * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
                     let dst_off = base_off
-                        + ((y * 4 >> ss_ver) as usize) * uv_stride
-                        + ((x * 4 >> ss_hor) as usize);
+                        + (((y * 4) >> ss_ver) as usize) * uv_stride
+                        + (((x * 4) >> ss_hor) as usize);
                     for pl in 1..3usize {
                         let dst: &mut [u8] = if pl == 1 {
                             &mut recon.dst_u[dst_off..]
