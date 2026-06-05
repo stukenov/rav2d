@@ -1348,16 +1348,13 @@ fn bit_exact_full_clip_bus64() {
 /// frame with identical dimensions and fewest pixel diffs before the bit-exact
 /// assertion.
 ///
-/// Status: the keyframe (poc0) and the first inter frame (poc4 — single-ref MC,
-/// warp-affine, OBMC/interintra, segmentation) are bit-exact. The three
-/// frame_mode=2 TIP frames (poc2/1/3) are NOT yet bit-exact across multiple
-/// superblock rows: dav2d reconstructs a frame_mode=2 TIP frame with a dedicated
-/// no-entropy `tip_frame_recon_sb` path (decode.c:4418/4516), and rav2d's TIP
-/// frame recon currently completes only the first 128px superblock row before
-/// the multi-SB-row TIP MV grid / trajectory handling diverges and the frame
-/// errors out. Un-ignore once frame_mode=2 TIP multi-SB-row recon is bit-exact.
+/// All six coding-order frames are bit-exact: the keyframe (poc0), the first
+/// inter frame (poc4 — single-ref MC, warp-affine, OBMC/interintra,
+/// segmentation), and the three frame_mode=2 whole-frame TIP frames (poc2/1/3).
+/// The TIP frames carry no entropy data; each superblock is reconstructed from a
+/// synthesized skip_txfm TIP block (`tip_frame_recon_sb`, decode.c:4381) driven
+/// by the projected temporal-MV grid, which is reprojected per superblock row.
 #[test]
-#[ignore = "WIP: frame_mode=2 TIP frames (poc2/1/3) not yet bit-exact across multiple superblock rows"]
 fn bit_exact_full_clip_seg1() {
     let path = media("avm-v14.1.0-bus.352x288.l5.seg1.obu");
     if !path.exists() {

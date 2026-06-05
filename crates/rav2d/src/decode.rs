@@ -2262,90 +2262,100 @@ pub fn decode_tile_sbrow_entropy(
             );
         }
 
+        // frame_mode==2 whole-frame TIP superblocks are not entropy decoded
+        // (decode.c:4479-4503): they skip the CDEF-index reset and the per-SB
+        // loop-restoration info read, synthesizing a single TIP block per SB
+        // instead. Those two reads only apply to the entropy/decode_sb path.
+        let is_tip_frame = frm_hdr.tip.frame_mode == 2;
+
         // Reset CDEF indices for this superblock's coverage in the lf mask.
-        match root_bs {
-            BlockSize::Bs64x64 => {
-                let idx = (((bx & 0x30) >> 4) + ((by & 0x30) >> 2)) as usize;
-                lf_mask[lf_idx].cdef_idx[idx] = -1;
-            }
-            BlockSize::Bs128x128 => {
-                let idx = (((bx & 32) >> 4) + ((by & 32) >> 2)) as usize;
-                lf_mask[lf_idx].cdef_idx[idx] = -1;
-                lf_mask[lf_idx].cdef_idx[idx + 1] = -1;
-                lf_mask[lf_idx].cdef_idx[idx + 4] = -1;
-                lf_mask[lf_idx].cdef_idx[idx + 5] = -1;
-            }
-            BlockSize::Bs256x256 => {
-                for k in 0..16 {
-                    lf_mask[lf_idx].cdef_idx[k] = -1;
+        if !is_tip_frame {
+            match root_bs {
+                BlockSize::Bs64x64 => {
+                    let idx = (((bx & 0x30) >> 4) + ((by & 0x30) >> 2)) as usize;
+                    lf_mask[lf_idx].cdef_idx[idx] = -1;
                 }
+                BlockSize::Bs128x128 => {
+                    let idx = (((bx & 32) >> 4) + ((by & 32) >> 2)) as usize;
+                    lf_mask[lf_idx].cdef_idx[idx] = -1;
+                    lf_mask[lf_idx].cdef_idx[idx + 1] = -1;
+                    lf_mask[lf_idx].cdef_idx[idx + 4] = -1;
+                    lf_mask[lf_idx].cdef_idx[idx + 5] = -1;
+                }
+                BlockSize::Bs256x256 => {
+                    for k in 0..16 {
+                        lf_mask[lf_idx].cdef_idx[k] = -1;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
 
         // Per-plane loop-restoration unit info.
         let sbsz = sb_step * 4;
-        for p in 0..3 {
-            let (ss_ver, ss_hor) = if p == 0 {
-                (0, 0)
-            } else {
-                (fi.ss_ver, fi.ss_hor)
-            };
-            let rtype_u8 = frame_hdr.restoration.p[p].restoration_type;
-            if rtype_u8 == RestorationType::None as u8 {
-                continue;
-            }
-            let tx = (4 * (bx - col_start)) >> ss_hor;
-            let ty = (4 * (by - row_start)) >> ss_ver;
-            let unit_sz_log2 = frame_hdr.restoration.unit_size[(p != 0) as usize] as i32;
-            let unit_sz = 1i32 << unit_sz_log2;
-            let mask = unit_sz - 1;
-            if (tx | ty) & mask != 0 {
-                continue;
-            }
-            let tw = (col_end * 4) >> ss_hor;
-            let th = (row_end * 4) >> ss_ver;
-            let half_unit = unit_sz >> 1;
-            let fx = (4 * bx) >> ss_hor;
-            let fy = (by * 4) >> ss_ver;
-            if (ty != 0 && fy + half_unit > th) || (tx != 0 && fx + half_unit > tw) {
-                continue;
-            }
-
-            let frame_type = match rtype_u8 {
-                1 => RestorationType::PcWiener,
-                2 => RestorationType::NsWiener,
-                3 => RestorationType::Switchable,
-                _ => RestorationType::None,
-            };
-
-            let sbw = sbsz >> ss_hor;
-            let sbh = sbsz >> ss_ver;
-            let lruw = imax(1, imin(tw - fx + half_unit, sbw) >> unit_sz_log2);
-            let lruh = imax(1, imin(th - fy + half_unit, sbh) >> unit_sz_log2);
-            let vsh = unit_sz_log2 - 7 + ss_ver;
-            let hsh = unit_sz_log2 - 7 + ss_hor;
-            let mut sb_idx = (by >> 6) * sb256w + (bx >> 6);
-            let start_unit_idx = (((by & 0x30) >> 2) + ((bx & 0x30) >> 4)) as usize;
-
-            for _y in 0..lruh {
-                for x in 0..lruw {
-                    let unit_idx = start_unit_idx;
-                    let lr_slot = (sb_idx + (x << hsh)) as usize;
-                    let ns_plane = &frame_hdr.restoration.p[p].ns;
-                    read_restoration_info(
-                        msac,
-                        &mut ts.cdf.m,
-                        &mut ts.ns_wiener_bank[p],
-                        &mut lr_mask[lr_slot].lr[p][unit_idx],
-                        p,
-                        frame_type,
-                        ns_plane,
-                    );
+        if !is_tip_frame {
+            for p in 0..3 {
+                let (ss_ver, ss_hor) = if p == 0 {
+                    (0, 0)
+                } else {
+                    (fi.ss_ver, fi.ss_hor)
+                };
+                let rtype_u8 = frame_hdr.restoration.p[p].restoration_type;
+                if rtype_u8 == RestorationType::None as u8 {
+                    continue;
                 }
-                sb_idx += sb256w << vsh;
+                let tx = (4 * (bx - col_start)) >> ss_hor;
+                let ty = (4 * (by - row_start)) >> ss_ver;
+                let unit_sz_log2 = frame_hdr.restoration.unit_size[(p != 0) as usize] as i32;
+                let unit_sz = 1i32 << unit_sz_log2;
+                let mask = unit_sz - 1;
+                if (tx | ty) & mask != 0 {
+                    continue;
+                }
+                let tw = (col_end * 4) >> ss_hor;
+                let th = (row_end * 4) >> ss_ver;
+                let half_unit = unit_sz >> 1;
+                let fx = (4 * bx) >> ss_hor;
+                let fy = (by * 4) >> ss_ver;
+                if (ty != 0 && fy + half_unit > th) || (tx != 0 && fx + half_unit > tw) {
+                    continue;
+                }
+
+                let frame_type = match rtype_u8 {
+                    1 => RestorationType::PcWiener,
+                    2 => RestorationType::NsWiener,
+                    3 => RestorationType::Switchable,
+                    _ => RestorationType::None,
+                };
+
+                let sbw = sbsz >> ss_hor;
+                let sbh = sbsz >> ss_ver;
+                let lruw = imax(1, imin(tw - fx + half_unit, sbw) >> unit_sz_log2);
+                let lruh = imax(1, imin(th - fy + half_unit, sbh) >> unit_sz_log2);
+                let vsh = unit_sz_log2 - 7 + ss_ver;
+                let hsh = unit_sz_log2 - 7 + ss_hor;
+                let mut sb_idx = (by >> 6) * sb256w + (bx >> 6);
+                let start_unit_idx = (((by & 0x30) >> 2) + ((bx & 0x30) >> 4)) as usize;
+
+                for _y in 0..lruh {
+                    for x in 0..lruw {
+                        let unit_idx = start_unit_idx;
+                        let lr_slot = (sb_idx + (x << hsh)) as usize;
+                        let ns_plane = &frame_hdr.restoration.p[p].ns;
+                        read_restoration_info(
+                            msac,
+                            &mut ts.cdf.m,
+                            &mut ts.ns_wiener_bank[p],
+                            &mut lr_mask[lr_slot].lr[p][unit_idx],
+                            p,
+                            frame_type,
+                            ns_plane,
+                        );
+                    }
+                    sb_idx += sb256w << vsh;
+                }
             }
-        }
+        } // end if !is_tip_frame (loop-restoration info read)
 
         let mut dir = 0i32;
         let mut sdp_cfl_disallowed = 0i32;
@@ -2419,29 +2429,48 @@ pub fn decode_tile_sbrow_entropy(
             }
         }
 
-        decode_sb(
-            fi,
-            &mut bx_m,
-            &mut by_m,
-            &mut cbx,
-            &mut cby,
-            &mut intra_region,
-            &mut sdp_cfl_disallowed,
-            crate::internal::PASS_ALL,
-            &mut a_arr[a_idx],
-            l,
-            msac,
-            &mut ts.cdf.m,
-            &mut ts.cdf.dmv,
-            &mut recon,
-            part_w,
-            &mut part_w_idx,
-            part_r,
-            &mut part_r_idx,
-            root_bs,
-            c_root_bs,
-            &mut dir,
-        )?;
+        if is_tip_frame {
+            // frame_mode==2 whole-frame TIP: there is no entropy data for this
+            // superblock. dav2d (tip_frame_recon_sb, decode.c:4381-4434)
+            // synthesizes a single skip_txfm TIP block covering the whole SB and
+            // reconstructs it via recon_b's TIP path. No bits are read.
+            tip_frame_recon_sb(
+                &mut recon,
+                msac,
+                &mut ts.cdf.m,
+                &mut a_arr[a_idx],
+                l,
+                bx,
+                by,
+                root_bs,
+                c_root_bs,
+                fi,
+            )?;
+        } else {
+            decode_sb(
+                fi,
+                &mut bx_m,
+                &mut by_m,
+                &mut cbx,
+                &mut cby,
+                &mut intra_region,
+                &mut sdp_cfl_disallowed,
+                crate::internal::PASS_ALL,
+                &mut a_arr[a_idx],
+                l,
+                msac,
+                &mut ts.cdf.m,
+                &mut ts.cdf.dmv,
+                &mut recon,
+                part_w,
+                &mut part_w_idx,
+                part_r,
+                &mut part_r_idx,
+                root_bs,
+                c_root_bs,
+                &mut dir,
+            )?;
+        }
 
         // Persist running delta-q state for the next superblock / sbrow.
         sb_last_qidx = recon.last_qidx;
@@ -2490,8 +2519,11 @@ pub fn decode_tile_sbrow_entropy(
         return Err(());
     }
 
-    // Error out on symbol-decoder overread.
-    if msac.cnt() <= -15 {
+    // Error out on symbol-decoder overread. frame_mode==2 whole-frame TIP frames
+    // carry no entropy data — their (empty) symbol decoder is never advanced, so
+    // the overread sentinel is expected and must not abort the frame (dav2d skips
+    // the entropy pass entirely for these, decode.c:4447).
+    if frm_hdr.tip.frame_mode != 2 && msac.cnt() <= -15 {
         if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
             eprintln!(
                 "decode_tile_sbrow_entropy: msac overread cnt={}",
@@ -2715,30 +2747,15 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         rf.rp.clear();
     }
 
-    // Project reference temporal MVs into `rf.rp_proj` for every superblock row
-    // up front (decode.c:5151-5154 runs load_tmvs per sbrow before the tile-col
-    // decode; the projection reads only reference data so doing all rows now is
-    // equivalent for the single-thread path).
-    if is_inter_or_switch && frame_hdr.use_ref_frame_mvs != 0 {
-        let mut by = 0i32;
-        while by < bh {
-            let by_end = (by + sb_step) >> 1;
-            refmvs::load_tmvs(
-                rf,
-                0,
-                0,
-                bw >> 1,
-                by >> 1,
-                by_end,
-                seq_hdr.mv_traj,
-                frame_hdr.tip.frame_mode,
-                seq_hdr.tip_hole_fill,
-                frame_hdr.tmvp_sample_step as i32,
-                frame_hdr.n_ref_frames as i32,
-            );
-            by += sb_step;
-        }
-    }
+    // The projection of reference temporal MVs into `rf.rp_proj`
+    // (`dav2d_refmvs_load_tmvs`) is run per superblock row inside the PHASE A
+    // loop below, exactly as dav2d does (decode.c:5151-5154). The single-thread
+    // path uses a rolling-window projection buffer (`rp_proj_off` is a fixed
+    // 2-row top margin, not a per-sbrow base), so each sbrow's load_tmvs
+    // overwrites the previous sbrow's projection; batching all rows up front
+    // would leave only the last row's data and corrupt the temporal MV grid
+    // that the inter tmvp candidates and frame_mode=2 whole-frame TIP recon read.
+    let need_load_tmvs = is_inter_or_switch && frame_hdr.use_ref_frame_mvs != 0;
     // Hold the current-frame temporal MV grid separately so the inter splat can
     // mutate it while `rf` itself stays shared immutably (refmvs_find reads it).
     let mut cur_mvs: Vec<refmvs::TemporalBlock> = std::mem::take(&mut rf.rp);
@@ -2747,16 +2764,18 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         std::array::from_fn(|i| refp[i].pic.clone());
     let svc_v = *svc;
 
-    let rf_ref: &refmvs::Frame = &*rf;
     // Compound `comp_type`/`get_compref_ctx` neighbour contexts need the
-    // furthest-future ref index and the TIP reference pair (decode.c).
+    // furthest-future ref index and the TIP reference pair (decode.c). Read the
+    // few scalar `rf` fields needed before the loop so `rf` can be re-borrowed
+    // mutably (for the per-sbrow load_tmvs) inside it.
     let ffr_idx = *furthest_future_refidx;
-    let tip_ref = rf_ref.tip.r#ref;
+    let tip_ref = rf.tip.r#ref;
+    let rf_rp_stride = rf.rp_stride;
     let mut rt = refmvs::Tile {
         rp_proj: Vec::new(),
         rp_proj_off: 0,
         rp_traj_off: 0,
-        ra: vec![refmvs::Block::default(); rf_ref.rp_stride.max(1) as usize],
+        ra: vec![refmvs::Block::default(); rf_rp_stride.max(1) as usize],
         ra_off: 0,
         ra_tl: refmvs::Block::default(),
         r: vec![refmvs::Block::default(); 64 * 128],
@@ -2857,6 +2876,28 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         // PHASE A: decode every superblock-row across all tile-cols.
         let mut by = row_rs;
         while by < row_re {
+            // Project reference temporal MVs into the rolling-window `rf.rp_proj`
+            // for this superblock row (dav2d_refmvs_load_tmvs, decode.c:5151).
+            // Run once per sbrow over the full block-row width, before any
+            // tile-col reads it, so the inter tmvp candidates and frame_mode=2
+            // whole-frame TIP recon see this row's projection.
+            if need_load_tmvs {
+                let by_end = (by + sb_step) >> 1;
+                refmvs::load_tmvs(
+                    rf,
+                    tr,
+                    0,
+                    bw >> 1,
+                    by >> 1,
+                    by_end,
+                    seq_hdr.mv_traj,
+                    frame_hdr.tip.frame_mode,
+                    seq_hdr.tip_hole_fill,
+                    frame_hdr.tmvp_sample_step as i32,
+                    frame_hdr.n_ref_frames as i32,
+                );
+            }
+            let rf_ref: &refmvs::Frame = &*rf;
             for tc in 0..cols as usize {
                 let ts_idx = ts_base + tc;
                 let (rs, re) = ranges[tc];
@@ -10840,6 +10881,69 @@ fn opfl_pred_luma(
     }
 
     bacp && have_bacp
+}
+
+/// Synthesize and reconstruct the single whole-superblock TIP block of a
+/// `frame_mode == 2` (whole-frame TIP) frame. Port of `tip_frame_recon_sb`
+/// (decode.c:4381-4434): such frames carry no entropy data, so each superblock
+/// is reconstructed from one synthesized skip_txfm TIP block whose motion comes
+/// from the projected temporal-MV grid (`rp_proj`). No bits are read.
+#[allow(clippy::too_many_arguments)]
+fn tip_frame_recon_sb(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    bx: i32,
+    by: i32,
+    bs: BlockSize,
+    cbs: BlockSize,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    use crate::levels::{InterPredMode, MotionMode, Mv, MvXY, RefPair, TIP_FRAME, TxPartition};
+
+    // Build the synthesized block (decode.c:4385-4402). cwp_idx selects the TIP
+    // global compound weight from `dav2d_tip_wts`.
+    const TIP_WTS: [i8; 8] = [8, 12, 16, 18, 20, 4, 6, -4];
+    let tip = &recon.frm_hdr.tip;
+    let mut b = crate::levels::Av2Block {
+        bs: bs as i8,
+        cbs: cbs as i8,
+        is_intra: 0,
+        intrabc: 0,
+        seg_id: 0,
+        skip_mode: 0,
+        skip_txfm: 1,
+        tx_part: TxPartition::None as u8,
+        fsc: 0,
+        tx_size_ll: 0,
+        ref_pair: RefPair {
+            r: [TIP_FRAME as i8, -1],
+        },
+        data: crate::levels::Av2BlockData::default(),
+    };
+    // SAFETY: `data` is freshly default-constructed as the `inter` variant, so
+    // writing inter fields is the active-variant access.
+    unsafe {
+        b.data.inter.mv[0] = Mv {
+            c: MvXY {
+                y: tip.gmv_y as i32,
+                x: tip.gmv_x as i32,
+            },
+        };
+        b.data.inter.inter_mode = InterPredMode::NearMv as u8;
+        b.data.inter.motion_mode = MotionMode::Translation as u8;
+        b.data.inter.filter = tip.subpel_filter;
+        b.data.inter.cwp_idx = TIP_WTS[tip.global_wtd_idx as usize];
+    }
+
+    // The whole superblock is a single TIP block; chroma is co-located.
+    let has_luma = true;
+    let has_chroma = cbs != BlockSize::Invalid;
+    recon_b_inter_tip(
+        recon, msac, cdf_m, a, l, &b, bx, by, bx, by, bs, cbs, has_luma, has_chroma, fi,
+    )
 }
 
 /// Reconstruct a TIP (Temporal Interpolated Prediction) inter block (8bpc).
