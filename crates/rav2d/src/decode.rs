@@ -3168,13 +3168,13 @@ fn filter_sbrow(
                 mask_noskip: &collect_noskip(&lf.mask, prev_mask_row, sb256w),
                 y_strength: &fp.cdef_y_strength,
                 uv_strength: &fp.cdef_uv_strength,
+                any_lossless,
+                mask_ll_y: &collect_ll_y(&lf.mask, prev_mask_row, sb256w),
+                mask_ll_uv: &collect_ll_uv(&lf.mask, prev_mask_row, sb256w),
                 ccso: if ccso_on {
                     Some(crate::cdef::CcsoCfg {
                         p: ccso_pcfg,
                         mask_ccso: &collect_ccso(&lf.mask, prev_mask_row, sb256w),
-                        mask_ll_y: &collect_ll_y(&lf.mask, prev_mask_row, sb256w),
-                        mask_ll_uv: &collect_ll_uv(&lf.mask, prev_mask_row, sb256w),
-                        any_lossless,
                     })
                 } else {
                     None
@@ -3208,13 +3208,13 @@ fn filter_sbrow(
             mask_noskip: &collect_noskip(&lf.mask, mask_row, sb256w),
             y_strength: &fp.cdef_y_strength,
             uv_strength: &fp.cdef_uv_strength,
+            any_lossless,
+            mask_ll_y: &collect_ll_y(&lf.mask, mask_row, sb256w),
+            mask_ll_uv: &collect_ll_uv(&lf.mask, mask_row, sb256w),
             ccso: if ccso_on {
                 Some(crate::cdef::CcsoCfg {
                     p: ccso_pcfg,
                     mask_ccso: &collect_ccso(&lf.mask, mask_row, sb256w),
-                    mask_ll_y: &collect_ll_y(&lf.mask, mask_row, sb256w),
-                    mask_ll_uv: &collect_ll_uv(&lf.mask, mask_row, sb256w),
-                    any_lossless,
                 })
             } else {
                 None

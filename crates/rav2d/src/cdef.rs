@@ -480,9 +480,6 @@ pub struct CcsoPlaneCfg {
 pub struct CcsoCfg<'a> {
     pub p: [CcsoPlaneCfg; 3],
     pub mask_ccso: &'a [[u8; 3]],
-    pub mask_ll_y: &'a [[[u16; 4]; 64]],
-    pub mask_ll_uv: &'a [[[u16; 4]; 64]],
-    pub any_lossless: bool,
 }
 
 pub struct CdefBrowParams<'a> {
@@ -500,6 +497,11 @@ pub struct CdefBrowParams<'a> {
     /// Per-cdef-index raw strengths (0..n_strengths) for Y and UV.
     pub y_strength: &'a [u8],
     pub uv_strength: &'a [u8],
+    /// Per-SB256 lossless masks; CDEF (and CCSO) skip losslessly-coded blocks.
+    /// `any_lossless` is false unless the frame is segmented with a lossless seg.
+    pub any_lossless: bool,
+    pub mask_ll_y: &'a [[[u16; 4]; 64]],
+    pub mask_ll_uv: &'a [[[u16; 4]; 64]],
     /// CCSO config; `None` when CCSO is disabled for this frame.
     pub ccso: Option<CcsoCfg<'a>>,
 }
@@ -748,6 +750,25 @@ pub fn cdef_brow_8bpc(
             uv_sec_lvl += (uv_sec_lvl == 3) as i32;
             uv_sec_lvl <<= bitdepth_min_8;
 
+            // Per-SB lossless mask rows (dav2d cdef_apply_tmpl.c:213-222): two
+            // adjacent 4px rows at column sb64x_idx for luma, subsampled for uv.
+            // Zero unless the frame is segmented-lossless.
+            let (y_ll0, y_ll1, uv_ll0, uv_ll1) = if p.any_lossless {
+                let yr = (2 * by_idx).min(63);
+                let yl = p.mask_ll_y.get(sb256x);
+                let ul = p.mask_ll_uv.get(sb256x);
+                let y0 = yl.map(|m| m[yr][sb64x_idx]).unwrap_or(0);
+                let y1 = yl.map(|m| m[(yr + 1).min(63)][sb64x_idx]).unwrap_or(0);
+                let uvr = ((2 * by_idx) >> ss_ver).min(63);
+                let u0 = ul.map(|m| m[uvr][sb64x_idx]).unwrap_or(0);
+                let u1 = ul
+                    .map(|m| m[(uvr + (1 - ss_ver)).min(63)][sb64x_idx])
+                    .unwrap_or(0);
+                (y0, y1, u0, u1)
+            } else {
+                (0, 0, 0, 0)
+            };
+
             let mut b_y = sb_y;
             let mut b_uv = sb_uv;
             let mut bx = sbx * sbsz;
@@ -758,7 +779,10 @@ pub fn cdef_brow_8bpc(
                 }
 
                 let bx_mask = 3u16 << (bx & 14);
-                if (noskip_full & bx_mask) == 0 {
+                let y_lossless = ((y_ll0 | y_ll1) & bx_mask) != 0;
+                let uvbx_mask = (3u16 >> ss_hor) << ((bx & 14) >> ss_hor);
+                let uv_lossless = ((uv_ll0 | uv_ll1) & uvbx_mask) != 0;
+                if (noskip_full & bx_mask) == 0 || (y_lossless && uv_lossless) {
                     prev_flag = 0;
                     edges |= CDEF_HAVE_LEFT;
                     b_y += 8;
@@ -816,7 +840,7 @@ pub fn cdef_brow_8bpc(
                 let bot_y = b_y + 8 * y_ls;
                 if y_pri_lvl != 0 {
                     let adj = adjust_strength(y_pri_lvl, variance);
-                    if adj != 0 || y_sec_lvl != 0 {
+                    if (adj != 0 || y_sec_lvl != 0) && !y_lossless {
                         cdef_filter_block_8bpc(
                             y,
                             y_ls,
@@ -835,7 +859,7 @@ pub fn cdef_brow_8bpc(
                             edges,
                         );
                     }
-                } else if y_sec_lvl != 0 {
+                } else if y_sec_lvl != 0 && !y_lossless {
                     cdef_filter_block_8bpc(
                         y,
                         y_ls,
@@ -855,7 +879,7 @@ pub fn cdef_brow_8bpc(
                     );
                 }
 
-                if uv_lvl != 0 && have_chroma {
+                if uv_lvl != 0 && have_chroma && !uv_lossless {
                     let uvdir = if uv_pri_lvl != 0 {
                         uv_dir[dir] as usize
                     } else {
@@ -966,11 +990,11 @@ pub fn cdef_brow_8bpc(
                     // ll_mask slice: for non-lossless frames it is all-zero. The
                     // ccso_add indexes [yy>>2][0], so build a 2-row window matching
                     // dav2d's y/uv ll_mask pointer.
-                    let ll: &[[u16; 4]] = if cc.any_lossless {
+                    let ll: &[[u16; 4]] = if p.any_lossless {
                         let src = if pl == 0 {
-                            cc.mask_ll_y.get(sb256x)
+                            p.mask_ll_y.get(sb256x)
                         } else {
-                            cc.mask_ll_uv.get(sb256x)
+                            p.mask_ll_uv.get(sb256x)
                         };
                         match src {
                             Some(m) => &m[(by_idx_ll >> pl_ss_ver)..],
