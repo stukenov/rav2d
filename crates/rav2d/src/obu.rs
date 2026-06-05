@@ -504,10 +504,12 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     }
 
     hdr.refmv_bank = gb.get_bit() != 0;
+    // dav2d obu.c:413: `drl_reorder = get_bit() ? 0 : 2 - get_bit()`.
+    // 0 = off, 2 = always (threshold 2), 1 = constraint (threshold 4).
     hdr.drl_reorder = if gb.get_bit() != 0 {
-        false
+        0
     } else {
-        gb.get_bit() == 0
+        2 - gb.get_bit() as u8
     };
 
     if hdr.reduced_still_picture_header {

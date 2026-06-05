@@ -401,7 +401,10 @@ pub struct SequenceHeader {
     pub order_hint_n_bits: u8,
 
     pub refmv_bank: bool,
-    pub drl_reorder: bool,
+    /// DRL candidate reorder mode (dav2d `drl_reorder`): 0 = off, 1 =
+    /// constraint (reorder only when `nearest_refmv_count >= 4`), 2 = always
+    /// (reorder when `nearest_refmv_count >= 2`).
+    pub drl_reorder: u8,
     pub explicit_ref_frame_map: bool,
     pub ref_frames: u8,
     pub ref_frames_log2: u8,

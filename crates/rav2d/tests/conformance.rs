@@ -1687,21 +1687,8 @@ fn full_clip_failures(path: &PathBuf) -> Vec<String> {
 /// inter clips; this sweep guarantees the whole corpus stays bit-exact end to
 /// end (intra + inter: single-ref/compound MC, warp, OBMC/interintra, TIP,
 /// opfl_pred, delta-q, segmentation, lossless, palette, multi-superblock-row).
-///
-/// WIP (#[ignore]d): 7/9 clips are full-clip bit-exact. The remaining two have
-/// small inter-frame reconstruction diffs (entropy is bit-exact on every inter
-/// frame of both — only the pixel recon diverges):
-///   - `bus.64x64.l5.lossless`: poc0/poc4/poc2/poc1 bit-exact; only poc3 (the
-///     deepest ref) differs (~61 luma px). First diff at luma (48,24): a
-///     compound cross-ref NEAR block (refs [0,1], comp_type=SEG) resolves
-///     mvstack[0].mv[0] one unit off (dav x=5 vs rav x=6) — a temporal/bank
-///     MV-candidate edge in the cross-ref-NEAR refmvs path (under-tested: the
-///     other clips' compound blocks are same-ref).
-///   - `bus.64x64.l5.opfl0-refinemv0`: poc4 bit-exact; poc2/poc1/poc3 (TIP
-///     frame_mode=1, opfl_refine_type=0/refine_mv=0) differ. First diff frame[2]
-///     luma (33,16) — an opfl/refine-disabled-gated TIP recon branch.
+/// All 9 shipped clips are full-clip bit-exact across every coding-order frame.
 #[test]
-#[ignore = "WIP: lossless poc3 + opfl0 TIP frames not yet bit-exact (7/9 clips pass)"]
 fn bit_exact_full_clip_sweep() {
     let clips = [
         "avm-v14.1.0-bus.64x64.l5.obu",

@@ -6096,8 +6096,7 @@ fn decode_b(
                 // cwp_weighting_factor[!(refdir[ref0] ^ refdir[ref1])][n]
                 // (decode.c:2922-2927). The selector is the NEGATED xor of the two
                 // refs' directions: same-direction pair -> row 1, opposite -> row 0.
-                static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] =
-                    [[8, 12, 4, 10, 6], [8, 12, 4, 20, -4]];
+                static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] = [[8, 12, 4, 10, 6], [8, 12, 4, 20, -4]];
                 let xor = (fi.refdir[ref0 as usize] ^ fi.refdir[ref1 as usize]) & 1;
                 let row = (xor == 0) as usize;
                 unsafe {
@@ -9731,6 +9730,125 @@ fn splat_tworef_mv(
     let write_temporal =
         recon.seq_hdr.ref_frame_mvs && (!opfl || !refine_mv) && !recon.cur_mvs.is_empty();
 
+    let s_off = by4r * 128 + (bx & 127) as usize;
+    let motion_mode = unsafe { b.data.inter.motion_mode };
+
+    // Warp / global-affine compound splat (decode.c:651-685, splat_comp_warpmv).
+    // When the block uses a local warp (motion_mode > INTERINTRA) or a compound
+    // GLOBALMV_GLOBALMV with a non-translational global model, dav2d writes
+    // per-4x4 warp-projected MVs (with mf|=2 / mf|=1) into the spatial grid so
+    // that later blocks' refmvs candidates read the projected MV, not the
+    // nominal block MV.
+    let gmv0_affine =
+        recon.frm_hdr.gmv.m[ref0 as usize].wm_type > crate::headers::WarpedMotionType::Translation;
+    let gmv1_affine =
+        recon.frm_hdr.gmv.m[ref1 as usize].wm_type > crate::headers::WarpedMotionType::Translation;
+    let is_warp_splat = motion_mode > MotionMode::InterIntra as u8
+        || (inter_mode == CompInterPredMode::GlobalMvGlobalMv as u8
+            && imin(bw4, bh4) > 1
+            && (gmv0_affine || gmv1_affine));
+    if is_warp_splat {
+        debug_assert!(bw4 > 1 && bh4 > 1);
+        let use_local = motion_mode > MotionMode::InterIntra as u8;
+        let (wm1, wm2) = if use_local {
+            (recon.warpmv[0], recon.warpmv[1])
+        } else {
+            (
+                recon.frm_hdr.gmv.m[ref0 as usize],
+                recon.frm_hdr.gmv.m[ref1 as usize],
+            )
+        };
+        let mut mf = (cwp_idx as i32) << 2;
+        mf |= if use_local { 2 } else { 1 };
+        let mut s_src = crate::refmvs::Block {
+            r#ref: crate::levels::RefPair { r: [ref0, ref1] },
+            bs: bs as u8,
+            mf: mf as i8,
+            subpel_filter: unsafe { b.data.inter.filter },
+            ..Default::default()
+        };
+        if use_local {
+            s_src.lmv = blk_mv;
+            s_src.m = wm1.matrix;
+            s_src.warp_type = wm1.wm_type as i8;
+        } else {
+            s_src.mv = blk_mv;
+        }
+        let mat1 = &wm1.matrix;
+        let mat2 = &wm2.matrix;
+        let mvx1 = (mat1[2] as i64 - 0x10000) * (bx as i64 + 1) * 4
+            + mat1[3] as i64 * (by as i64 + 1) * 4
+            + mat1[0] as i64;
+        let mvy1 = mat1[4] as i64 * (bx as i64 + 1) * 4
+            + mat1[1] as i64
+            + (mat1[5] as i64 - 0x10000) * (by as i64 + 1) * 4;
+        let mvx2 = (mat2[2] as i64 - 0x10000) * (bx as i64 + 1) * 4
+            + mat2[3] as i64 * (by as i64 + 1) * 4
+            + mat2[0] as i64;
+        let mvy2 = mat2[4] as i64 * (bx as i64 + 1) * 4
+            + mat2[1] as i64
+            + (mat2[5] as i64 - 0x10000) * (by as i64 + 1) * 4;
+        let mut t_src = crate::refmvs::TemporalBlock::default();
+        unsafe {
+            t_src.r#ref.r[t_swap as usize] = ref0;
+            t_src.r#ref.r[!t_swap as usize] = ref1;
+        }
+        let wedge_mask: Option<Vec<u8>> = if comp_type == 2 {
+            let wedge_idx = unsafe { b.data.inter.wedge_idx } as usize;
+            Some(
+                recon
+                    .masks
+                    .wedge_tmvp(bs as usize, bw4 as usize, bh4 as usize, wedge_idx)
+                    .to_vec(),
+            )
+        } else {
+            None
+        };
+        let w_swap = unsafe { b.data.inter.wedge_sign } as i32 ^ t_swap as i32;
+        if write_temporal {
+            let t_stride = recon.rf.rp_stride;
+            let t_off = (by >> 1) as isize * t_stride + (bx >> 1) as isize;
+            crate::refmvs::splat_comp_warpmv(
+                &mut recon.rt.r[s_off..],
+                &mut s_src,
+                Some(&mut recon.cur_mvs[t_off as usize..]),
+                t_stride,
+                &mut t_src,
+                mvy1,
+                mvx1,
+                mvy2,
+                mvx2,
+                &wm1,
+                &wm2,
+                bw4,
+                bh4,
+                t_swap as usize,
+                wedge_mask.as_deref(),
+                w_swap,
+            );
+        } else {
+            crate::refmvs::splat_comp_warpmv(
+                &mut recon.rt.r[s_off..],
+                &mut s_src,
+                None,
+                0,
+                &mut t_src,
+                mvy1,
+                mvx1,
+                mvy2,
+                mvx2,
+                &wm1,
+                &wm2,
+                bw4,
+                bh4,
+                t_swap as usize,
+                wedge_mask.as_deref(),
+                w_swap,
+            );
+        }
+        return;
+    }
+
     let mf = ((cwp_idx as i32) << 2
         | (inter_mode == CompInterPredMode::GlobalMvGlobalMv as u8 && imin(bw4, bh4) > 1) as i32)
         as i8;
@@ -9743,7 +9861,6 @@ fn splat_tworef_mv(
         subpel_filter: unsafe { b.data.inter.filter },
         ..Default::default()
     };
-    let s_off = by4r * 128 + (bx & 127) as usize;
 
     // Temporal block: quantized MVs swapped per ref_flip (decode.c:690-704).
     let mut t_src = crate::refmvs::TemporalBlock::default();

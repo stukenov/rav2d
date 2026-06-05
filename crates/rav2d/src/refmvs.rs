@@ -1342,55 +1342,58 @@ pub fn add_spatial_candidate(
                     || (unsafe { b.r#ref.r[n] } as usize) < TIP_FRAME)
                 && rp_traj[ref0 as usize].len() > st.b8x8 as usize
                 && unsafe { rp_traj[ref0 as usize][st.b8x8 as usize].c.y } != INVALID_MV
-            {
-                let src_ref = if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
-                    (unsafe { rf.tip.r#ref.r[n] }) as usize
-                } else {
-                    (unsafe { b.r#ref.r[n] }) as usize
-                };
-                if src_ref < rp_traj.len()
-                    && rp_traj[src_ref].len() > st.b8x8 as usize
-                    && unsafe { rp_traj[src_ref][st.b8x8 as usize].c.y } != INVALID_MV
-                {
-                    let (a_mv, b_mv);
-                    if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
-                        a_mv = rp_traj[unsafe { rf.tip.r#ref.r[n] } as usize][st.b8x8 as usize];
-                        let mut tmv = rp_proj[off_8x8].mv;
-                        unsafe {
-                            if tmv.c.y == INVALID_MV {
-                                tmv.n = 0;
-                            }
-                        }
-                        let tipmv = scale_mv(tmv, rf.tip.sf[n]);
-                        b_mv = Mv {
-                            c: MvXY {
-                                y: iclip(unsafe { tipmv.c.y + b.mv[0].c.y }, -0xffff, 0xffff),
-                                x: iclip(unsafe { tipmv.c.x + b.mv[0].c.x }, -0xffff, 0xffff),
-                            },
-                        };
+                && {
+                    // `src_ref` traj validity is part of the dav2d `else if`
+                    // condition (refmvs.c:260-262); when it fails the whole
+                    // mvtj arm is skipped so the lnr-spc arm below is reached.
+                    let src_ref = if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
+                        (unsafe { rf.tip.r#ref.r[n] }) as usize
                     } else {
-                        a_mv = rp_traj[unsafe { b.r#ref.r[n] } as usize][st.b8x8 as usize];
-                        b_mv = b.mv[n];
+                        (unsafe { b.r#ref.r[n] }) as usize
+                    };
+                    src_ref < rp_traj.len()
+                        && rp_traj[src_ref].len() > st.b8x8 as usize
+                        && unsafe { rp_traj[src_ref][st.b8x8 as usize].c.y } != INVALID_MV
+                }
+            {
+                let (a_mv, b_mv);
+                if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
+                    a_mv = rp_traj[unsafe { rf.tip.r#ref.r[n] } as usize][st.b8x8 as usize];
+                    let mut tmv = rp_proj[off_8x8].mv;
+                    unsafe {
+                        if tmv.c.y == INVALID_MV {
+                            tmv.n = 0;
+                        }
                     }
-                    let c_mv = rp_traj[ref0 as usize][st.b8x8 as usize];
-                    let cand_mv = Mv {
+                    let tipmv = scale_mv(tmv, rf.tip.sf[n]);
+                    b_mv = Mv {
                         c: MvXY {
-                            y: iclip(unsafe { b_mv.c.y + c_mv.c.y - a_mv.c.y }, -0xffff, 0xffff),
-                            x: iclip(unsafe { b_mv.c.x + c_mv.c.x - a_mv.c.x }, -0xffff, 0xffff),
+                            y: iclip(unsafe { tipmv.c.y + b.mv[0].c.y }, -0xffff, 0xffff),
+                            x: iclip(unsafe { tipmv.c.x + b.mv[0].c.x }, -0xffff, 0xffff),
                         },
                     };
-                    add_candidate_sngl(
-                        &mut st.dr,
-                        &mut st.drvd_cnt,
-                        4,
-                        weight,
-                        cand_mv,
-                        0,
-                        0,
-                        &mut st.drvd_iter_cntr,
-                        2,
-                    );
+                } else {
+                    a_mv = rp_traj[unsafe { b.r#ref.r[n] } as usize][st.b8x8 as usize];
+                    b_mv = b.mv[n];
                 }
+                let c_mv = rp_traj[ref0 as usize][st.b8x8 as usize];
+                let cand_mv = Mv {
+                    c: MvXY {
+                        y: iclip(unsafe { b_mv.c.y + c_mv.c.y - a_mv.c.y }, -0xffff, 0xffff),
+                        x: iclip(unsafe { b_mv.c.x + c_mv.c.x - a_mv.c.x }, -0xffff, 0xffff),
+                    },
+                };
+                add_candidate_sngl(
+                    &mut st.dr,
+                    &mut st.drvd_cnt,
+                    4,
+                    weight,
+                    cand_mv,
+                    0,
+                    0,
+                    &mut st.drvd_iter_cntr,
+                    2,
+                );
             } else if (ref0 as usize) < TIP_FRAME && unsafe { b.r#ref.r[0] } >= 0 {
                 let src_ref = if unsafe { b.r#ref.r[0] } == TIP_FRAME as i8 {
                     (unsafe { rf.tip.r#ref.r[n] }) as usize
@@ -2189,8 +2192,11 @@ pub fn refmvs_find(
         }
     }
 
-    // sort by weight
-    if seq_hdr.drl_reorder && nearest_refmv_count >= 2 {
+    // sort by weight (refmvs.c:869-872): mode 2 = always (count >= 2),
+    // mode 1 = constraint (count >= 4).
+    if (seq_hdr.drl_reorder == 2 && nearest_refmv_count >= 2)
+        || (seq_hdr.drl_reorder == 1 && nearest_refmv_count >= 4)
+    {
         let mut maxwidx = 0;
         let mut maxw = mvstack[0].weight;
         for n in 1..nearest_refmv_count as usize {
