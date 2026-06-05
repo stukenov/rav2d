@@ -9068,6 +9068,27 @@ fn recon_b_inter(
     if ref0 < 0 || ref0 as usize >= 7 {
         return Ok(());
     }
+
+    // Blocks larger than 64px in either dimension are not reconstructed as a
+    // single unit (the MC kernels cap at 64px wide): they are split into 64x64
+    // (or 128x128 for 256px) sub-blocks, mirroring `dav2d_recon_b`
+    // (recon_tmpl.c:3088-3140). Each sub-block runs its own luma MC + residual;
+    // chroma coefficients are read with the first luma sub-block and the chroma
+    // is reconstructed once (read/recon staging), so the MSAC bitstream ordering
+    // matches the C decoder. <=64px blocks fall through to the leaf below.
+    {
+        let bs0 = if lbs == BlockSize::Invalid { cbs } else { lbs };
+        let bdim0 = &BLOCK_DIMENSIONS[bs0 as u8 as usize];
+        let bw4_0 = bdim0[0] as i32;
+        let bh4_0 = bdim0[1] as i32;
+        if imax(bw4_0, bh4_0) > 16 {
+            return recon_b_inter_split(
+                recon, msac, cdf_m, a, l, b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma,
+                fi, bs0, bw4_0, bh4_0,
+            );
+        }
+    }
+
     let mv = unsafe { b.data.inter.mv[0].c };
     let mv1 = unsafe { b.data.inter.mv[1].c };
     let filter = unsafe { b.data.inter.filter };
@@ -9336,6 +9357,160 @@ fn recon_b_inter(
             recon, msac, cdf_m, a, l, b, uvtx, cbx, cby, cbw4ss, cbh4ss, cw4ss, ch4ss,
             uv_txtp_seed, fi,
         )?;
+    }
+    Ok(())
+}
+
+/// Split an inter block larger than 64px into 64x64 (or 128x128 for 256px)
+/// sub-blocks, mirroring the `imax(bw4, bh4) > 16` branch of `dav2d_recon_b`
+/// (recon_tmpl.c:3088-3140). Each sub-block recurses into `recon_b_inter` for
+/// its luma MC + residual; chroma is decoded once via the read/recon staging
+/// (`cbs2[0]` reads, `cbs2[1]` reconstructs). Because the chroma sub-block uses
+/// the full chroma block size at the block-origin coordinates for both stages,
+/// we perform the whole chroma (MC + residual) at the read stage so the MSAC
+/// ordering (chroma coefs follow the first luma sub-block) matches the C decoder.
+#[allow(clippy::too_many_arguments)]
+fn recon_b_inter_split(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    bx: i32,
+    by: i32,
+    cbx: i32,
+    cby: i32,
+    lbs: BlockSize,
+    cbs: BlockSize,
+    has_luma: bool,
+    has_chroma: bool,
+    fi: &SbFrameInfo,
+    bs: BlockSize,
+    bw4: i32,
+    bh4: i32,
+) -> Result<(), ()> {
+    // csplit[bs - 128x128][ss] (recon_tmpl.c:3083). Identical to the intra path.
+    const CSPLIT: [[BlockSize; 3]; 3] = [
+        [
+            BlockSize::Bs64x64,
+            BlockSize::Bs128x64,
+            BlockSize::Bs128x128,
+        ],
+        [BlockSize::Bs64x64, BlockSize::Bs64x64, BlockSize::Bs128x64],
+        [BlockSize::Bs64x64, BlockSize::Bs64x64, BlockSize::Bs64x128],
+    ];
+    let ss_hor = fi.ss_hor;
+    let ss_ver = fi.ss_ver;
+    let y_end = imin(by + bh4, fi.bh);
+    let x_end = imin(bx + bw4, fi.bw);
+    let (step, lbs2, cbs2i) = if imax(bw4, bh4) == 64 {
+        (
+            32,
+            if lbs == BlockSize::Invalid {
+                BlockSize::Invalid
+            } else {
+                BlockSize::Bs128x128
+            },
+            if cbs == BlockSize::Invalid {
+                BlockSize::Invalid
+            } else {
+                BlockSize::Bs128x128
+            },
+        )
+    } else {
+        let csplit_row = (bs as i32 - BlockSize::Bs128x128 as i32) as usize;
+        let csi = (ss_hor + ss_ver) as usize;
+        (
+            16,
+            if lbs == BlockSize::Invalid {
+                BlockSize::Invalid
+            } else {
+                BlockSize::Bs64x64
+            },
+            if cbs == BlockSize::Invalid {
+                BlockSize::Invalid
+            } else {
+                CSPLIT[csplit_row][csi]
+            },
+        )
+    };
+    let _ = (has_luma, has_chroma);
+
+    let mut sub_by = by;
+    let mut sub_cby = cby;
+    let mut yy = 0;
+    while sub_by < y_end {
+        let mut sub_bx = bx;
+        let mut sub_cbx = cbx;
+        let mut xx = 0;
+        while sub_bx < x_end {
+            // cbs2[0] = chroma coef-read stage, cbs2[1] = chroma recon stage
+            // (recon_tmpl.c:3108-3117).
+            let (read_cbs, recon_cbs) = if step == 32 {
+                (cbs2i, cbs2i)
+            } else {
+                let read = if ((xx & ss_hor) | (yy & ss_ver)) == 0 {
+                    cbs2i
+                } else {
+                    BlockSize::Invalid
+                };
+                let recon = if (ss_hor == 0 || sub_bx + step >= x_end)
+                    && (ss_ver == 0 || sub_by + step >= y_end)
+                {
+                    cbs2i
+                } else {
+                    BlockSize::Invalid
+                };
+                (read, recon)
+            };
+            let _ = recon_cbs;
+
+            // Reconstruct the whole chroma (MC + residual) at the read stage so
+            // the chroma coefficients are entropy-read at the correct MSAC point
+            // (immediately after the first luma sub-block). The chroma pixels are
+            // written at the absolute block-origin coordinates regardless of which
+            // sub-block triggers them, so doing recon here is equivalent.
+            let sub_has_chroma = read_cbs != BlockSize::Invalid;
+            let sub_cbs = if sub_has_chroma {
+                read_cbs
+            } else {
+                BlockSize::Invalid
+            };
+
+            recon_b_inter(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                b,
+                sub_bx,
+                sub_by,
+                sub_cbx,
+                sub_cby,
+                lbs2,
+                sub_cbs,
+                lbs2 != BlockSize::Invalid,
+                sub_has_chroma,
+                fi,
+            )?;
+
+            sub_bx += step;
+            if step == 32 {
+                sub_cbx += step;
+            } else if (xx & ss_hor) == ss_hor {
+                sub_cbx += step << ss_hor;
+            }
+            xx += 1;
+        }
+        sub_by += step;
+        if step == 32 {
+            sub_cby += step;
+        } else if (yy & ss_ver) == ss_ver {
+            sub_cby += step << ss_ver;
+        }
+        yy += 1;
     }
     Ok(())
 }
