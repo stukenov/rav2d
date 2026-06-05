@@ -259,7 +259,7 @@ impl Decoder {
             n_passes: 1,
             inloop_filters: s.inloop_filters.to_flags(),
             run_decode: s.run_decode,
-            frame_out: None,
+            frame_out: Vec::new(),
         };
 
         Ok(Self {
@@ -356,8 +356,10 @@ impl Decoder {
                     if self.input.is_empty() {
                         self.input.unref();
                     }
-                    // A frame was reconstructed during parsing: enqueue it.
-                    if let Some(pic) = self.ctx.frame_out.take() {
+                    // Frames reconstructed during parsing: enqueue all of them in
+                    // decode order (a single parse_obus call may decode several).
+                    let frames: Vec<_> = self.ctx.frame_out.drain(..).collect();
+                    for pic in frames {
                         self.dpb[self.dpb_in].pic.p = pic;
                         self.dpb_in += 1;
                         if self.dpb_in == self.dpb_sz {

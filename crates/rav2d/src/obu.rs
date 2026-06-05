@@ -3423,7 +3423,7 @@ mod tests {
             n_passes: 1,
             inloop_filters: 0,
             run_decode: false,
-            frame_out: None,
+            frame_out: Vec::new(),
         }
     }
 

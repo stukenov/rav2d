@@ -596,3 +596,98 @@ fn diff_loc() {
         }
     }
 }
+
+/// Diagnostic: rav2d emits frames in DECODE order (no POC reorder yet) while
+/// dav2d emits in DISPLAY order. For the first inter frame (rav2d decode index
+/// 1) find the closest-matching dav2d output frame and report per-plane diffs.
+/// Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "first-inter-frame diff diagnostic"]
+fn inter_frame1_diag() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    let reference = dav2d_decode(&path);
+    let got = rav2d_decode(&path);
+    eprintln!("dav2d frames={} rav2d frames={}", reference.len(), got.len());
+    let g = &got[1]; // rav2d decode order: [key, inter(poc4), ...]
+    let mut best = (usize::MAX, [0usize; 3], [0usize; 3]);
+    for (ri, r) in reference.iter().enumerate() {
+        if (r.w, r.h) != (g.w, g.h) {
+            continue;
+        }
+        let mut diffs = [0usize; 3];
+        let mut total = [0usize; 3];
+        for pl in 0..3 {
+            total[pl] = r.planes[pl].len().min(g.planes[pl].len());
+            diffs[pl] = r.planes[pl]
+                .iter()
+                .zip(g.planes[pl].iter())
+                .filter(|(a, b)| a != b)
+                .count();
+        }
+        let sum: usize = diffs.iter().sum();
+        if sum < best.0 {
+            best = (sum, diffs, total);
+        }
+        eprintln!(
+            "  vs dav2d[{ri}]: Y={}/{} U={}/{} V={}/{}",
+            diffs[0], total[0], diffs[1], total[1], diffs[2], total[2]
+        );
+    }
+    eprintln!(
+        "BEST: total_diff={} Y={}/{} U={}/{} V={}/{}",
+        best.0, best.1[0], best.2[0], best.1[1], best.2[1], best.1[2], best.2[2]
+    );
+}
+
+/// M3 gate: the FIRST inter frame of bus.64x64.l5 (decode order index 1,
+/// poc=4, single reference) must reconstruct bit-exact vs dav2d (filters off).
+/// rav2d emits in decode order; the matching dav2d output frame is poc=4, which
+/// for this clip's display order is the last output frame.
+///
+/// CURRENTLY IGNORED: single-ref inter MC + refmvs + ref-list/CDF are wired and
+/// the frame reconstructs (no panic), but the per-block residual coefficient
+/// path (inter contexts) and chroma MC sample offset are not yet bit-exact. See
+/// `inter_frame1_diag` for the live diff. Un-ignore once those land.
+#[test]
+#[ignore = "M3 WIP: inter residual/chroma MC not yet bit-exact"]
+fn bit_exact_first_inter_frame() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode(&path);
+    let got = rav2d_decode(&path);
+    assert!(got.len() > 1, "rav2d produced too few frames");
+    let g = &got[1];
+    // dav2d display order: poc=4 is the last output frame for this clip.
+    let r = reference.last().expect("dav2d frames");
+    assert_eq!((r.w, r.h), (g.w, g.h), "first inter frame dims differ");
+
+    let plane_names = ["luma", "U", "V"];
+    let (ssh, _ssv) = ss(r.layout);
+    let mut failures = Vec::new();
+    for pl in 0..3 {
+        let rp = &r.planes[pl];
+        let gp = &g.planes[pl];
+        assert_eq!(rp.len(), gp.len(), "plane {} size differs", plane_names[pl]);
+        let diff = rp.iter().zip(gp.iter()).filter(|(a, b)| a != b).count();
+        if diff != 0 {
+            let first = rp.iter().zip(gp.iter()).position(|(a, b)| a != b).unwrap();
+            let stride = if pl == 0 { r.w } else { (r.w + ssh) >> ssh } as usize;
+            failures.push(format!(
+                "{} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
+                plane_names[pl],
+                rp.len(),
+                first % stride,
+                first / stride,
+                rp[first],
+                gp[first]
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("first inter frame not bit-exact:\n  {}", failures.join("\n  "));
+    }
+}
+

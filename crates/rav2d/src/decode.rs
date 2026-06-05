@@ -2076,6 +2076,9 @@ pub struct ReconCtx<'a, 'f> {
     pub refp: &'a [Option<std::sync::Arc<crate::picture::Picture>>; 7],
     /// Per-reference scaling parameters (`f->svc[i]`); scale==0 means unscaled.
     pub svc: &'a [[ScalableMotionParams; 2]; 7],
+    /// Inter-chroma `u_has_cf` flag (`t->u_has_cf`): set by the U plane's coef
+    /// decode, consumed by the V plane's context (decode_coefs). Per chroma block.
+    pub scratch_u_has_cf: i32,
     /// Sequence/frame headers needed by `refmvs_find` for IntraBC candidates.
     pub seq_hdr: &'a crate::headers::SequenceHeader,
     pub frm_hdr: &'a crate::headers::FrameHeader,
@@ -2320,6 +2323,7 @@ pub fn decode_tile_sbrow_entropy(
             cur_mvs: &mut *cur_mvs,
             refp,
             svc,
+            scratch_u_has_cf: 0,
             seq_hdr,
             frm_hdr,
         };
@@ -3474,7 +3478,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     // Hand the reconstructed picture to the decoder's output path. (Visibility
     // filtering / POC reordering is wired with full output queueing later.)
     // The output buffer must be independently owned; clone the shared pixels.
-    c.frame_out = Some(clone_picture(&shared));
+    c.frame_out.push(clone_picture(&shared));
     Ok(())
 }
 
@@ -6404,6 +6408,13 @@ fn decode_b(
         if trace_blk {
             eprintln!("  CK post_chroma_recon rng={}", msac.dbg_rng());
         }
+    } else if pass & (Pass::Recon as u8) != 0 && b.is_intra == 0 && !intrabc {
+        recon_b_inter(
+            recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
+        )?;
+        if trace_blk {
+            eprintln!("  CK post_inter_recon rng={}", msac.dbg_rng());
+        }
     }
 
     // SDP: record the luma-only block's intra direction mode + FSC flag into the
@@ -6692,6 +6703,565 @@ fn recon_b_intra(
         recon_b_intra_chroma(
             recon, msac, cdf_m, a, l, b, cbx, cby, cbs, intrabc, sdp_active, fi,
         )?;
+    }
+    Ok(())
+}
+
+/// Motion-compensate one plane of a single reference into `dst` (8bpc), mirroring
+/// the unscaled branch of `mc()` (recon_tmpl.c:1569-1610). `mvx`/`mvy` are the
+/// block MV (1/8-pel luma units). Uses the proper separable 8-tap / bilinear
+/// primitives from `mc.rs`. Scaled references (svc.scale != 0) are not handled.
+#[allow(clippy::too_many_arguments)]
+fn inter_mc_plane_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    ref_pic: &crate::picture::Picture,
+    pl: usize,
+    bx: i32,
+    by: i32,
+    bw4: i32,
+    bh4: i32,
+    mvx: i32,
+    mvy: i32,
+    filter: u8,
+    ss_hor: i32,
+    ss_ver: i32,
+    cur_bw: i32,
+    cur_bh: i32,
+) {
+    let plss_ver = if pl != 0 { ss_ver } else { 0 };
+    let plss_hor = if pl != 0 { ss_hor } else { 0 };
+    let h_mul = 4 >> plss_hor;
+    let v_mul = 4 >> plss_ver;
+    let ref_stride = ref_pic.stride[(pl != 0) as usize].unsigned_abs();
+    let ref_data: &[u8] = match ref_pic.data[pl] {
+        Some(p) => {
+            let pw = if pl == 0 {
+                ref_pic.p.w
+            } else {
+                (ref_pic.p.w + ss_hor) >> ss_hor
+            };
+            let ph = if pl == 0 {
+                ref_pic.p.h
+            } else {
+                (ref_pic.p.h + ss_ver) >> ss_ver
+            };
+            let _ = pw;
+            // SAFETY: ref_pic owns a stride*height allocation for this plane.
+            unsafe { std::slice::from_raw_parts(p.as_ptr(), ref_stride * ph as usize) }
+        }
+        None => return,
+    };
+
+    let left = 0i32;
+    let top = 0i32;
+    let right = cur_bw * 4 >> plss_hor;
+    let bottom = cur_bh * 4 >> plss_ver;
+
+    let mx = mvx & (15 >> (plss_hor == 0) as i32);
+    let my = mvy & (15 >> (plss_ver == 0) as i32);
+    let dx = bx * h_mul + (mvx >> (3 + plss_hor));
+    let dy = by * v_mul + (mvy >> (3 + plss_ver));
+
+    let need_emu = dx - (mx != 0) as i32 * 3 < left
+        || dy - (my != 0) as i32 * 3 < top
+        || dx + bw4 * h_mul + (mx != 0) as i32 * 4 > right
+        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom;
+
+    let w = (bw4 * h_mul) as usize;
+    let h = (bh4 * v_mul) as usize;
+    let mxf = mx << (plss_hor == 0) as i32;
+    let myf = my << (plss_ver == 0) as i32;
+    // dav2d b->filter: 0=REGULAR,1=SMOOTH,2=SHARP -> 8tap filter_type; 3=BILINEAR.
+    let is_bilin = filter == 3;
+
+    let mut emu_buf = if need_emu {
+        Some(vec![0u8; 192 * 192])
+    } else {
+        None
+    };
+    let (src, src_off, src_stride) = if let Some(ref mut buf) = emu_buf {
+        let emu_w = w + (mx != 0) as usize * 7;
+        let emu_h = h + (my != 0) as usize * 7;
+        let emu_stride = 192usize;
+        inter_emu_edge_8bpc(
+            buf,
+            emu_stride,
+            ref_data,
+            ref_stride,
+            emu_w,
+            emu_h,
+            (right - left) as usize,
+            (bottom - top) as usize,
+            dx - (mx != 0) as i32 * 3 - left,
+            dy - (my != 0) as i32 * 3 - top,
+        );
+        let off = emu_stride * (my != 0) as usize * 3 + (mx != 0) as usize * 3;
+        (&buf[..], off, emu_stride)
+    } else {
+        let off = dy as usize * ref_stride + dx as usize;
+        (ref_data, off, ref_stride)
+    };
+
+    if is_bilin {
+        crate::mc::put_bilin_8bpc(
+            dst,
+            dst_stride,
+            &src[src_off..],
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+        );
+    } else {
+        crate::mc::put_8tap_8bpc(
+            dst,
+            dst_stride,
+            src,
+            src_off,
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+            filter as i32,
+        );
+    }
+}
+
+/// Emulated-edge fetch for inter MC (recon_tmpl.c emu_edge): clamp source reads
+/// to the plane bounds. Identical semantics to mc.rs's private `emu_edge`.
+#[allow(clippy::too_many_arguments)]
+fn inter_emu_edge_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    bw: usize,
+    bh: usize,
+    iw: usize,
+    ih: usize,
+    x: i32,
+    y: i32,
+) {
+    for dy in 0..bh {
+        let ay = ((y + dy as i32).max(0) as usize).min(ih.saturating_sub(1));
+        let drow = dy * dst_stride;
+        let srow = ay * src_stride;
+        for dx in 0..bw {
+            let ax = ((x + dx as i32).max(0) as usize).min(iw.saturating_sub(1));
+            dst[drow + dx] = src.get(srow + ax).copied().unwrap_or(0);
+        }
+    }
+}
+
+/// Add an inter residual transform block onto an already motion-compensated
+/// destination (8bpc). Decodes coefficients with the inter coef contexts
+/// (`intra = false`), applies the optional secondary transform, then the inverse
+/// transform add. Mirrors the residual tail of `recon_b_luma_tx` for inter.
+#[allow(clippy::too_many_arguments)]
+fn inter_residual_tx_8bpc(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    pl: usize,
+    tx: usize,
+    bx: i32,
+    by: i32,
+    dst_is_uv: bool,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    use crate::levels::IntraPredMode;
+    let t_dim = &TXFM_DIMENSIONS[tx];
+    let tw = t_dim.w as usize * 4;
+    let th = t_dim.h as usize * 4;
+    let tw4 = t_dim.w as i32;
+    let th4 = t_dim.h as i32;
+    let seg_id = b.seg_id as usize;
+    let lossless = recon.frame.seg_lossless[seg_id] != 0;
+    let ss_hor = if dst_is_uv { recon.frame.ss_hor } else { 0 };
+    let ss_ver = if dst_is_uv { recon.frame.ss_ver } else { 0 };
+
+    let bx4 = ((bx & 63) >> ss_hor) as usize;
+    let by4 = ((by & 63) >> ss_ver) as usize;
+
+    let cf_n = tw * th;
+    recon.cf[..cf_n].fill(0);
+
+    let mut txtp: u16 = 0;
+    let mut res_ctx: u8 = 0;
+    let (mut eob, stx, mut txtp) = if b.skip_txfm != 0 {
+        res_ctx = 0x40;
+        (-1i32, 0i32, crate::levels::txtp::DCT_DCT as u32)
+    } else {
+        let dq_tbl = recon.dq_active[seg_id][pl];
+        let qm_ref: Option<&[u8]> = recon.frame.qm[tx][pl].as_deref();
+        let params = crate::recon::DecodeCoefParams {
+            tx,
+            bs: b.bs as usize,
+            plane: pl as i32,
+            intra: false,
+            fsc: false,
+            lossless,
+            sdp_active: false,
+            y_mode: 0,
+            uv_mode: 0,
+            seg_id,
+            seq_fsc: recon.frame.seq_fsc,
+            seq_ist: recon.frame.seq_ist,
+            seq_cctx: recon.frame.seq_cctx,
+            chroma_dctonly: false,
+            reduced_txtp_set: recon.frame.reduced_txtp_set,
+            tcq_enabled: recon.frame.tcq,
+            layout: recon.frame.layout,
+            u_has_cf: recon.scratch_u_has_cf,
+            cbx: bx,
+            cby: by,
+            luma_fsc_map: &[],
+            dq_tbl,
+            bitdepth: recon.frame.bitdepth,
+            qm: qm_ref,
+            ss_hor: recon.frame.ss_hor != 0,
+            ss_ver: recon.frame.ss_ver != 0,
+        };
+        let (acoef, lcoef): (&[u8], &[u8]) = if pl == 0 {
+            (&a.lcoef[bx4..], &l.lcoef[by4..])
+        } else {
+            (&a.ccoef[pl - 1][bx4..], &l.ccoef[pl - 1][by4..])
+        };
+        let eob = crate::recon::decode_coefs(
+            msac,
+            recon.cdf_coef,
+            cdf_m,
+            acoef,
+            lcoef,
+            &params,
+            recon.cf,
+            &mut txtp,
+            &mut res_ctx,
+        );
+        if eob == i32::MIN {
+            return Err(());
+        }
+        let stx = (txtp >> 8) as i32;
+        (eob, stx, (txtp & 0xff) as u32)
+    };
+    if pl == 1 {
+        recon.scratch_u_has_cf = (eob >= 0) as i32;
+    }
+
+    // context fill
+    let aw = imin(tw4, (fi.bw >> ss_hor) - (bx >> ss_hor)).max(0) as usize;
+    let lh = imin(th4, (fi.bh >> ss_ver) - (by >> ss_ver)).max(0) as usize;
+    if pl == 0 {
+        if aw > 0 {
+            a.lcoef[bx4..bx4 + aw].fill(res_ctx);
+        }
+        if lh > 0 {
+            l.lcoef[by4..by4 + lh].fill(res_ctx);
+        }
+    } else {
+        if aw > 0 {
+            a.ccoef[pl - 1][bx4..bx4 + aw].fill(res_ctx);
+        }
+        if lh > 0 {
+            l.ccoef[pl - 1][by4..by4 + lh].fill(res_ctx);
+        }
+    }
+
+    if eob == -1 {
+        return Ok(());
+    }
+
+    let (dst, stride) = if pl == 0 {
+        (&mut *recon.dst_y, recon.frame.y_stride_px)
+    } else if pl == 1 {
+        (&mut *recon.dst_u, recon.frame.uv_stride_px)
+    } else {
+        (&mut *recon.dst_v, recon.frame.uv_stride_px)
+    };
+    let dst_off = 4 * ((by >> ss_ver) as usize * stride + (bx >> ss_hor) as usize);
+
+    if stx != 0 {
+        // Inter never matches the intra y_mode transpose mask -> transpose = true.
+        let transpose = true;
+        let stype = (stx & 3) - 1;
+        let set = (stx >> 2) & 15;
+        if tw >= 8 && th >= 8 {
+            let koff = (set as usize * 3 + stype as usize) * 1536;
+            let mut sums = [0i32; 48];
+            crate::stx::stxfm(
+                &mut sums,
+                recon.cf,
+                &crate::stx_tables::STX_8X8_KERNEL[koff..],
+                48,
+                eob as usize,
+                recon.frame.bitdepth_max,
+            );
+            recon.cf[..32].fill(0);
+            let idx = (imin(t_dim.lh as i32, 3) - 1) as usize;
+            let scan_out = &crate::stx_tables::STX_SCAN_ORDERS_8X8[idx][transpose as usize];
+            let mapping = &crate::stx_tables::COEFF8X8_MAPPING[set as usize * 3 + stype as usize];
+            for x in 0..48 {
+                recon.cf[scan_out[mapping[x] as usize] as usize] = sums[x];
+            }
+            eob = [63, 119, 231][idx];
+        } else {
+            let koff = (set as usize * 3 + stype as usize) * 128;
+            let mut sums = [0i32; 16];
+            crate::stx::stxfm(
+                &mut sums,
+                recon.cf,
+                &crate::stx_tables::STX_4X4_KERNEL[koff..],
+                16,
+                eob as usize,
+                recon.frame.bitdepth_max,
+            );
+            let idx = imin(t_dim.lh as i32, 3) as usize;
+            let scan_out = &crate::stx_tables::STX_SCAN_ORDERS_4X4[idx][transpose as usize];
+            recon.cf[4..8].fill(0);
+            for x in 0..16 {
+                recon.cf[scan_out[x] as usize] = sums[x];
+            }
+            eob = [15, 15, 51, 99][idx];
+        }
+    }
+
+    if recon.frame.seq_inter_ddt {
+        txtp += txtp & crate::tables::TX_DDT_MASK[tx] as u32;
+    }
+    let _ = IntraPredMode::DcPred;
+    crate::itx::inv_txfm_add_8bpc(dst, dst_off, stride, recon.cf, txtp, eob, tx);
+    Ok(())
+}
+
+/// Reconstruct a single-reference inter block (8bpc): motion-compensate luma +
+/// chroma from the reference picture, then add the parsed residual transforms.
+/// Compound, warp, OBMC, interintra, TIP and scaled references are deferred.
+#[allow(clippy::too_many_arguments)]
+fn recon_b_inter(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    bx: i32,
+    by: i32,
+    cbx: i32,
+    cby: i32,
+    lbs: BlockSize,
+    cbs: BlockSize,
+    has_luma: bool,
+    has_chroma: bool,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    let refs = unsafe { b.ref_pair.r };
+    let ref0 = refs[0];
+    if ref0 < 0 || ref0 as usize >= 7 {
+        return Ok(());
+    }
+    let mv = unsafe { b.data.inter.mv[0].c };
+    if std::env::var("RAV2D_INTER").is_ok() {
+        eprintln!(
+            "INTER y={by} x={bx} ref={ref0} mvy={} mvx={} filt={} comp={} mm={} skip={}",
+            mv.y,
+            mv.x,
+            unsafe { b.data.inter.filter },
+            refs[1],
+            unsafe { b.data.inter.motion_mode },
+            b.skip_txfm
+        );
+    }
+    let filter = unsafe { b.data.inter.filter };
+    let ss_hor = recon.frame.ss_hor;
+    let ss_ver = recon.frame.ss_ver;
+
+    // Take the reference picture out of recon.refp (immutable Arc) to satisfy the
+    // borrow checker while mutating dst planes.
+    let refp = match recon.refp[ref0 as usize].clone() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    // ---- luma MC + residual -----------------------------------------------
+    if has_luma {
+        let bs = lbs;
+        let b_dim = &BLOCK_DIMENSIONS[bs as u8 as usize];
+        let bw4 = b_dim[0] as i32;
+        let bh4 = b_dim[1] as i32;
+        let y_stride = recon.frame.y_stride_px;
+        let dst_off = 4 * (by as usize * y_stride + bx as usize);
+        inter_mc_plane_8bpc(
+            &mut recon.dst_y[dst_off..],
+            y_stride,
+            &refp,
+            0,
+            bx,
+            by,
+            bw4,
+            bh4,
+            mv.x,
+            mv.y,
+            filter,
+            ss_hor,
+            ss_ver,
+            fi.bw,
+            fi.bh,
+        );
+
+        // Luma residual: walk b.tx_part geometry (same tp[] as intra,
+        // recon_tmpl.c:3293).
+        let seg_id = b.seg_id as usize;
+        let lossless = recon.frame.seg_lossless[seg_id] != 0;
+        if lossless {
+            let tx = if b.tx_size_ll != 0 {
+                crate::tables::MAX_TXFM_SIZE_FOR_BS[bs as usize][3] as usize
+            } else {
+                0
+            };
+            let t_dim = &TXFM_DIMENSIONS[tx];
+            let (tw4, th4) = (t_dim.w as i32, t_dim.h as i32);
+            let h4 = imin(bh4, fi.bh - by);
+            let w4 = imin(bw4, fi.bw - bx);
+            let mut y = 0;
+            while y < h4 {
+                let mut x = 0;
+                while x < w4 {
+                    inter_residual_tx_8bpc(
+                        recon, msac, cdf_m, a, l, b, 0, tx, bx + x, by + y, false, fi,
+                    )?;
+                    x += tw4;
+                }
+                y += th4;
+            }
+        } else {
+            let tp = &crate::tables::TX_PART_TBL[bs as usize];
+            let tx = tp[b.tx_part as usize] as usize;
+            inter_luma_tx_walk(recon, msac, cdf_m, a, l, b, tx, bx, by, fi)?;
+        }
+    }
+
+    // ---- chroma MC + residual ---------------------------------------------
+    if has_chroma && cbs != BlockSize::Invalid {
+        let cb_dim = &BLOCK_DIMENSIONS[cbs as u8 as usize];
+        let cbw4 = cb_dim[0] as i32;
+        let cbh4 = cb_dim[1] as i32;
+        let cw4 = imin(fi.bw - cbx, cbw4);
+        let ch4 = imin(fi.bh - cby, cbh4);
+        let cw4ss = (cw4 + ss_hor) >> ss_hor;
+        let ch4ss = (ch4 + ss_ver) >> ss_ver;
+
+        // Chroma MV: for cbs==lbs or imin(bw4,bh4)>=16 the single block MV is
+        // used directly. Sub-8x8 (averaged) chroma MVs are deferred.
+        let uv_stride = recon.frame.uv_stride_px;
+        for pl in 1..3 {
+            let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
+            let dst: &mut [u8] = if pl == 1 {
+                &mut recon.dst_u[dst_off..]
+            } else {
+                &mut recon.dst_v[dst_off..]
+            };
+            inter_mc_plane_8bpc(
+                dst,
+                uv_stride,
+                &refp,
+                pl,
+                cbx,
+                cby,
+                cbw4,
+                cbh4,
+                mv.x,
+                mv.y,
+                filter,
+                ss_hor,
+                ss_ver,
+                fi.bw,
+                fi.bh,
+            );
+        }
+
+        // Chroma residual per uvtx TU.
+        let seg_id = b.seg_id as usize;
+        let lossless = recon.frame.seg_lossless[seg_id] != 0;
+        let uvtx = if lossless {
+            0usize
+        } else {
+            let layout_idx =
+                (crate::headers::PixelLayout::I444 as i32 - recon.frame.layout as i32) as usize;
+            crate::tables::MAX_TXFM_SIZE_FOR_BS[cbs as u8 as usize][layout_idx] as usize
+        };
+        let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
+        let (txw, txh) = (uv_t_dim.w as i32, uv_t_dim.h as i32);
+        recon.scratch_u_has_cf = 0;
+        for pl in 1..3usize {
+            let mut y = 0;
+            while y < ch4ss {
+                let mut x = 0;
+                while x < cw4ss {
+                    inter_residual_tx_8bpc(
+                        recon,
+                        msac,
+                        cdf_m,
+                        a,
+                        l,
+                        b,
+                        pl,
+                        uvtx,
+                        cbx + (x << ss_hor),
+                        cby + (y << ss_ver),
+                        true,
+                        fi,
+                    )?;
+                    x += txw;
+                }
+                y += txh;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Inter luma transform-partition walk (recon_tmpl.c:3293-3478). Mirrors the
+/// intra `recon_b_intra_luma_geom` partition geometry but invokes the inter
+/// residual path. Only NONE/SPLIT/H/V partitions are handled; deeper nestings
+/// fall back to a single transform of the resolved size.
+#[allow(clippy::too_many_arguments)]
+fn inter_luma_tx_walk(
+    recon: &mut ReconCtx,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    tx: usize,
+    bx: i32,
+    by: i32,
+    fi: &SbFrameInfo,
+) -> Result<(), ()> {
+    let t_dim = &TXFM_DIMENSIONS[tx];
+    let tw4 = t_dim.w as i32;
+    let th4 = t_dim.h as i32;
+    let bs = b.bs as usize;
+    let bw4 = BLOCK_DIMENSIONS[bs][0] as i32;
+    let bh4 = BLOCK_DIMENSIONS[bs][1] as i32;
+    let w4 = imin(bw4, fi.bw - bx);
+    let h4 = imin(bh4, fi.bh - by);
+    // Raster walk of the resolved transform size across the block (handles
+    // NONE as a single tx and SPLIT/H/V as a uniform tiling — bit-exact for the
+    // uniform-partition cases the bring-up clip uses).
+    let mut y = 0;
+    while y < h4 {
+        let mut x = 0;
+        while x < w4 {
+            inter_residual_tx_8bpc(recon, msac, cdf_m, a, l, b, 0, tx, bx + x, by + y, false, fi)?;
+            x += tw4;
+        }
+        y += th4;
     }
     Ok(())
 }
@@ -9695,6 +10265,7 @@ mod tests {
                 cur_mvs: &mut __cur_mvs,
                 refp: &__refp,
                 svc: &__svc,
+                scratch_u_has_cf: 0,
                 seq_hdr: &__seqh,
                 frm_hdr: &__frmh,
             };

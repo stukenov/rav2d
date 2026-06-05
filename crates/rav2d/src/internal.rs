@@ -364,10 +364,11 @@ pub struct DecoderContext {
     /// worked through; the orchestration runs end-to-end when enabled.
     pub run_decode: bool,
 
-    /// The most recently reconstructed picture, handed off to the decoder's
-    /// output queue by `gen_picture`. (Minimal output path; visibility/POC
-    /// reordering lands with full output queueing.)
-    pub frame_out: Option<crate::picture::Picture>,
+    /// Reconstructed pictures awaiting hand-off to the decoder's output queue,
+    /// in decode order. `submit_frame` pushes each decoded frame here so that
+    /// frames decoded within a single `parse_obus` call are not lost. (Minimal
+    /// output path; visibility/POC display reordering lands with full queueing.)
+    pub frame_out: Vec<crate::picture::Picture>,
 }
 
 #[derive(Default)]
