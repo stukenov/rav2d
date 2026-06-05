@@ -2240,46 +2240,48 @@ fn visit_mode_nonkf_entries(mut f: impl FnMut(usize, usize)) {
         f(3200 + j * 8, 7);
     } // amvd_index
     f(3216, 1); // warpmv_with_mvd
-    // warp_delta_prec: 23 entries (matches Rust CDF layout, not N_BS_SIZES=31)
-    for j in 0..23 {
+    // warp_delta_prec: [N_BS_SIZES=31][2] in the CDF layout (offset 3218..3280).
+    // The reserved width must match the cdf_acc layout exactly so every CDF that
+    // follows it stays aligned for the per-symbol count decay (reset_count).
+    for j in 0..31 {
         f(3218 + j * 2, 1);
     }
     for i in 0..2 {
         for j in 0..2 {
-            f(3264 + i * 16 + j * 8, 7);
+            f(3280 + i * 16 + j * 8, 7);
         }
-    } // warp_delta_param
-    f(3296, 1); // warp_delta_sign
+    } // warp_delta_param [2][2][8] @ 3280
+    f(3312, 1); // warp_delta_sign
     for j in 0..4 {
-        f(3298 + j * 2, 1);
+        f(3314 + j * 2, 1);
     } // warp_interintra
     for j in 0..5 {
-        f(3308 + j * 4, 3);
+        f(3324 + j * 4, 3);
     } // comp_mode_sameref
     for j in 0..2 {
-        f(3328 + j * 2, 1);
+        f(3344 + j * 2, 1);
     } // comp_mode_joint
     for j in 0..5 {
-        f(3336 + j * 8, 4);
+        f(3352 + j * 8, 4);
     } // comp_mode
     for j in 0..2 {
-        f(3376 + j * 2, 1);
+        f(3392 + j * 2, 1);
     } // opfl
     for j in 0..11 {
-        f(3380 + j * 2, 1);
+        f(3396 + j * 2, 1);
     } // refine_mv
     for j in 0..12 {
-        f(3402 + j * 2, 1);
+        f(3418 + j * 2, 1);
     } // comp_type_masked
-    f(3426, 1); // comp_type_weighted
+    f(3442, 1); // comp_type_weighted
     for j in 0..4 {
-        f(3428 + j * 2, 1);
+        f(3444 + j * 2, 1);
     } // cwp_idx
     for j in 0..8 {
-        f(3436 + j * 4, 2);
+        f(3452 + j * 4, 2);
     } // filter
     for j in 0..3 {
-        f(3468 + j * 2, 1);
+        f(3484 + j * 2, 1);
     } // seg_pred
 }
 
