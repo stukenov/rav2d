@@ -123,6 +123,9 @@ fn dav2d_run(bytes: &[u8], inloop_filters: u32) -> (u32, u64) {
         settings.n_threads = 1;
         settings.apply_grain = 0;
         settings.inloop_filters = inloop_filters;
+        // rav2d emits every decoded frame in coding order; match that so the
+        // frame counts (and thus the work compared) line up.
+        settings.output_invisible_frames = 1;
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
         if sys::dav2d_open(&mut ctx, &settings) != 0 {
