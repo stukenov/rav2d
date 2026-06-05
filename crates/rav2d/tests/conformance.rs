@@ -231,6 +231,68 @@ pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePla
     frames
 }
 
+/// Like `dav2d_decode_filters`, but also emits invisibly-coded (non-shown)
+/// frames in CODING order (`output_invisible_frames`). This lets a non-shown
+/// keyframe be matched 1:1 against rav2d's coding-order output even with filters
+/// on. Film grain off.
+pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Vec<FramePlanes> {
+    use rav2d::sys;
+    let data = std::fs::read(path).expect("read clip");
+    let mut frames = Vec::new();
+
+    unsafe {
+        let mut settings: sys::Dav2dSettings = std::mem::zeroed();
+        sys::dav2d_default_settings(&mut settings);
+        settings.n_threads = 1;
+        settings.apply_grain = 0;
+        settings.inloop_filters = inloop_filters;
+        settings.output_invisible_frames = 1;
+
+        let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
+        let r = sys::dav2d_open(&mut ctx, &settings);
+        assert_eq!(r, 0, "dav2d_open failed: {r}");
+
+        let mut d: sys::Dav2dData = std::mem::zeroed();
+        let buf = sys::dav2d_data_create(&mut d, data.len());
+        assert!(!buf.is_null(), "dav2d_data_create failed");
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+
+        let mut drained = false;
+        loop {
+            loop {
+                let mut pic: sys::Dav2dPicture = std::mem::zeroed();
+                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                if pr == EAGAIN || pr < 0 {
+                    break;
+                }
+                frames.push(extract_planes(&pic));
+                sys::dav2d_picture_unref(&mut pic);
+            }
+            if d.sz > 0 {
+                let sr = sys::dav2d_send_data(ctx, &mut d);
+                if sr < 0 && sr != EAGAIN {
+                    panic!("dav2d_send_data failed: {sr}");
+                }
+            } else if !drained {
+                drained = true;
+                sys::dav2d_send_data(ctx, std::ptr::null_mut());
+            } else {
+                let mut pic: sys::Dav2dPicture = std::mem::zeroed();
+                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                if pr == 0 {
+                    frames.push(extract_planes(&pic));
+                    sys::dav2d_picture_unref(&mut pic);
+                } else {
+                    break;
+                }
+            }
+        }
+        sys::dav2d_close(&mut ctx);
+    }
+
+    frames
+}
+
 // ---------------------------------------------------------------------------
 // rav2d decode
 // ---------------------------------------------------------------------------
@@ -629,6 +691,127 @@ fn intra_frame0_sweep() {
         }
     }
     eprintln!("\n=== intra frame-0 sweep ===\n{}", summary.join("\n"));
+}
+
+/// M2 acceptance gate: for each clip whose keyframe is already intra-bit-exact
+/// (filters off), decode frame-0 with BOTH decoders' in-loop filters fully ON
+/// (deblock + CDEF + CCSO + Wiener/GDF) and assert all planes are bit-exact.
+///
+/// dav2d emits invisible frames so a non-shown keyframe appears in coding order;
+/// rav2d emits coding order too, so got[0] is the keyframe. We pick the dav2d
+/// frame whose dims match and whose pixels best match rav2d's keyframe (the
+/// best-match-keyframe approach used by the intra sweep), then require zero diff.
+///
+/// Film grain stays off (M4). All listed clips' keyframes must be bit-exact with
+/// filters on; this is the M2 done-condition.
+#[test]
+fn bit_exact_filtered_sweep() {
+    let clips = [
+        "avm-v14.1.0-bus.64x64.l5.obu",
+        "avm-v14.1.0-bus.64x64.l5.lossless.obu",
+        "avm-v14.1.0-bus.64x64.l5.opfl0-refinemv0.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp0.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp1.obu",
+        "avm-v14.1.0-bus.352x288.l5.seg1.obu",
+        "avm-v14.1.0-bus.352x288.l10.deltaq1.obu",
+        "avm-v14.1.0-bus.352x288.l1.partial_lossless.obu",
+        "avm-v14.1.0-hm.64x64.l5.filmgrain.obu",
+    ];
+    let plane_names = ["luma", "U", "V"];
+    let mut failures = Vec::new();
+    let mut summary = Vec::new();
+    for clip in clips {
+        let path = media(clip);
+        if !path.exists() {
+            summary.push(format!("{clip}: MISSING"));
+            continue;
+        }
+        let reference = dav2d_decode_filters_invisible(&path, DAV2D_INLOOPFILTER_ALL);
+        let got = rav2d_decode_filters(&path, rav2d::InloopFilterType::All);
+        if got.is_empty() {
+            failures.push(format!("{clip}: rav2d produced no frames"));
+            continue;
+        }
+        if reference.is_empty() {
+            failures.push(format!("{clip}: dav2d produced no frames"));
+            continue;
+        }
+        let g = &got[0];
+        // Best-match the dav2d coding-order keyframe by pixel similarity.
+        let r = reference
+            .iter()
+            .filter(|r| (r.w, r.h, r.bpc, r.layout) == (g.w, g.h, g.bpc, g.layout))
+            .min_by_key(|r| {
+                (0..3)
+                    .map(|pl| {
+                        r.planes[pl]
+                            .iter()
+                            .zip(g.planes[pl].iter())
+                            .filter(|(a, b)| a != b)
+                            .count()
+                    })
+                    .sum::<usize>()
+            });
+        let r = match r {
+            Some(r) => r,
+            None => {
+                failures.push(format!("{clip}: no dav2d frame matches {}x{}", g.w, g.h));
+                continue;
+            }
+        };
+        let (ssh, _) = ss(r.layout);
+        let mut clip_fail = Vec::new();
+        for pl in 0..3 {
+            if r.planes[pl].len() != g.planes[pl].len() {
+                clip_fail.push(format!(
+                    "plane {} size differs ({} vs {})",
+                    plane_names[pl],
+                    r.planes[pl].len(),
+                    g.planes[pl].len()
+                ));
+                continue;
+            }
+            let diff = r.planes[pl]
+                .iter()
+                .zip(g.planes[pl].iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            if diff != 0 {
+                let first = r.planes[pl]
+                    .iter()
+                    .zip(g.planes[pl].iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap();
+                let stride = if pl == 0 {
+                    r.w as usize
+                } else {
+                    ((r.w + ssh) >> ssh) as usize
+                };
+                clip_fail.push(format!(
+                    "plane {} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
+                    plane_names[pl],
+                    r.planes[pl].len(),
+                    first % stride,
+                    first / stride,
+                    r.planes[pl][first],
+                    g.planes[pl][first]
+                ));
+            }
+        }
+        if clip_fail.is_empty() {
+            summary.push(format!("{clip}: BIT-EXACT ({}x{})", r.w, r.h));
+        } else {
+            summary.push(format!("{clip}: DIFF"));
+            failures.push(format!("{clip}:\n    {}", clip_fail.join("\n    ")));
+        }
+    }
+    eprintln!("\n=== filtered frame-0 sweep ===\n{}", summary.join("\n"));
+    if !failures.is_empty() {
+        panic!(
+            "filtered frame-0 not bit-exact:\n  {}",
+            failures.join("\n  ")
+        );
+    }
 }
 
 /// Debug helper: decode one clip (env CLIP) with both decoders so RAV2D_TRACE
