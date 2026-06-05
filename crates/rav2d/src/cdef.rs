@@ -1,3 +1,4 @@
+use crate::ccso::{ccso_add_8bpc, ccso_prep_8bpc};
 use crate::intops::{apply_sign, iclip, imax, imin, ulog2};
 use crate::tables::CDEF_DIRECTIONS;
 
@@ -459,6 +460,31 @@ pub struct CdefApplyParams {
 }
 
 /// Per-superblock-row CDEF parameters threaded from the filter driver.
+/// Per-plane CCSO configuration (cross-component sample offset), from the frame
+/// header's `ccso.p[pl]`. `quant_step` and `offset_lut` are resolved from the
+/// scale/quant indices.
+#[derive(Clone, Copy)]
+pub struct CcsoPlaneCfg {
+    pub max_band_log2: u32,
+    pub ext_filter: usize,
+    pub quant_step: i32,
+    pub edge_clf: u32,
+    pub bo_only: bool,
+    pub scale_idx: usize,
+    pub filter_off: [u8; 64],
+}
+
+/// CCSO configuration for a CDEF brow. `mask_ccso[sb256x][pl]` is the per-SB CCSO
+/// enable flag (decoded into the `Av2Filter` masks). The lossless masks are
+/// per-SB256 and only non-zero on segmented-lossless frames.
+pub struct CcsoCfg<'a> {
+    pub p: [CcsoPlaneCfg; 3],
+    pub mask_ccso: &'a [[u8; 3]],
+    pub mask_ll_y: &'a [[[u16; 4]; 64]],
+    pub mask_ll_uv: &'a [[[u16; 4]; 64]],
+    pub any_lossless: bool,
+}
+
 pub struct CdefBrowParams<'a> {
     pub bw: i32,
     pub bh: i32,
@@ -474,6 +500,8 @@ pub struct CdefBrowParams<'a> {
     /// Per-cdef-index raw strengths (0..n_strengths) for Y and UV.
     pub y_strength: &'a [u8],
     pub uv_strength: &'a [u8],
+    /// CCSO config; `None` when CCSO is disabled for this frame.
+    pub ccso: Option<CcsoCfg<'a>>,
 }
 
 const UV_DIRS: [[u8; 8]; 2] = [[0, 1, 2, 3, 4, 5, 6, 7], [7, 0, 2, 4, 5, 6, 6, 6]];
@@ -613,6 +641,10 @@ pub fn cdef_brow_8bpc(
         let mut sb_y = row_y;
         let mut sb_uv = row_uv;
 
+        // CCSO LUT-index scratch (per-SB, recomputed each sbx). Sized for the
+        // largest case (luma 64x8). dav2d: ccso_lut_idx[3][64*8].
+        let mut ccso_lut_idx: [[u8; 64 * 8]; 3] = [[0u8; 64 * 8]; 3];
+
         for sbx in 0..sb64w {
             let sb256x = (sbx >> 2) as usize;
             let sb64x_idx = (sbx & 3) as usize;
@@ -623,18 +655,77 @@ pub fn cdef_brow_8bpc(
             } else {
                 -1
             };
-            if cdef_idx == -1
-                || !p.cdef_on
-                || ((p.y_strength.get(cdef_idx as usize).copied().unwrap_or(0) == 0)
-                    && (p.uv_strength.get(cdef_idx as usize).copied().unwrap_or(0) == 0))
-            {
-                prev_flag = 0;
-                edges |= CDEF_HAVE_LEFT;
-                sb_y += (sbsz * 4) as usize;
-                sb_uv += ((sbsz * 4) as usize) >> ss_hor;
-                continue;
+
+            // --- CCSO prep (before CDEF) ---------------------------------------
+            // dav2d cdef_apply_tmpl.c:153-210. Runs for every SB (independent of
+            // CDEF), computing the per-pixel LUT index used by ccso_add later.
+            if let Some(cc) = &p.ccso {
+                let ccm = cc
+                    .mask_ccso
+                    .get(sb256x)
+                    .copied()
+                    .unwrap_or([0; 3]);
+                let flag = ccm[0] | ccm[1] | ccm[2];
+                let do_left = flag & !prev_flag;
+                prev_flag |= flag;
+                if do_left != 0 && (edges & CDEF_HAVE_LEFT) != 0 {
+                    if do_left & BACKUP_2X8_Y != 0 {
+                        cdef_backup2x8(&mut lr_bak[bit][0], y, sb_y, y_ls, 0, 8);
+                    }
+                    if have_chroma && do_left & BACKUP_2X8_UV != 0 {
+                        cdef_backup2x8(&mut lr_bak[bit][1], u, sb_uv, uv_ls, 0, 8 >> ss_ver);
+                        cdef_backup2x8(&mut lr_bak[bit][2], v, sb_uv, uv_ls, 0, 8 >> ss_ver);
+                    }
+                }
+                for pl in 0..3 {
+                    if ccm[pl] == 0 {
+                        continue;
+                    }
+                    let cfg = &cc.p[pl];
+                    let pl_ss_hor = if pl != 0 { ss_hor } else { 0 };
+                    let pl_ss_ver = if pl != 0 { ss_ver } else { 0 };
+                    let mut sb_edges = edges;
+                    if (sbx + 1) * sbsz >= p.bw {
+                        sb_edges &= !CDEF_HAVE_RIGHT;
+                    }
+                    let w_full = imin(sbsz, p.bw - sbx * sbsz) * 4;
+                    if w_full <= 0 {
+                        continue;
+                    }
+                    // top/bottom luma lines (single-thread sb_st_y case).
+                    let top_off = sbx as usize * (sbsz as usize) * 4;
+                    let bot_off = sb_y + 8 * y_ls;
+                    ccso_prep_8bpc(
+                        &mut ccso_lut_idx[pl],
+                        64 >> pl_ss_hor,
+                        y,
+                        y_ls,
+                        sb_y,
+                        &lr_bak[bit][0],
+                        &cdef_line[tf][0],
+                        top_off,
+                        y,
+                        bot_off,
+                        cfg.max_band_log2,
+                        cfg.ext_filter,
+                        cfg.quant_step,
+                        cfg.edge_clf,
+                        cfg.bo_only,
+                        sb_edges,
+                        (w_full >> pl_ss_hor) as usize,
+                        (8 >> pl_ss_ver) as usize,
+                        pl_ss_hor,
+                        pl_ss_ver,
+                    );
+                }
             }
 
+            let cdef_active = !(cdef_idx == -1
+                || !p.cdef_on
+                || ((p.y_strength.get(cdef_idx.max(0) as usize).copied().unwrap_or(0) == 0)
+                    && (p.uv_strength.get(cdef_idx.max(0) as usize).copied().unwrap_or(0) == 0)));
+
+            if cdef_active {
             let noskip_full = if p.on_skip_tx {
                 !0u16
             } else if sb256x < p.mask_noskip.len() && by_idx < 32 && sb64x_idx < 4 {
@@ -815,6 +906,91 @@ pub fn cdef_brow_8bpc(
                 b_y += 8;
                 b_uv += 8 >> ss_hor;
                 bx += 2;
+            }
+            } else {
+                // CDEF skipped for this SB (dav2d `goto next_sb` after resetting
+                // prev_flag); CCSO add still runs below.
+                prev_flag = 0;
+                edges |= CDEF_HAVE_LEFT;
+            }
+
+            // --- CCSO add (next_sb) -------------------------------------------
+            // dav2d cdef_apply_tmpl.c:355-377. Applies the per-pixel offset using
+            // the LUT index computed in the prep stage.
+            if let Some(cc) = &p.ccso {
+                let ccm = cc.mask_ccso.get(sb256x).copied().unwrap_or([0; 3]);
+                let flag = ccm[0] | ((ccm[1] | ccm[2]) << 1);
+                let do_right = flag & !prev_flag;
+                if do_right != 0 && (sbx + 1) * sbsz < p.bw {
+                    if do_right & BACKUP_2X8_Y != 0 {
+                        cdef_backup2x8(&mut lr_bak[bit][0], y, sb_y, y_ls, sbsz as usize * 4, 8);
+                    }
+                    if have_chroma && do_right & BACKUP_2X8_UV != 0 {
+                        cdef_backup2x8(
+                            &mut lr_bak[bit][1],
+                            u,
+                            sb_uv,
+                            uv_ls,
+                            (sbsz as usize * 4) >> ss_hor,
+                            8 >> ss_ver,
+                        );
+                        cdef_backup2x8(
+                            &mut lr_bak[bit][2],
+                            v,
+                            sb_uv,
+                            uv_ls,
+                            (sbsz as usize * 4) >> ss_hor,
+                            8 >> ss_ver,
+                        );
+                    }
+                    prev_flag |= do_right;
+                }
+                // lossless masks for the add (zero for non-segmented-lossless).
+                static ZERO_LL: [[u16; 4]; 64] = [[0u16; 4]; 64];
+                let by_idx_ll = (2 * by_idx) as usize;
+                for pl in 0..3 {
+                    if ccm[pl] == 0 {
+                        continue;
+                    }
+                    let cfg = &cc.p[pl];
+                    let pl_ss_hor = if pl != 0 { ss_hor } else { 0 };
+                    let pl_ss_ver = if pl != 0 { ss_ver } else { 0 };
+                    let w_full = imin(sbsz, p.bw - sbx * sbsz) * 4;
+                    let (dst, dst_off, dst_ls): (&mut [u8], usize, usize) = if pl == 0 {
+                        (y, sb_y, y_ls)
+                    } else if pl == 1 {
+                        (u, sb_uv, uv_ls)
+                    } else {
+                        (v, sb_uv, uv_ls)
+                    };
+                    // ll_mask slice: for non-lossless frames it is all-zero. The
+                    // ccso_add indexes [yy>>2][0], so build a 2-row window matching
+                    // dav2d's y/uv ll_mask pointer.
+                    let ll: &[[u16; 4]] = if cc.any_lossless {
+                        let src = if pl == 0 {
+                            cc.mask_ll_y.get(sb256x)
+                        } else {
+                            cc.mask_ll_uv.get(sb256x)
+                        };
+                        match src {
+                            Some(m) => &m[(by_idx_ll >> pl_ss_ver)..],
+                            None => &ZERO_LL,
+                        }
+                    } else {
+                        &ZERO_LL
+                    };
+                    ccso_add_8bpc(
+                        &mut dst[dst_off..],
+                        dst_ls,
+                        &ccso_lut_idx[pl],
+                        (64 >> pl_ss_hor) as usize,
+                        &cfg.filter_off,
+                        &crate::tables::CCSO_OFFSET[cfg.scale_idx],
+                        (w_full >> pl_ss_hor) as usize,
+                        (8 >> pl_ss_ver) as usize,
+                        ll,
+                    );
+                }
             }
 
             sb_y += (sbsz * 4) as usize;

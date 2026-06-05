@@ -3116,10 +3116,21 @@ fn filter_sbrow(
         );
     }
 
-    // (3) CDEF (+CCSO). CCSO is folded into this stage in dav2d; rav2d has no
-    // CCSO driver yet, so it is gated off here (it is a no-op for the M2 clip,
-    // whose frame header disables CCSO). Only luma+chroma CDEF runs.
+    // (3) CDEF (+CCSO). CCSO is folded into this stage in dav2d (applied per 8x8
+    // after CDEF). It runs when the CCSO inloop bit is set and any plane enables
+    // CCSO in the frame header.
     if seq_hdr.cdef && inloop & (INLOOPFILTER_CDEF | INLOOPFILTER_CCSO) != 0 {
+        let ccso_on = inloop & INLOOPFILTER_CCSO != 0
+            && (frame_hdr.ccso.p[0].enabled != 0
+                || frame_hdr.ccso.p[1].enabled != 0
+                || frame_hdr.ccso.p[2].enabled != 0);
+        let ccso_pcfg = [
+            build_ccso_plane_cfg(&frame_hdr, 0),
+            build_ccso_plane_cfg(&frame_hdr, 1),
+            build_ccso_plane_cfg(&frame_hdr, 2),
+        ];
+        let any_lossless = frame_hdr.segmentation.enabled != 0
+            && (0..crate::headers::MAX_SEGMENTS).any(|i| frame_hdr.segmentation.lossless[i] != 0);
         // Allocate the toggled CDEF top-row backup banks lazily (2 banks x 3
         // planes, 2 rows each at the plane's positive stride).
         let y_ls = fp.y_stride.unsigned_abs();
@@ -3157,6 +3168,17 @@ fn filter_sbrow(
                 mask_noskip: &collect_noskip(&lf.mask, prev_mask_row, sb256w),
                 y_strength: &fp.cdef_y_strength,
                 uv_strength: &fp.cdef_uv_strength,
+                ccso: if ccso_on {
+                    Some(crate::cdef::CcsoCfg {
+                        p: ccso_pcfg,
+                        mask_ccso: &collect_ccso(&lf.mask, prev_mask_row, sb256w),
+                        mask_ll_y: &collect_ll_y(&lf.mask, prev_mask_row, sb256w),
+                        mask_ll_uv: &collect_ll_uv(&lf.mask, prev_mask_row, sb256w),
+                        any_lossless,
+                    })
+                } else {
+                    None
+                },
             };
             crate::cdef::cdef_brow_8bpc(
                 dst_y,
@@ -3186,6 +3208,17 @@ fn filter_sbrow(
             mask_noskip: &collect_noskip(&lf.mask, mask_row, sb256w),
             y_strength: &fp.cdef_y_strength,
             uv_strength: &fp.cdef_uv_strength,
+            ccso: if ccso_on {
+                Some(crate::cdef::CcsoCfg {
+                    p: ccso_pcfg,
+                    mask_ccso: &collect_ccso(&lf.mask, mask_row, sb256w),
+                    mask_ll_y: &collect_ll_y(&lf.mask, mask_row, sb256w),
+                    mask_ll_uv: &collect_ll_uv(&lf.mask, mask_row, sb256w),
+                    any_lossless,
+                })
+            } else {
+                None
+            },
         };
         crate::cdef::cdef_brow_8bpc(
             dst_y,
@@ -3277,6 +3310,59 @@ fn collect_noskip(
                 .unwrap_or([[0; 4]; 32])
         })
         .collect()
+}
+
+fn collect_ccso(mask: &[crate::lf_mask::Av2Filter], row: usize, sb256w: i32) -> Vec<[u8; 3]> {
+    (0..sb256w as usize)
+        .map(|i| mask.get(row + i).map(|m| m.ccso).unwrap_or([0; 3]))
+        .collect()
+}
+
+fn collect_ll_y(
+    mask: &[crate::lf_mask::Av2Filter],
+    row: usize,
+    sb256w: i32,
+) -> Vec<[[u16; 4]; 64]> {
+    (0..sb256w as usize)
+        .map(|i| {
+            mask.get(row + i)
+                .map(|m| m.lossless_mask_y)
+                .unwrap_or([[0; 4]; 64])
+        })
+        .collect()
+}
+
+fn collect_ll_uv(
+    mask: &[crate::lf_mask::Av2Filter],
+    row: usize,
+    sb256w: i32,
+) -> Vec<[[u16; 4]; 64]> {
+    (0..sb256w as usize)
+        .map(|i| {
+            mask.get(row + i)
+                .map(|m| m.lossless_mask_uv)
+                .unwrap_or([[0; 4]; 64])
+        })
+        .collect()
+}
+
+/// Build the per-plane CCSO config from the frame header.
+fn build_ccso_plane_cfg(
+    frame_hdr: &crate::headers::FrameHeader,
+    pl: usize,
+) -> crate::cdef::CcsoPlaneCfg {
+    let cp = &frame_hdr.ccso.p[pl];
+    let scale_idx = cp.scale_idx as usize;
+    let quant_step = crate::tables::CCSO_QUANT_SZ[scale_idx][cp.quant_idx as usize] as i32;
+    crate::cdef::CcsoPlaneCfg {
+        max_band_log2: cp.max_band_log2 as u32,
+        ext_filter: cp.ext_filter_support as usize,
+        quant_step,
+        edge_clf: cp.edge_clf as u32,
+        bo_only: cp.bo_only != 0,
+        scale_idx,
+        filter_off: cp.filter_off,
+    }
 }
 
 /// Orchestrate a single-threaded frame decode: init -> CDF init -> main loop.
