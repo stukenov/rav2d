@@ -7835,7 +7835,22 @@ fn decode_b(
         }
     } else if pass & (Pass::Recon as u8) != 0 && b.is_intra == 0 && !intrabc {
         recon_b_inter(
-            recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
+            recon,
+            msac,
+            cdf_m,
+            a,
+            l,
+            &b,
+            bx,
+            by,
+            cbx,
+            cby,
+            lbs,
+            cbs,
+            has_luma,
+            has_chroma,
+            ChromaPhase::Both,
+            fi,
         )?;
         if trace_blk {
             eprintln!("  CK post_inter_recon rng={}", msac.dbg_rng());
@@ -9187,6 +9202,7 @@ fn inter_chroma_residual_8bpc(
     cw4ss: i32,
     ch4ss: i32,
     txtp_seed: u16,
+    phase: ChromaPhase,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     let uv_t_dim = &TXFM_DIMENSIONS[uvtx];
@@ -9206,105 +9222,140 @@ fn inter_chroma_residual_8bpc(
     let mut tu_eob = [[-1i32; 2]; 256];
     let mut tu_txtp = [[0u16; 2]; 256];
 
-    // Decode all U TUs then all V TUs (entropy order).
-    recon.scratch_u_has_cf = 0;
-    for pl in 0..2usize {
-        let plane_cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
-        let mut y = 0;
-        while y < ch4ss {
-            let mut x = 0;
-            while x < cw4ss {
-                let i = (y * cbw4ss + x) as usize;
-                let bx = cbx + (x << ss_hor);
-                let by = cby + (y << ss_ver);
-                let bx4 = ((bx & 63) >> ss_hor) as usize;
-                let by4 = ((by & 63) >> ss_ver) as usize;
+    // Coefficient (entropy) read. For the chroma read/recon staging of >64px
+    // inter blocks (recon_tmpl.c:3519-3593 `cbs_stage`), the coefficients are
+    // read with the first luma sub-block (`ReadOnly`) and stashed, then the
+    // residual is applied with the last luma sub-block (`ReconOnly`) once the
+    // intervening luma blocks have splatted their MVs into the spatial refmvs
+    // grid (so OPFL/refine-mv/BACP chroma prediction sees the final state).
+    if phase != ChromaPhase::ReconOnly {
+        // Decode all U TUs then all V TUs (entropy order).
+        recon.scratch_u_has_cf = 0;
+        for pl in 0..2usize {
+            let plane_cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
+            let mut y = 0;
+            while y < ch4ss {
+                let mut x = 0;
+                while x < cw4ss {
+                    let i = (y * cbw4ss + x) as usize;
+                    let bx = cbx + (x << ss_hor);
+                    let by = cby + (y << ss_ver);
+                    let bx4 = ((bx & 63) >> ss_hor) as usize;
+                    let by4 = ((by & 63) >> ss_ver) as usize;
 
-                let cf_slot = &mut plane_cf[i * 16..i * 16 + tu_n];
-                cf_slot.fill(0);
+                    let cf_slot = &mut plane_cf[i * 16..i * 16 + tu_n];
+                    cf_slot.fill(0);
 
-                let mut txtp: u16 = txtp_seed;
-                let mut res_ctx: u8 = 0;
-                let eob = if b.skip_txfm != 0 {
-                    res_ctx = 0x40;
-                    txtp = crate::levels::txtp::DCT_DCT as u16;
-                    -1i32
-                } else {
-                    let dq_tbl = recon.dq_active[seg_id][1 + pl];
-                    let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
-                    let params = crate::recon::DecodeCoefParams {
-                        tx: uvtx,
-                        bs: b.bs as usize,
-                        plane: (1 + pl) as i32,
-                        intra: false,
-                        fsc: false,
-                        lossless,
-                        sdp_active: false,
-                        y_mode: 0,
-                        uv_mode: 0,
-                        seg_id,
-                        seq_fsc: recon.frame.seq_fsc,
-                        seq_ist: recon.frame.seq_ist,
-                        seq_cctx: recon.frame.seq_cctx,
-                        chroma_dctonly: false,
-                        reduced_txtp_set: recon.frame.reduced_txtp_set,
-                        tcq_enabled: recon.frame.tcq,
-                        layout: recon.frame.layout,
-                        u_has_cf: recon.scratch_u_has_cf,
-                        cbx: bx,
-                        cby: by,
-                        luma_fsc_map: &[],
-                        dq_tbl,
-                        bitdepth: recon.frame.bitdepth,
-                        qm: qm_ref,
-                        ss_hor: recon.frame.ss_hor != 0,
-                        ss_ver: recon.frame.ss_ver != 0,
+                    let mut txtp: u16 = txtp_seed;
+                    let mut res_ctx: u8 = 0;
+                    let eob = if b.skip_txfm != 0 {
+                        res_ctx = 0x40;
+                        txtp = crate::levels::txtp::DCT_DCT as u16;
+                        -1i32
+                    } else {
+                        let dq_tbl = recon.dq_active[seg_id][1 + pl];
+                        let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
+                        let params = crate::recon::DecodeCoefParams {
+                            tx: uvtx,
+                            bs: b.bs as usize,
+                            plane: (1 + pl) as i32,
+                            intra: false,
+                            fsc: false,
+                            lossless,
+                            sdp_active: false,
+                            y_mode: 0,
+                            uv_mode: 0,
+                            seg_id,
+                            seq_fsc: recon.frame.seq_fsc,
+                            seq_ist: recon.frame.seq_ist,
+                            seq_cctx: recon.frame.seq_cctx,
+                            chroma_dctonly: false,
+                            reduced_txtp_set: recon.frame.reduced_txtp_set,
+                            tcq_enabled: recon.frame.tcq,
+                            layout: recon.frame.layout,
+                            u_has_cf: recon.scratch_u_has_cf,
+                            cbx: bx,
+                            cby: by,
+                            luma_fsc_map: &[],
+                            dq_tbl,
+                            bitdepth: recon.frame.bitdepth,
+                            qm: qm_ref,
+                            ss_hor: recon.frame.ss_hor != 0,
+                            ss_ver: recon.frame.ss_ver != 0,
+                        };
+                        let acoef = &a.ccoef[pl][bx4..];
+                        let lcoef = &l.ccoef[pl][by4..];
+                        let e = crate::recon::decode_coefs(
+                            msac,
+                            recon.cdf_coef,
+                            cdf_m,
+                            acoef,
+                            lcoef,
+                            &params,
+                            cf_slot,
+                            &mut txtp,
+                            &mut res_ctx,
+                        );
+                        if e == i32::MIN {
+                            return Err(());
+                        }
+                        e
                     };
-                    let acoef = &a.ccoef[pl][bx4..];
-                    let lcoef = &l.ccoef[pl][by4..];
-                    let e = crate::recon::decode_coefs(
-                        msac,
-                        recon.cdf_coef,
-                        cdf_m,
-                        acoef,
-                        lcoef,
-                        &params,
-                        cf_slot,
-                        &mut txtp,
-                        &mut res_ctx,
-                    );
-                    if e == i32::MIN {
-                        return Err(());
+                    if pl == 0 {
+                        recon.scratch_u_has_cf = (eob >= 0) as i32;
                     }
-                    e
-                };
-                if pl == 0 {
-                    recon.scratch_u_has_cf = (eob >= 0) as i32;
-                }
-                tu_eob[i][pl] = eob;
-                tu_txtp[i][pl] = txtp;
+                    tu_eob[i][pl] = eob;
+                    tu_txtp[i][pl] = txtp;
 
-                // Context fill (a/l ccoef) and is_coded[1] (pl==0 only).
-                let aw = imin(txw, (fi.bw >> ss_hor) - (bx >> ss_hor)).max(0) as usize;
-                let lh = imin(txh, (fi.bh >> ss_ver) - (by >> ss_ver)).max(0) as usize;
-                if aw > 0 {
-                    a.ccoef[pl][bx4..bx4 + aw].fill(res_ctx);
-                }
-                if lh > 0 {
-                    l.ccoef[pl][by4..by4 + lh].fill(res_ctx);
-                }
-                if pl == 0 {
-                    let mask: u64 = ((1u64 << txw) - 1) << (bx4 as u32);
-                    for yy in 0..txh as usize {
-                        let row = by4 + yy;
-                        if row < 64 {
-                            recon.scratch.is_coded[1][row] |= mask;
+                    // Context fill (a/l ccoef) and is_coded[1] (pl==0 only).
+                    let aw = imin(txw, (fi.bw >> ss_hor) - (bx >> ss_hor)).max(0) as usize;
+                    let lh = imin(txh, (fi.bh >> ss_ver) - (by >> ss_ver)).max(0) as usize;
+                    if aw > 0 {
+                        a.ccoef[pl][bx4..bx4 + aw].fill(res_ctx);
+                    }
+                    if lh > 0 {
+                        l.ccoef[pl][by4..by4 + lh].fill(res_ctx);
+                    }
+                    if pl == 0 {
+                        let mask: u64 = ((1u64 << txw) - 1) << (bx4 as u32);
+                        for yy in 0..txh as usize {
+                            let row = by4 + yy;
+                            if row < 64 {
+                                recon.scratch.is_coded[1][row] |= mask;
+                            }
                         }
                     }
+                    x += txw;
                 }
-                x += txw;
+                y += txh;
             }
-            y += txh;
+        }
+    } // end coef-read phase
+
+    // Stash the decoded coefficients for the deferred recon phase, or restore
+    // them (recon_tmpl.c `cbs_stage`: read with the first luma sub-block, apply
+    // the residual with the last).
+    if phase == ChromaPhase::ReadOnly {
+        let need = n_tu * 16 * 2;
+        if recon.scratch.chroma_cf.len() < need {
+            recon.scratch.chroma_cf.resize(need, 0);
+        }
+        recon.scratch.chroma_cf[..n_tu * 16].copy_from_slice(cf_u);
+        recon.scratch.chroma_cf[n_tu * 16..need].copy_from_slice(cf_v);
+        for i in 0..256 {
+            recon.scratch.chroma_txtp[i] = tu_txtp[i];
+            recon.scratch.chroma_eob[i] = [tu_eob[i][0] as i16, tu_eob[i][1] as i16];
+        }
+        return Ok(());
+    } else if phase == ChromaPhase::ReconOnly {
+        cf_u.copy_from_slice(&recon.scratch.chroma_cf[..n_tu * 16]);
+        cf_v.copy_from_slice(&recon.scratch.chroma_cf[n_tu * 16..n_tu * 16 * 2]);
+        for i in 0..256 {
+            tu_txtp[i] = recon.scratch.chroma_txtp[i];
+            tu_eob[i] = [
+                recon.scratch.chroma_eob[i][0] as i32,
+                recon.scratch.chroma_eob[i][1] as i32,
+            ];
         }
     }
 
@@ -9796,6 +9847,7 @@ fn recon_b_inter_compound(
     cbs: BlockSize,
     has_luma: bool,
     has_chroma: bool,
+    chroma_stage: ChromaPhase,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     let refs = unsafe { b.ref_pair.r };
@@ -10104,6 +10156,11 @@ fn recon_b_inter_compound(
         let cw = (cbw4 * 4 >> ss_hor) as usize;
         let ch = (cbh4 * 4 >> ss_ver) as usize;
 
+        // Chroma MC + blend run only at the recon stage (`Both`/`ReconOnly`);
+        // the read stage (`ReadOnly`) only consumes the chroma coefficients
+        // (recon_tmpl.c:3590-3593 `cbs_stage`).
+        let do_chroma_mc = chroma_stage != ChromaPhase::ReadOnly;
+
         // OPFL chroma step config (recon_tmpl.c:3703-3705): r_step = 2<<refine,
         // o_step = 4>>opfl.
         let opfl_refine = comp_type == 1 && refine_mv != 0;
@@ -10124,7 +10181,7 @@ fn recon_b_inter_compound(
             (ld[0] as i32, ld[1] as i32)
         };
         let sub8x8 = lbs != BlockSize::Invalid && cbs != lbs && imin(luma_bw4, luma_bh4) < 16;
-        if sub8x8 {
+        if sub8x8 && do_chroma_mc {
             let base = ((cby & 63) as usize) * 128 + ((cbx & 127) as usize);
             for y in 0..ch4 {
                 for x in 0..cw4 {
@@ -10172,7 +10229,7 @@ fn recon_b_inter_compound(
             }
         }
 
-        for pl in (1..3usize).filter(|_| !sub8x8) {
+        for pl in (1..3usize).filter(|_| !sub8x8 && do_chroma_mc) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let mut tmp = [vec![0i16; cw * ch], vec![0i16; cw * ch]];
             let mut opfl_bacp_chroma = false;
@@ -10348,6 +10405,7 @@ fn recon_b_inter_compound(
             cw4ss,
             ch4ss,
             uv_txtp_seed,
+            chroma_stage,
             fi,
         )?;
     }
@@ -10965,7 +11023,22 @@ fn tip_frame_recon_sb(
     let has_luma = true;
     let has_chroma = cbs != BlockSize::Invalid;
     recon_b_inter_tip(
-        recon, msac, cdf_m, a, l, &b, bx, by, bx, by, bs, cbs, has_luma, has_chroma, fi,
+        recon,
+        msac,
+        cdf_m,
+        a,
+        l,
+        &b,
+        bx,
+        by,
+        bx,
+        by,
+        bs,
+        cbs,
+        has_luma,
+        has_chroma,
+        ChromaPhase::Both,
+        fi,
     )
 }
 
@@ -10994,6 +11067,7 @@ fn recon_b_inter_tip(
     cbs: BlockSize,
     has_luma: bool,
     has_chroma: bool,
+    chroma_stage: ChromaPhase,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     use crate::levels::{Mv, MvXY};
@@ -11438,9 +11512,11 @@ fn recon_b_inter_tip(
 
         // dav2d loops plane 0=U, 1=V (recon_tmpl.c:3692); `mc_opfl(.., 1+plane,
         // ..)` selects the picture plane. BACP is decided on the U plane and
-        // carried to V (`bacpu`).
+        // carried to V (`bacpu`). Chroma MC runs only at the recon stage
+        // (`Both`/`ReconOnly`); the read stage consumes coefficients only.
+        let do_chroma_mc = chroma_stage != ChromaPhase::ReadOnly;
         let mut chroma_bacp = false;
-        for plane in 0..2usize {
+        for plane in (0..2usize).filter(|_| do_chroma_mc) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let mut tmp = [vec![0i16; cw * ch], vec![0i16; cw * ch]];
             let pl_bacp = rmv_uvpred(
@@ -11506,6 +11582,7 @@ fn recon_b_inter_tip(
             cw4ss,
             ch4ss,
             uv_txtp_seed,
+            chroma_stage,
             fi,
         )?;
     }
@@ -12099,6 +12176,7 @@ fn recon_b_inter(
     cbs: BlockSize,
     has_luma: bool,
     has_chroma: bool,
+    chroma_stage: ChromaPhase,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
     let refs = unsafe { b.ref_pair.r };
@@ -12106,7 +12184,22 @@ fn recon_b_inter(
     let ref1 = refs[1];
     if ref0 as usize == crate::levels::TIP_FRAME {
         return recon_b_inter_tip(
-            recon, msac, cdf_m, a, l, b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
+            recon,
+            msac,
+            cdf_m,
+            a,
+            l,
+            b,
+            bx,
+            by,
+            cbx,
+            cby,
+            lbs,
+            cbs,
+            has_luma,
+            has_chroma,
+            chroma_stage,
+            fi,
         );
     }
     if ref0 < 0 || ref0 as usize >= 7 {
@@ -12126,6 +12219,9 @@ fn recon_b_inter(
         let bw4_0 = bdim0[0] as i32;
         let bh4_0 = bdim0[1] as i32;
         if imax(bw4_0, bh4_0) > 16 {
+            // The >64px split drives the per-sub-block chroma read/recon stage
+            // itself, so it is only ever entered at the `Both` top level.
+            debug_assert!(chroma_stage == ChromaPhase::Both);
             return recon_b_inter_split(
                 recon, msac, cdf_m, a, l, b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
                 bs0, bw4_0, bh4_0,
@@ -12146,7 +12242,22 @@ fn recon_b_inter(
     let is_compound = ref1 >= 0 && (ref1 as usize) < 7;
     if is_compound {
         return recon_b_inter_compound(
-            recon, msac, cdf_m, a, l, b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
+            recon,
+            msac,
+            cdf_m,
+            a,
+            l,
+            b,
+            bx,
+            by,
+            cbx,
+            cby,
+            lbs,
+            cbs,
+            has_luma,
+            has_chroma,
+            chroma_stage,
+            fi,
         );
     }
 
@@ -12352,7 +12463,10 @@ fn recon_b_inter(
         };
         let sub8x8 =
             lbs != BlockSize::Invalid && cbs != lbs && imin(luma_bw4, luma_bh4) < 16 && !warp_block;
-        if sub8x8 {
+        // Chroma MC + iiblend run only at the recon stage (`Both`/`ReconOnly`);
+        // the read stage (`ReadOnly`) only consumes the chroma coefficients.
+        let do_chroma_mc = chroma_stage != ChromaPhase::ReadOnly;
+        if sub8x8 && do_chroma_mc {
             // Per-sub-block chroma MC from spatial refmvs. cw4/ch4 are chroma
             // 4x4 extents; for each origin sub-block (ox4==oy4==0) MC both planes.
             let base = ((cby & 63) as usize) * 128 + ((cbx & 127) as usize);
@@ -12413,7 +12527,7 @@ fn recon_b_inter(
         // Chroma warp eligibility for the 8x8 affine kernel uses the chroma
         // block dims after subsampling (dav2d warp_affine, recon_tmpl.c:1817).
         let c_affine = c_wmp.affine != 0 && imin(cbw4 * (4 >> ss_hor), cbh4 * (4 >> ss_ver)) >= 8;
-        for pl in (1..3).filter(|_| !sub8x8) {
+        for pl in (1..3).filter(|_| !sub8x8 && do_chroma_mc) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let dst: &mut [u8] = if pl == 1 {
                 &mut recon.dst_u[dst_off..]
@@ -12446,6 +12560,7 @@ fn recon_b_inter(
         // is the chroma-subsampled block size SS_BS[cbs][layout-1] (wedge keeps
         // cbs), matching the C `dav2d_ss_bs[cbs][layout-1]` argument.
         if !sub8x8
+            && do_chroma_mc
             && (motion_mode == MotionMode::InterIntra as u8 || unsafe { b.data.inter.warp_ii } != 0)
         {
             let ii_ss_bs = if unsafe { b.data.inter.wedge_idx } == -1 {
@@ -12492,6 +12607,7 @@ fn recon_b_inter(
             cw4ss,
             ch4ss,
             uv_txtp_seed,
+            chroma_stage,
             fi,
         )?;
     }
@@ -12601,16 +12717,23 @@ fn recon_b_inter_split(
                 };
                 (read, recon)
             };
-            let _ = recon_cbs;
 
-            // Reconstruct the whole chroma (MC + residual) at the read stage so
-            // the chroma coefficients are entropy-read at the correct MSAC point
-            // (immediately after the first luma sub-block). The chroma pixels are
-            // written at the absolute block-origin coordinates regardless of which
-            // sub-block triggers them, so doing recon here is equivalent.
-            let sub_has_chroma = read_cbs != BlockSize::Invalid;
+            // Map the read/recon stage validity onto the chroma phase: the
+            // coefficients are read with the first luma sub-block (`ReadOnly`)
+            // and the residual + MC applied with the last (`ReconOnly`), so the
+            // chroma prediction sees the spatial refmvs grid in its final state
+            // (recon_tmpl.c:3107-3119 `cbs_stage`). Both valid -> `Both`.
+            let read_valid = read_cbs != BlockSize::Invalid;
+            let recon_valid = recon_cbs != BlockSize::Invalid;
+            let sub_has_chroma = read_valid || recon_valid;
+            let chroma_stage = match (read_valid, recon_valid) {
+                (true, true) => ChromaPhase::Both,
+                (true, false) => ChromaPhase::ReadOnly,
+                (false, true) => ChromaPhase::ReconOnly,
+                (false, false) => ChromaPhase::Both,
+            };
             let sub_cbs = if sub_has_chroma {
-                read_cbs
+                cbs2i
             } else {
                 BlockSize::Invalid
             };
@@ -12630,6 +12753,7 @@ fn recon_b_inter_split(
                 sub_cbs,
                 lbs2 != BlockSize::Invalid,
                 sub_has_chroma,
+                chroma_stage,
                 fi,
             )?;
 

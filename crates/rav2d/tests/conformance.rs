@@ -1439,23 +1439,12 @@ fn bit_exact_full_clip_seg1() {
 /// assertion.
 ///
 /// This is the deeper GOP (12 coding-order frames) and exercises per-superblock
-/// delta-q on inter frames across multiple superblock rows.
-///
-/// STATUS: all 12 frames are LUMA bit-exact and frames 0-5 (poc 0,9,4,2,1,3) are
-/// fully bit-exact on all planes. Frames 6-10 (poc 6,5,7,8 and the later refs)
-/// have a small chroma-only diff (~60-210 bytes/plane, +/-1..4) confined to the
-/// right-edge partial superblock (this clip is sb128=1, so the rightmost 128px
-/// superblock column is clipped to 96px). First divergence: frame poc=6,
-/// chroma block cbx=64 (luma x 256-352), compound AVG (cwp=8, BACP-eligible).
-/// dav2d reconstructs this chroma during the luma block at bx=80 (normal
-/// 4:2:0 bottom-right chroma ownership); rav2d reconstructs it during a
-/// deferred ext-SDP chroma carrier at bx=64 — the chroma block-ownership /
-/// region-unmix path diverges for the right-edge partial superblock, feeding a
-/// slightly different edge-emulated MC source to the compound chroma blend.
-/// Entropy (MSAC range) stays in lock-step the whole clip; this is a recon-only
-/// chroma diff, not a desync.
+/// delta-q on inter frames across multiple superblock rows, plus the chroma
+/// read/recon staging (`cbs_stage`) of >64px inter blocks: the chroma
+/// coefficients are read with the first luma 64x64 sub-block but the chroma MC
+/// and residual are applied with the last, so OPFL/refine-mv/BACP chroma
+/// prediction sees the spatial refmvs grid in its final state.
 #[test]
-#[ignore = "WIP: deltaq1 right-edge partial-SB compound chroma ownership (luma + frames 0-5 bit-exact)"]
 fn bit_exact_full_clip_deltaq1() {
     let path = media("avm-v14.1.0-bus.352x288.l10.deltaq1.obu");
     if !path.exists() {
