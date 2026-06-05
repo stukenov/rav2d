@@ -11257,6 +11257,26 @@ fn recon_b_luma_tx(
         // larger slab so any layout (incl. multi-mrl second edge) fits.
         let edge_o: usize = 768 + if mrl_idx != 0 { 9 } else { 0 };
 
+        // Top-of-superblock prefilter reference (recon_tmpl.c:2564-2567). At an
+        // internal SB top-edge dav2d points the intra top reference at the
+        // `prefilter_data` copy of the row above the SB; with single-thread /
+        // filters-off decode that aliases the current plane's row directly above
+        // the block (prefilter_data_full_frame). Passing it makes prepare_intra
+        // _edges use the SB-edge row (top_stride 0) instead of stepping mrl_idx+1
+        // rows up, which would cross the SB boundary for multi-reference-line
+        // directional blocks. The slice is based at column 0 of row `4*by - 1`
+        // (prepare adds the `x*4` column offset).
+        let prefilter_top: Option<&[u8]> = if have_top && (by & (sbsz - 1)) == 0 {
+            let base = dst_off - (bx as usize) * 4 - stride;
+            // SAFETY: re-borrow of the luma plane as a disjoint immutable view;
+            // prepare_intra_edges only reads from it.
+            let plane: &[u8] =
+                unsafe { std::slice::from_raw_parts(recon.dst_y.as_ptr(), recon.dst_y.len()) };
+            Some(&plane[base..])
+        } else {
+            None
+        };
+
         let m = crate::ipred_prepare::prepare_intra_edges_8bpc(
             bx,
             by,
@@ -11267,7 +11287,7 @@ fn recon_b_luma_tx(
             recon.dst_y,
             dst_off,
             stride,
-            None, // prefilter_toplevel_sb_edge: cross-SB-row backup not wired yet
+            prefilter_top,
             y_mode,
             tw4,
             th4,
