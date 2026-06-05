@@ -7656,6 +7656,16 @@ fn warp_affine_plane_8bpc(
                     (ref_data, ref_stride * dy as usize + dx as usize, ref_stride)
                 };
 
+            if std::env::var("RAV2D_WDX").is_ok() && by == 12 && bx == 0 && pl == 0 && y == 0 && x == 0
+            {
+                let mut s = String::from("WEMU");
+                for r in 0..15 {
+                    for c in 0..15 {
+                        s.push_str(&format!(" {}", src[r * src_stride + c]));
+                    }
+                }
+                eprintln!("{s}");
+            }
             let dst_sub = (y as usize) * dst_stride + x as usize;
             crate::mc::warp_affine_8x8_8bpc(
                 &mut dst[dst_sub..],
@@ -7667,9 +7677,144 @@ fn warp_affine_plane_8bpc(
                 mx,
                 my,
             );
+            if std::env::var("RAV2D_WDX").is_ok() && by == 12 && bx == 0 && pl == 0 && y == 0 && x == 0
+            {
+                let mut s = String::from("WOUT");
+                for r in 0..8 {
+                    for c in 0..8 {
+                        s.push_str(&format!(" {}", dst[dst_sub + r * dst_stride + c]));
+                    }
+                }
+                eprintln!("{s}");
+            }
             x += 8;
         }
         y += 8;
+    }
+}
+
+/// Non-affine / small-block warp MC (dav2d `ext_warp`, recon_tmpl.c:1720). Used
+/// for warp blocks where the 8x8 affine kernel does not apply: non-affine warp
+/// types, or after subsampling a block becomes < 8 in either dimension (e.g.
+/// chroma of an 8x8 luma block in 4:2:0). Walks `sw`x`sh` windows, then 4x4
+/// tiles within, with the per-tile `+0x200` rounding and 6-bit mx/my subpel.
+#[allow(clippy::too_many_arguments)]
+fn ext_warp_plane_8bpc(
+    dst: &mut [u8],
+    dst_stride: usize,
+    ref_pic: &crate::picture::Picture,
+    pl: usize,
+    bx: i32,
+    by: i32,
+    b_dim: &[u8],
+    wmp: &crate::headers::WarpedMotionParams,
+    ss_hor: i32,
+    ss_ver: i32,
+    frame_bw: i32,
+    frame_bh: i32,
+) {
+    let plss_ver = if pl != 0 { ss_ver } else { 0 };
+    let plss_hor = if pl != 0 { ss_hor } else { 0 };
+    let h_mul = 4 >> plss_hor;
+    let v_mul = 4 >> plss_ver;
+    let mat = &wmp.matrix;
+    let w = frame_bw * 4 >> plss_hor;
+    let h = frame_bh * 4 >> plss_ver;
+    let ref_stride = ref_pic.stride[(pl != 0) as usize].unsigned_abs();
+    let ref_data: &[u8] = match ref_pic.data[pl] {
+        Some(p) => {
+            let ph = if pl == 0 {
+                ref_pic.p.h
+            } else {
+                (ref_pic.p.h + ss_ver) >> ss_ver
+            };
+            unsafe { std::slice::from_raw_parts(p.as_ptr(), ref_stride * ph as usize) }
+        }
+        None => return,
+    };
+
+    let blk_w = b_dim[0] as i32 * h_mul;
+    let blk_h = b_dim[1] as i32 * v_mul;
+    let sw = imin(blk_w, 8);
+    let hsw = sw >> 1;
+    let sh = imin(blk_h, 8);
+    let hsh = sh >> 1;
+
+    let mut emu = [0u8; 32 * 32];
+    let mut y = 0;
+    while y < blk_h {
+        let src_y = by * 4 + ((y + hsh) << plss_ver);
+        let mat3_y = mat[3] as i64 * src_y as i64 + mat[0] as i64;
+        let mat5_y = mat[5] as i64 * src_y as i64 + mat[1] as i64;
+        let mut x = 0;
+        while x < blk_w {
+            let src_x = bx * 4 + ((x + hsw) << plss_hor);
+            let mvx = (mat[2] as i64 * src_x as i64 + mat3_y) >> plss_hor;
+            let mvy = (mat[4] as i64 * src_x as i64 + mat5_y) >> plss_ver;
+            let left_window = (mvx >> 16) as i32 - hsw - 3;
+            let top_window = (mvy >> 16) as i32 - hsh - 3;
+            let left = iclip(left_window, 0, w - 1);
+            let right = iclip(left_window + sw + 7, 1, w);
+            let top = iclip(top_window, 0, h - 1);
+            let bottom = iclip(top_window + sh + 7, 1, h);
+
+            let mut yy = y;
+            while yy < y + sh {
+                let src_y2 = by * 4 + ((yy + 2) << plss_ver);
+                let mat3_y2 = mat[3] as i64 * src_y2 as i64 + mat[0] as i64;
+                let mat5_y2 = mat[5] as i64 * src_y2 as i64 + mat[1] as i64;
+                let mut xx = x;
+                while xx < x + sw {
+                    let src_x2 = bx * 4 + ((xx + 2) << plss_hor);
+                    let mvx2 = ((mat[2] as i64 * src_x2 as i64 + mat3_y2) >> plss_hor) + 0x200;
+                    let mvy2 = ((mat[4] as i64 * src_x2 as i64 + mat5_y2) >> plss_ver) + 0x200;
+
+                    let dx = (mvx2 >> 16) as i32 - 2;
+                    let mx = ((mvx2 >> 10) & 63) as i32;
+                    let dy = (mvy2 >> 16) as i32 - 2;
+                    let my = ((mvy2 >> 10) & 63) as i32;
+
+                    let (src, src_off, src_stride): (&[u8], usize, usize) =
+                        if dx - 3 < left || dx + 4 + 4 > right || dy - 3 < top || dy + 4 + 4 > bottom
+                        {
+                            let region_off = left as usize + top as usize * ref_stride;
+                            crate::mc::emu_edge_8bpc(
+                                11,
+                                11,
+                                (right - left) as usize,
+                                (bottom - top) as usize,
+                                (dx - 3 - left) as isize,
+                                (dy - 3 - top) as isize,
+                                &mut emu,
+                                32,
+                                &ref_data[region_off..],
+                                ref_stride,
+                            );
+                            (&emu[..], 32 * 3 + 3, 32)
+                        } else {
+                            (ref_data, ref_stride * dy as usize + dx as usize, ref_stride)
+                        };
+
+                    let dst_sub = (yy as usize) * dst_stride + xx as usize;
+                    crate::mc::put_8tap_8bpc(
+                        &mut dst[dst_sub..],
+                        dst_stride,
+                        src,
+                        src_off,
+                        src_stride,
+                        4,
+                        4,
+                        mx,
+                        my,
+                        -1,
+                    );
+                    xx += 4;
+                }
+                yy += 4;
+            }
+            x += sw;
+        }
+        y += sh;
     }
 }
 
@@ -7846,6 +7991,30 @@ fn inter_residual_tx_8bpc(
         }
     }
 
+    // Mark the per-SB `is_coded` grid for this luma TX block. dav2d does this in
+    // recon_b_luma_tx (recon_tmpl.c:2720) for every block — intra AND inter — so
+    // later blocks' top-right / bottom-left intra-edge availability (n_tr/n_bl,
+    // used by SMOOTH_PRED incl. warp-interintra) sees inter neighbours as coded.
+    if pl == 0 {
+        let mask: u64 = ((1u64 << tw4) - 1) << (bx4 as u32);
+        for y in 0..th4 as usize {
+            let row = by4 + y;
+            if row < 64 {
+                recon.scratch.is_coded[0][row] |= mask;
+            }
+        }
+    } else if pl == 1 {
+        // Chroma `is_coded` is marked once per chroma TX (pl==1 only, mirroring
+        // recon_tmpl.c:4017 where U and V share a single grid update).
+        let mask: u64 = ((1u64 << tw4) - 1) << (bx4 as u32);
+        for y in 0..th4 as usize {
+            let row = by4 + y;
+            if row < 64 {
+                recon.scratch.is_coded[1][row] |= mask;
+            }
+        }
+    }
+
     if eob == -1 {
         return Ok(());
     }
@@ -7908,7 +8077,36 @@ fn inter_residual_tx_8bpc(
         txtp += txtp & crate::tables::TX_DDT_MASK[tx] as u32;
     }
     let _ = IntraPredMode::DcPred;
+    if std::env::var("RAV2D_CFDUMP").is_ok() && by == 12 && bx == 0 && pl == 0 {
+        let mut s = format!("DCFDUMP by={} bx={} tx={} txtp={} eob={}\n", by, bx, tx, txtp, eob);
+        for i in 0..64 {
+            s.push_str(&format!(" {}", recon.cf[i]));
+        }
+        eprintln!("{s}");
+    }
+    let dbg_final = std::env::var("RAV2D_FINAL").is_ok() && by == 12 && bx == 0 && pl == 0;
+    let dbg_off = dst_off;
+    if dbg_final {
+        eprintln!("DPREDR by={} bx={} (pred at residual time)", by, bx);
+        for yy in 0..(th as usize) {
+            let mut s = String::from("PR");
+            for xx in 0..(tw as usize) {
+                s.push_str(&format!(" {}", dst[dbg_off + yy * stride + xx]));
+            }
+            eprintln!("{s}");
+        }
+    }
     crate::itx::inv_txfm_add_8bpc(dst, dst_off, stride, recon.cf, txtp, eob, tx);
+    if dbg_final {
+        eprintln!("DFINAL by={} bx={}", by, bx);
+        for yy in 0..(th as usize) {
+            let mut s = String::from("F");
+            for xx in 0..(tw as usize) {
+                s.push_str(&format!(" {}", dst[dbg_off + yy * stride + xx]));
+            }
+            eprintln!("{s}");
+        }
+    }
     Ok(())
 }
 
@@ -8075,6 +8273,14 @@ fn iiblend_plane_8bpc(
             edge,
             edge_o,
         );
+        if std::env::var("RAV2D_IIB").is_ok() && by == 12 && bx == 0 && plane == 0 {
+            eprintln!("IINTR n_tr={} n_bl={}", n_tr, n_bl);
+            let mut s = format!("IIEDGE m={} flags={}", m as i32, intra_flags);
+            for i in (edge_o - 18)..(edge_o + 18) {
+                s.push_str(&format!(" {}", edge[i]));
+            }
+            eprintln!("{s}");
+        }
         dispatch_ipred(
             m,
             &mut tmp,
@@ -8116,6 +8322,17 @@ fn iiblend_plane_8bpc(
             )[..w * h]
             .to_vec()
     };
+    if std::env::var("RAV2D_IIB").is_ok() && by == 12 && bx == 0 && plane == 0 {
+        eprintln!("IIB by={} bx={} m0={} ii_mode={} wedge={} w={} h={}", by, bx, m0, ii_mode, wedge_idx, w, h);
+        let mut si = String::from("IIINTRA");
+        let mut sm = String::from("IIMASK");
+        for i in 0..(w * h).min(64) {
+            si.push_str(&format!(" {}", tmp[i]));
+            sm.push_str(&format!(" {}", mask[i]));
+        }
+        eprintln!("{si}");
+        eprintln!("{sm}");
+    }
     let dst_plane: &mut [u8] = match plane {
         0 => recon.dst_y,
         1 => recon.dst_u,
@@ -8677,23 +8894,51 @@ fn recon_b_inter(
         } else {
             recon.frm_hdr.gmv.m[ref0 as usize]
         };
-        let do_affine_warp =
-            warp_block && wmp.affine != 0 && imin(bw4 * 4, bh4 * 4) >= 8;
-        if do_affine_warp {
-            warp_affine_plane_8bpc(
-                &mut recon.dst_y[dst_off..],
-                y_stride,
-                &refp,
-                0,
-                bx,
-                by,
-                b_dim,
-                &wmp,
-                ss_hor,
-                ss_ver,
-                fi.bw,
-                fi.bh,
-            );
+        if warp_block {
+            // dav2d warp_affine (recon_tmpl.c:1817): the 8x8 affine kernel only
+            // applies for affine warps where the (subsampled) block is >= 8 in
+            // both dims; otherwise ext_warp.
+            if wmp.affine != 0 && imin(bw4 * 4, bh4 * 4) >= 8 {
+                warp_affine_plane_8bpc(
+                    &mut recon.dst_y[dst_off..],
+                    y_stride,
+                    &refp,
+                    0,
+                    bx,
+                    by,
+                    b_dim,
+                    &wmp,
+                    ss_hor,
+                    ss_ver,
+                    fi.bw,
+                    fi.bh,
+                );
+                if std::env::var("RAV2D_YPRED").is_ok() && by == 12 && bx == 0 {
+                    eprintln!("DYPRED by={} bx={}", by, bx);
+                    for yy in 0..(bh4 * 4) as usize {
+                        let mut s = String::from("P");
+                        for xx in 0..(bw4 * 4) as usize {
+                            s.push_str(&format!(" {}", recon.dst_y[dst_off + yy * y_stride + xx]));
+                        }
+                        eprintln!("{s}");
+                    }
+                }
+            } else {
+                ext_warp_plane_8bpc(
+                    &mut recon.dst_y[dst_off..],
+                    y_stride,
+                    &refp,
+                    0,
+                    bx,
+                    by,
+                    b_dim,
+                    &wmp,
+                    ss_hor,
+                    ss_ver,
+                    fi.bw,
+                    fi.bh,
+                );
+            }
         } else {
             inter_mc_plane_8bpc(
                 &mut recon.dst_y[dst_off..],
@@ -8774,8 +9019,9 @@ fn recon_b_inter(
         } else {
             recon.frm_hdr.gmv.m[ref0 as usize]
         };
-        let c_do_warp = warp_block
-            && c_wmp.affine != 0
+        // Chroma warp eligibility for the 8x8 affine kernel uses the chroma
+        // block dims after subsampling (dav2d warp_affine, recon_tmpl.c:1817).
+        let c_affine = c_wmp.affine != 0
             && imin(cbw4 * (4 >> ss_hor), cbh4 * (4 >> ss_ver)) >= 8;
         for pl in 1..3 {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
@@ -8784,21 +9030,18 @@ fn recon_b_inter(
             } else {
                 &mut recon.dst_v[dst_off..]
             };
-            if c_do_warp {
-                warp_affine_plane_8bpc(
-                    dst,
-                    uv_stride,
-                    &refp,
-                    pl,
-                    cbx,
-                    cby,
-                    cb_dim,
-                    &c_wmp,
-                    ss_hor,
-                    ss_ver,
-                    fi.bw,
-                    fi.bh,
-                );
+            if warp_block {
+                if c_affine {
+                    warp_affine_plane_8bpc(
+                        dst, uv_stride, &refp, pl, cbx, cby, cb_dim, &c_wmp, ss_hor, ss_ver,
+                        fi.bw, fi.bh,
+                    );
+                } else {
+                    ext_warp_plane_8bpc(
+                        dst, uv_stride, &refp, pl, cbx, cby, cb_dim, &c_wmp, ss_hor, ss_ver,
+                        fi.bw, fi.bh,
+                    );
+                }
             } else {
                 inter_mc_plane_8bpc(
                     dst,

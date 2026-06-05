@@ -105,6 +105,14 @@ pub fn inv_txfm_add_8bpc(
     }
     coeff[..sw * sh].fill(0);
 
+    if std::env::var("RAV2D_ITXTMP").is_ok() && tx == 1 && txtp == 165 {
+        let mut s = String::from("ITXTMP-pass1");
+        for i in 0..64 {
+            s.push_str(&format!(" {}", tmp[i]));
+        }
+        eprintln!("{s}");
+    }
+
     let shift0 = tx_sh[0] as i32;
     let rnd0 = (1 << shift0) >> 1;
     for i in 0..sw * sh {
@@ -113,6 +121,14 @@ pub fn inv_txfm_add_8bpc(
 
     for x in 0..sw {
         second_1d_fn(&mut tmp[x..], sw);
+    }
+
+    if std::env::var("RAV2D_ITXTMP").is_ok() && tx == 1 && txtp == 165 {
+        let mut s = format!("ITXTMP-pass2 eob={} cf0={}", eob, coeff[0]);
+        for i in 0..64 {
+            s.push_str(&format!(" {}", tmp[i]));
+        }
+        eprintln!("{s}");
     }
 
     let shift1 = tx_sh[1] as i32;
