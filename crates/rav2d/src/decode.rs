@@ -5465,7 +5465,33 @@ fn decode_b(
                     ctx += 1;
                 }
             }
+            // skip_mode ref pair: start from the frame skip_mode_refs, then
+            // inherit a neighbour's compound ref pair if available (decode.c:2505
+            // -2518). The first context neighbour with a valid second ref (or a
+            // TIP-coded neighbour) supplies the actual ref pair; otherwise the
+            // frame skip_mode_refs stand. This only affects the stored ref
+            // context (no entropy is read), but later compound blocks key their
+            // ref-selection context on it.
             b.ref_pair = fi.skip_mode_refs;
+            for n in 0..n_ctx {
+                if nx_ref0[n] == TIP_FRAME as i8 {
+                    let tip0 = unsafe { fi.tip.r[0] };
+                    let tip1 = unsafe { fi.tip.r[1] };
+                    unsafe {
+                        b.ref_pair.r[0] = imin(tip0 as i32, tip1 as i32) as i8;
+                        b.ref_pair.r[1] = imax(tip0 as i32, tip1 as i32) as i8;
+                    }
+                    break;
+                } else if nx_ref1[n] != -1 {
+                    unsafe {
+                        b.ref_pair.r[0] = nx_ref0[n];
+                        b.ref_pair.r[1] = nx_ref1[n];
+                    }
+                    break;
+                } else if nx_ref0[n] != -1 {
+                    break;
+                }
+            }
             unsafe {
                 b.data.inter.comp_type = 1; // COMP_AVG
                 b.data.inter.inter_mode = CompInterPredMode::NearMvNearMv as u8;
@@ -6067,15 +6093,15 @@ fn decode_b(
                     }
                     n += 1;
                 }
-                static CWP_WEIGHT_SAME: [i8; 5] = [8, 12, 4, 10, 6];
-                static CWP_WEIGHT_DIFF: [i8; 5] = [8, 12, 4, 20, -4];
-                let same_dir = fi.refdir[ref0 as usize] == fi.refdir[ref1 as usize];
+                // cwp_weighting_factor[!(refdir[ref0] ^ refdir[ref1])][n]
+                // (decode.c:2922-2927). The selector is the NEGATED xor of the two
+                // refs' directions: same-direction pair -> row 1, opposite -> row 0.
+                static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] =
+                    [[8, 12, 4, 10, 6], [8, 12, 4, 20, -4]];
+                let xor = (fi.refdir[ref0 as usize] ^ fi.refdir[ref1 as usize]) & 1;
+                let row = (xor == 0) as usize;
                 unsafe {
-                    b.data.inter.cwp_idx = if same_dir {
-                        CWP_WEIGHT_SAME[n as usize]
-                    } else {
-                        CWP_WEIGHT_DIFF[n as usize]
-                    };
+                    b.data.inter.cwp_idx = CWP_WEIGHTING_FACTOR[row][n as usize];
                 }
             }
 
@@ -9246,7 +9272,19 @@ fn inter_chroma_residual_8bpc(
                     let cf_slot = &mut plane_cf[i * 16..i * 16 + tu_n];
                     cf_slot.fill(0);
 
-                    let mut txtp: u16 = txtp_seed;
+                    // Seed the chroma transform type from the co-located luma 4x4's
+                    // recorded txtp. When the chroma block size equals the luma
+                    // block size (`b->bs == b->cbs`), dav2d re-reads the luma
+                    // txtp_map at EACH chroma TU's position (recon_tmpl.c:3568-3569,
+                    // with `t->bx` advanced per TU); otherwise the block-origin seed
+                    // (`txtp_seed`) is used for every TU. For inter blocks the seed
+                    // only matters for lossless (WHT vs IDTX), where using the wrong
+                    // per-TU luma type produces a transposed residual.
+                    let mut txtp: u16 = if b.bs == b.cbs {
+                        recon.scratch.txtp_map[(by & 15) as usize * 16 + (bx & 15) as usize]
+                    } else {
+                        txtp_seed
+                    };
                     let mut res_ctx: u8 = 0;
                     let eob = if b.skip_txfm != 0 {
                         res_ctx = 0x40;
@@ -9257,7 +9295,13 @@ fn inter_chroma_residual_8bpc(
                         let qm_ref: Option<&[u8]> = recon.frame.qm[uvtx][1 + pl].as_deref();
                         let params = crate::recon::DecodeCoefParams {
                             tx: uvtx,
-                            bs: b.bs as usize,
+                            // Chroma coefficient decode keys its skip context on the
+                            // CHROMA block size (`b->cbs`), not the luma block size:
+                            // dav2d passes `b->cbs` to decode_coefs (recon_tmpl.c:3562).
+                            // For sub-8x8 luma where chroma spans several luma
+                            // sub-blocks (bs != cbs) the V-plane `not_one_blk` term in
+                            // get_skip_ctx diverges if the luma bs is used.
+                            bs: b.cbs as usize,
                             plane: (1 + pl) as i32,
                             intra: false,
                             fsc: false,
