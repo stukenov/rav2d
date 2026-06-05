@@ -895,3 +895,89 @@ fn bit_exact_first_inter_frame() {
     }
 }
 
+/// Full-clip gate: EVERY coding-order frame of bus.64x64.l5 must reconstruct
+/// bit-exact vs dav2d (in-loop filters off on both decoders). The clip is a
+/// keyframe (poc0) plus four inter frames (poc4 single-ref, then poc2/poc1/poc3
+/// which use cross-reference compound + temporal-interpolated-prediction blocks).
+///
+/// rav2d emits in DECODE order without visibility filtering; dav2d is run with
+/// `output_invisible_frames` so its non-shown reference frames are emitted in
+/// coding order too. The two frame lists therefore contain the same set of
+/// reconstructed frames but in different orders, so each rav2d frame is matched
+/// to the dav2d frame with identical dimensions and the fewest pixel diffs (for
+/// a correct decoder that is its true counterpart, diff 0) before the bit-exact
+/// assertion. A residual diff is a real reconstruction bug, not a reorder.
+#[test]
+fn bit_exact_full_clip_bus64() {
+    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode_invisible(&path);
+    let got = rav2d_decode(&path);
+    assert!(!reference.is_empty(), "dav2d produced no frames");
+    assert_eq!(
+        got.len(),
+        reference.len(),
+        "frame count mismatch (rav2d={}, dav2d={})",
+        got.len(),
+        reference.len()
+    );
+
+    let mut used = vec![false; reference.len()];
+    let mut failures = Vec::new();
+    for (gi, g) in got.iter().enumerate() {
+        // Pick the unused dav2d frame of matching dims with the fewest diffs.
+        let mut best: Option<(usize, usize)> = None; // (ref_index, total_diff)
+        for (ri, r) in reference.iter().enumerate() {
+            if used[ri] || (r.w, r.h, r.bpc, r.layout) != (g.w, g.h, g.bpc, g.layout) {
+                continue;
+            }
+            let diff: usize = (0..3)
+                .map(|pl| {
+                    r.planes[pl]
+                        .iter()
+                        .zip(g.planes[pl].iter())
+                        .filter(|(a, b)| a != b)
+                        .count()
+                })
+                .sum();
+            if best.is_none_or(|(_, bd)| diff < bd) {
+                best = Some((ri, diff));
+            }
+        }
+        let (ri, _) = best.unwrap_or_else(|| panic!("rav2d frame {gi}: no dav2d match"));
+        used[ri] = true;
+        let r = &reference[ri];
+        let (ssh, _ssv) = ss(r.layout);
+        for pl in 0..3 {
+            let rp = &r.planes[pl];
+            let gp = &g.planes[pl];
+            if rp.len() != gp.len() {
+                failures.push(format!(
+                    "rav2d[{gi}]~dav2d[{ri}] plane {pl} size differs ({} vs {})",
+                    rp.len(),
+                    gp.len()
+                ));
+                continue;
+            }
+            let diff = rp.iter().zip(gp.iter()).filter(|(a, b)| a != b).count();
+            if diff != 0 {
+                let first = rp.iter().zip(gp.iter()).position(|(a, b)| a != b).unwrap();
+                let stride = if pl == 0 { r.w } else { (r.w + ssh) >> ssh } as usize;
+                failures.push(format!(
+                    "rav2d[{gi}]~dav2d[{ri}] plane {pl}: {diff}/{} bytes differ; first @ ({},{}) ref={} got={}",
+                    rp.len(),
+                    first % stride,
+                    first / stride,
+                    rp[first],
+                    gp[first]
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        panic!("full clip not bit-exact:\n  {}", failures.join("\n  "));
+    }
+}

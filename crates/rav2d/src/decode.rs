@@ -3421,6 +3421,12 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
                 }
             }
             fc.furthest_future_refidx = furthest_future_refidx as i8;
+            // refdir[TIP_FRAME] is a fixed sentinel: TIP references are always
+            // treated as a future-direction ref for context derivation
+            // (dav2d lib.c: f->refdir[TIP_FRAME] = 1, set once at init). Block
+            // ref-context (get_comp_ctx / single-ref) reads refdir[ref] for a
+            // TIP neighbour (ref == TIP_FRAME), so this slot must be 1.
+            fc.refdir[TIP_FRAME as usize] = 1;
         } else {
             fc.refpoc = [0; 7];
         }
@@ -3733,14 +3739,30 @@ fn decode_b(
     let trace_blk = std::env::var("RAV2D_BLK")
         .ok()
         .map(|s| {
+            if s == "all" {
+                return true;
+            }
+            // "p<poc>" traces all blocks of a given frame_offset.
+            if let Some(rest) = s.strip_prefix('p') {
+                if let Ok(p) = rest.parse::<u8>() {
+                    return recon.frm_hdr.frame_offset == p;
+                }
+            }
             let mut it = s.split(',');
-            (
-                it.next().unwrap_or("").parse::<i32>().unwrap_or(-1),
-                it.next().unwrap_or("").parse::<i32>().unwrap_or(-1),
-            )
+            let ty = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
+            let tx = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
+            ty == by && tx == bx
         })
-        .map(|(ty, tx)| ty == by && tx == bx)
         .unwrap_or(false);
+    if trace_blk {
+        eprintln!(
+            "  CK decode_b[y={} x={} bs={}] rng={}",
+            by,
+            bx,
+            bs as i32,
+            msac.dbg_rng()
+        );
+    }
 
     // Pre-compute cross-SB boundary neighbour context values.
     // The C code uses nx[2] pointers into a/l; here we read out
@@ -5081,7 +5103,11 @@ fn decode_b(
                 } else {
                     0
                 });
-                msac.decode_bool_adapt(cdf_m.tip(ctx)) != 0
+                let v = msac.decode_bool_adapt(cdf_m.tip(ctx)) != 0;
+                if trace_blk {
+                    eprintln!("  CK tip[ctx={},{}] rng={}", ctx, v as i32, msac.dbg_rng());
+                }
+                v
             } else {
                 false
             };
@@ -5134,7 +5160,11 @@ fn decode_b(
                 }
                 _ => 1,
             };
-            msac.decode_bool_adapt(cdf_m.comp(ctx)) != 0
+            let v = msac.decode_bool_adapt(cdf_m.comp(ctx)) != 0;
+            if trace_blk {
+                eprintln!("  CK comp_dec[ctx={},{}] rng={}", ctx, v as i32, msac.dbg_rng());
+            }
+            v
         } else {
             false
         };
@@ -5694,6 +5724,12 @@ fn decode_b(
                         let cnt_cur = cnt[i as usize + 1] as i32;
                         cnt_rem -= cnt_cur;
                         let ctx = (cnt_cur - cnt_rem + 1).clamp(0, 2) as usize;
+                        if trace_blk {
+                            eprintln!(
+                                "  CK sref i={} n_ctx={} cnt={:?} cnt_cur={} cnt_rem={} ctx={} nx0={:?} nx1={:?}",
+                                i, n_ctx, cnt, cnt_cur, cnt_rem, ctx, nx_ref0, nx_ref1
+                            );
+                        }
                         if msac.decode_bool_adapt(cdf_m.single_ref(ctx, i as usize)) != 0 {
                             break;
                         }
@@ -5708,6 +5744,9 @@ fn decode_b(
             unsafe {
                 b.ref_pair.r[0] = ref0;
                 b.ref_pair.r[1] = -1;
+            }
+            if trace_blk {
+                eprintln!("  CK ref[{},-1] rng={}", ref0, msac.dbg_rng());
             }
 
             // --- sngl_ctx ---
@@ -5775,6 +5814,12 @@ fn decode_b(
             };
             unsafe {
                 b.data.inter.inter_mode = inter_mode;
+            }
+            if trace_blk {
+                eprintln!(
+                    "  CK single_inter_mode[ctx={},{}] rng={}",
+                    sngl_ctx, inter_mode, msac.dbg_rng()
+                );
             }
 
             // --- AMVD ---
