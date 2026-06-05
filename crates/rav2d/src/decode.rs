@@ -6964,6 +6964,23 @@ fn decode_b(
     if trace_blk {
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
     }
+    if std::env::var("RAV2D_MV").is_ok() && b.is_intra == 0 && !intrabc {
+        let r = unsafe { b.ref_pair.r };
+        let m0 = unsafe { b.data.inter.mv[0].c };
+        let is_comp = r[1] >= 0;
+        let m1 = if is_comp {
+            unsafe { b.data.inter.mv[1].c }
+        } else {
+            crate::levels::MvXY { y: 0, x: 0 }
+        };
+        eprintln!(
+            "RZMV by={} bx={} ref=[{},{}] mm={} im={} mv0=({},{}) mv1=({},{})",
+            by, bx, r[0], r[1],
+            unsafe { b.data.inter.motion_mode },
+            unsafe { b.data.inter.inter_mode },
+            m0.y, m0.x, m1.y, m1.x
+        );
+    }
     if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
         recon_b_intra(
             recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
@@ -7836,6 +7853,218 @@ fn inter_residual_tx_8bpc(
     Ok(())
 }
 
+/// Inter-intra blend (recon_tmpl.c:2828-2908). The inter prediction is already
+/// in `dst`; build the intra prediction (DC/V/H/SMOOTH, or wedge) from the
+/// reconstructed neighbour edges into a temp buffer, then blend it over `dst`
+/// with the II / wedge mask. Plane 0 (luma) or 1/2 (chroma, subsampled).
+#[allow(clippy::too_many_arguments)]
+fn iiblend_luma_8bpc(
+    recon: &mut ReconCtx,
+    b: &Av2Block,
+    dst_off: usize,
+    stride: usize,
+    bw4: i32,
+    bh4: i32,
+    by: i32,
+    bx: i32,
+    ss_bs: BlockSize,
+    fi: &SbFrameInfo,
+) {
+    iiblend_plane_8bpc(recon, b, 0, dst_off, stride, bw4, bh4, by, bx, ss_bs, fi);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn iiblend_chroma_8bpc(
+    recon: &mut ReconCtx,
+    b: &Av2Block,
+    plane: usize,
+    dst_off: usize,
+    stride: usize,
+    bw4: i32,
+    bh4: i32,
+    by: i32,
+    bx: i32,
+    ss_bs: BlockSize,
+    fi: &SbFrameInfo,
+) {
+    iiblend_plane_8bpc(recon, b, plane, dst_off, stride, bw4, bh4, by, bx, ss_bs, fi);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn iiblend_plane_8bpc(
+    recon: &mut ReconCtx,
+    b: &Av2Block,
+    plane: usize,
+    dst_off: usize,
+    stride: usize,
+    bw4: i32,
+    bh4: i32,
+    by: i32,
+    bx: i32,
+    ss_bs: BlockSize,
+    fi: &SbFrameInfo,
+) {
+    use crate::levels::{
+        InterIntraPredMode, IntraPredMode, ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG,
+    };
+    let ii_mode = unsafe { b.data.inter.interintra_mode };
+    let wedge_idx = unsafe { b.data.inter.wedge_idx };
+    // II mode -> intra pred mode (II_SMOOTH(3) -> SMOOTH_PRED(9)).
+    let m0: u8 = if ii_mode == InterIntraPredMode::SmoothPred as u8 {
+        IntraPredMode::SmoothPred as u8
+    } else {
+        // DC(0)->DcPred(0), V(1)->VertPred(1), H(2)->HorPred(2).
+        ii_mode
+    };
+    let angle: i32 = [0, 90, 180, 0][ii_mode as usize];
+
+    let chroma = plane != 0;
+    let ss_hor = if chroma { fi.ss_hor } else { 0 };
+    let ss_ver = if chroma { fi.ss_ver } else { 0 };
+    let ssbw4 = bw4 >> ss_hor;
+    let ssbh4 = bh4 >> ss_ver;
+    let w = (ssbw4 * 4) as usize;
+    let h = (ssbh4 * 4) as usize;
+
+    // n_tr / n_bl only matter for SMOOTH_PRED (recon_tmpl.c:2844-2879).
+    let mut n_tr = 0i32;
+    let mut n_bl = 0i32;
+    if m0 == IntraPredMode::SmoothPred as u8 {
+        let bx4 = (bx & 63) as usize;
+        let by4 = (by & 63) as usize;
+        let sbsz = fi.sb_step;
+        if by > fi.tile_row_start {
+            let mut wv = imin(bw4, fi.tile_col_end - bx - bw4);
+            if (by & (sbsz - 1)) == 0 {
+                n_tr = 0; // top sb boundary: simplified (no a_sb_cache)
+            } else {
+                let end = imin(((bx + sbsz) & !(sbsz - 1)) + 0, fi.tile_col_end);
+                wv = imin(wv, end - bx - bw4);
+                if wv <= 0 {
+                    n_tr = 0;
+                } else {
+                    let row = ((by4 >> ss_ver) as i32 - 1) as usize;
+                    if row < 64 {
+                        n_tr = ((recon.scratch.is_coded[chroma as usize][row]
+                            >> (((bx4 + bw4 as usize) >> ss_hor) as u32))
+                            & 1) as i32;
+                    }
+                }
+            }
+        }
+        if bx > fi.tile_col_start {
+            let end = imin((by + sbsz) & !(sbsz - 1), fi.tile_row_end);
+            let hv = imin(bh4, end - by - bh4);
+            if hv <= 0 {
+                n_bl = 0;
+            } else if (bx & (sbsz - 1)) == 0 {
+                n_bl = hv;
+            } else {
+                let row = ((by4 + bh4 as usize) >> ss_ver) as usize;
+                if row < 64 {
+                    n_bl = ((recon.scratch.is_coded[chroma as usize][row]
+                        >> (((bx4 as i32 - 1) >> ss_hor) as u32))
+                        & 1) as i32;
+                }
+            }
+        }
+    }
+
+    let apply_ibp = recon.frame.seq_ibp && imax(ssbw4, ssbh4) > 1;
+    let have_left = bx > fi.tile_col_start;
+    let have_top = by > fi.tile_row_start;
+    let intra_flags = if apply_ibp { ANGLE_IBP_FLAG } else { 0 }
+        | if have_left { ANGLE_HAS_LEFT_FLAG } else { 0 }
+        | if have_top { ANGLE_HAS_TOP_FLAG } else { 0 };
+
+    let edge_o: usize = 768;
+    let max_w = 4 * (fi.bw >> ss_hor) - 4 * (bx >> ss_hor);
+    let max_h = 4 * (fi.bh >> ss_ver) - 4 * (by >> ss_ver);
+
+    // Intra prediction into a temp buffer (stride = w). Borrow the dst plane
+    // (read for edge prep) and `edge` (mut) as disjoint fields.
+    let mut tmp = vec![0u8; w * h];
+    {
+        let ReconCtx {
+            dst_y,
+            dst_u,
+            dst_v,
+            edge,
+            frame,
+            ..
+        } = &mut *recon;
+        let dst_plane: &[u8] = match plane {
+            0 => dst_y,
+            1 => dst_u,
+            _ => dst_v,
+        };
+        let m = crate::ipred_prepare::prepare_intra_edges_8bpc(
+            bx >> ss_hor,
+            by >> ss_ver,
+            fi.tile_col_end >> ss_hor,
+            fi.tile_row_end >> ss_ver,
+            n_tr,
+            n_bl,
+            dst_plane,
+            dst_off,
+            stride,
+            None,
+            m0,
+            ssbw4,
+            ssbh4,
+            angle | intra_flags,
+            edge,
+            edge_o,
+        );
+        dispatch_ipred(
+            m,
+            &mut tmp,
+            0,
+            w,
+            edge,
+            edge_o,
+            w,
+            h,
+            intra_flags,
+            max_w,
+            max_h,
+            &frame.ibp_weights,
+        );
+    }
+
+    // Mask: II mask (wedge_idx == -1) or wedge mask. Copy to a local so the
+    // `recon.masks` borrow does not overlap the `recon.dst_*` mutable write.
+    let mask: Vec<u8> = if wedge_idx == -1 {
+        let mode = match ii_mode {
+            x if x == InterIntraPredMode::DcPred as u8 => InterIntraPredMode::DcPred,
+            x if x == InterIntraPredMode::VertPred as u8 => InterIntraPredMode::VertPred,
+            x if x == InterIntraPredMode::HorPred as u8 => InterIntraPredMode::HorPred,
+            _ => InterIntraPredMode::SmoothPred,
+        };
+        recon
+            .masks
+            .ii_mask(ss_bs as usize, ssbw4 as usize, ssbh4 as usize, mode)[..w * h]
+            .to_vec()
+    } else {
+        recon
+            .masks
+            .wedge_mask(
+                ss_bs as usize,
+                bw4 as usize,
+                bh4 as usize,
+                wedge_idx as usize,
+                (ss_hor + ss_ver) as usize,
+            )[..w * h]
+            .to_vec()
+    };
+    let dst_plane: &mut [u8] = match plane {
+        0 => recon.dst_y,
+        1 => recon.dst_u,
+        _ => recon.dst_v,
+    };
+    crate::mc::blend_8bpc(&mut dst_plane[dst_off..], stride, &tmp, w, h, &mask);
+}
+
 /// Splat a resolved COMPOUND block's MVs into the spatial refmvs grid + the
 /// temporal MV grid (`splat_tworef_mv`, decode.c:627-710). Translational path
 /// only (warp-compound / global-affine deferred). The spatial grid write is the
@@ -8422,6 +8651,15 @@ fn recon_b_inter(
             );
         }
 
+        // Inter-intra blend (recon_tmpl.c:3199-3200): blend an intra prediction
+        // over the inter prediction for INTERINTRA / warp-interintra blocks.
+        if motion_mode == MotionMode::InterIntra as u8 || unsafe { b.data.inter.warp_ii } != 0 {
+            let dst_off_y = dst_off;
+            // SAFETY: split the recon borrow — iiblend needs &mut recon for the
+            // edge/masks while writing dst_y; pass dst_y through recon directly.
+            iiblend_luma_8bpc(recon, &b, dst_off_y, y_stride, bw4, bh4, by, bx, bs, fi);
+        }
+
         // Luma residual: walk b.tx_part geometry (same tp[] as intra,
         // recon_tmpl.c:3293).
         let seg_id = b.seg_id as usize;
@@ -8515,6 +8753,16 @@ fn recon_b_inter(
                     ss_ver,
                     fi.bw,
                     fi.bh,
+                );
+            }
+        }
+
+        // Inter-intra blend for chroma (recon_tmpl.c:3688).
+        if motion_mode == MotionMode::InterIntra as u8 || unsafe { b.data.inter.warp_ii } != 0 {
+            let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
+            for pl in 1..3usize {
+                iiblend_chroma_8bpc(
+                    recon, &b, pl, dst_off, uv_stride, cbw4, cbh4, cby, cbx, cbs, fi,
                 );
             }
         }
