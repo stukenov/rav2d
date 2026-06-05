@@ -11183,6 +11183,67 @@ fn tip_frame_recon_sb(
     // The whole superblock is a single TIP block; chroma is co-located.
     let has_luma = true;
     let has_chroma = cbs != BlockSize::Invalid;
+
+    // In-loop filter mask for the synthesized TIP block (decode.c:4411-4431).
+    // frame_mode==2 superblocks are not entropy decoded, so the deblock /
+    // qidx mask must be built here (mirroring the normal decode_b path) or
+    // the filter pass sees an all-zero mask for these frames.
+    if recon.frm_hdr.tip.apply_filter != 0 {
+        let layout = recon.frame.layout;
+        let ss_hor = recon.frame.ss_hor;
+        let ss_ver = recon.frame.ss_ver;
+        let bx4 = (bx & 63) as usize;
+        let by4 = (by & 63) as usize;
+        {
+            let m = &mut recon.lf_mask[recon.lf_idx];
+            crate::lf_mask::create_db_mask(
+                &mut m.filter_y,
+                &b,
+                bs,
+                bx,
+                by,
+                fi.bw,
+                fi.bh,
+                layout,
+                false,
+                &mut a.tx_lpf_y[bx4..],
+                &mut l.tx_lpf_y[by4..],
+                recon.frm_hdr,
+                recon.seq_hdr,
+            );
+        }
+        if has_chroma {
+            let m = &mut recon.lf_mask[recon.lf_idx];
+            crate::lf_mask::create_db_mask(
+                &mut m.filter_uv,
+                &b,
+                cbs,
+                bx,
+                by,
+                fi.bw,
+                fi.bh,
+                layout,
+                true,
+                &mut a.tx_lpf_uv[bx4 >> ss_hor..],
+                &mut l.tx_lpf_uv[by4 >> ss_ver..],
+                recon.frm_hdr,
+                recon.seq_hdr,
+            );
+        }
+        // Splat the frame quant index into the loop-filter mask qidx grid.
+        let qidx = recon.frm_hdr.quant.yac as u16;
+        let qbase = (bx4 >> 4) + ((by4 & 0x30) >> 2);
+        let sbsz64 = (fi.sb_step >> 4) as usize;
+        let m = &mut recon.lf_mask[recon.lf_idx];
+        let mut qoff = qbase;
+        for _ in 0..sbsz64 {
+            for x64 in 0..sbsz64 {
+                m.qidx[qoff + x64] = qidx;
+            }
+            qoff += 4;
+        }
+    }
+
     recon_b_inter_tip(
         recon,
         msac,
