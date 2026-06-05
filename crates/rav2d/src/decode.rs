@@ -5690,7 +5690,42 @@ fn decode_b(
                     b.data.inter.motion_mode = MotionMode::WarpDelta as u8;
                 }
 
-                if inter_mode == InterPredMode::WarpNewMv as u8 {
+                // has_cs_ext (decode.c:3062-3076): the warp_extend/warp_causal
+                // signal is only read when a spatial neighbour references the same
+                // frame. Without this gate WARPNEWMV blocks read extra symbols and
+                // desync the parse. The is_sb_boundary top path uses the a_sb_cache
+                // in dav2d; rav2d's `a` already carries the above-SB context, so it
+                // is used directly here (exact for non-boundary; SB-boundary refmv
+                // edge handling is a follow-up).
+                let is_sb_boundary = (by & (fi.sb_step - 1)) == 0;
+                let match_ref_l = |off: usize| -> bool {
+                    l.r#ref[0][off] == ref0 || l.r#ref[1][off] == ref0
+                };
+                let match_ref_a = |off: usize| -> bool {
+                    a.r#ref[0][off] == ref0 || a.r#ref[1][off] == ref0
+                };
+                let has_cs_ext = if inter_mode == InterPredMode::WarpNewMv as u8 {
+                    let left_match = have_left
+                        && (match_ref_l(by4)
+                            || (by + bh4 <= fi.tile_row_end && match_ref_l(by4 + bh4 as usize - 1)));
+                    let top_match = have_top && {
+                        if is_sb_boundary {
+                            let o0 = bx4 & !1;
+                            match_ref_a(o0)
+                                || (((bx + bw4 - 2) & !1) < fi.tile_col_end
+                                    && match_ref_a((bx4 + bw4 as usize - 2) & !1))
+                        } else {
+                            match_ref_a(bx4)
+                                || (bx + bw4 <= fi.tile_col_end
+                                    && match_ref_a(bx4 + bw4 as usize - 1))
+                        }
+                    };
+                    left_match || top_match
+                } else {
+                    false
+                };
+
+                if inter_mode == InterPredMode::WarpNewMv as u8 && has_cs_ext {
                     // warp extend / causal decision
                     let x1 = if nb_boff[0] == -1 {
                         0
@@ -7104,17 +7139,6 @@ fn recon_b_inter(
         return Ok(());
     }
     let mv = unsafe { b.data.inter.mv[0].c };
-    if std::env::var("RAV2D_INTER").is_ok() {
-        eprintln!(
-            "INTER y={by} x={bx} ref={ref0} mvy={} mvx={} filt={} comp={} mm={} skip={}",
-            mv.y,
-            mv.x,
-            unsafe { b.data.inter.filter },
-            refs[1],
-            unsafe { b.data.inter.motion_mode },
-            b.skip_txfm
-        );
-    }
     let filter = unsafe { b.data.inter.filter };
     let ss_hor = recon.frame.ss_hor;
     let ss_ver = recon.frame.ss_ver;
