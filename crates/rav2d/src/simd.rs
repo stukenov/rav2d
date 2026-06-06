@@ -14,6 +14,51 @@ use wide::{CmpLt, i32x8};
 
 use crate::pixel::{BitDepth, Pixel};
 
+// ---------------------------------------------------------------------------
+// aarch64 NEON intrinsic kernels.
+//
+// These are NEW pure-Rust `core::arch::aarch64` kernels (distinct from the FFI
+// dav2d asm in `mc_neon.rs`). The `wide` crate has no NEON *widening* path on
+// aarch64 — `wide-0.7` only special-cases AVX2/SSE2 for `from_i16x8`/`from_u16x8`
+// and otherwise falls back to scalar — so per-pixel kernels that widen u8→i32
+// can't reach NEON throughput through `wide`. The intrinsic kernels below close
+// that gap with `vmovl`/`vaddl`/`vabd`/`vqmovun`; the `wide` kernels remain the
+// portable fallback (non-aarch64, or when disabled via `RAV2D_NEON_OFF`).
+//
+// Every NEON kernel is bit-exact with its `wide`/scalar twin and is guarded by a
+// `#[cfg(test)]` test asserting equality over randomized inputs and all lengths.
+// ---------------------------------------------------------------------------
+
+/// Runtime NEON gating. Mirrors `mc_neon.rs`: `have_neon()` + `kern_on(name)`
+/// honoring `RAV2D_NEON_OFF` (comma list of kernel names, or `all`).
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod neon {
+    use crate::cpu::{arm, get_cpu_flags};
+
+    #[inline]
+    pub(crate) fn have_neon() -> bool {
+        get_cpu_flags() & arm::CPU_FLAG_NEON != 0
+    }
+
+    // RAV2D_NEON_OFF="sad,dc_add,..." (or "all") disables named kernels so the
+    // wide/scalar fallback can be exercised. Read once and cached, off the hot
+    // path; with the var unset this is a single atomic load.
+    fn disabled_kernels() -> &'static str {
+        use std::sync::OnceLock;
+        static OFF: OnceLock<String> = OnceLock::new();
+        OFF.get_or_init(|| std::env::var("RAV2D_NEON_OFF").unwrap_or_default())
+    }
+
+    #[inline]
+    pub(crate) fn kern_on(name: &str) -> bool {
+        let off = disabled_kernels();
+        if off.is_empty() {
+            return true;
+        }
+        !off.split(',').any(|k| k == name || k == "all")
+    }
+}
+
 /// Load 8 consecutive `i16` (sign-extended) into an `i32x8`.
 #[inline(always)]
 fn load8_i16(s: &[i16]) -> i32x8 {
@@ -234,6 +279,15 @@ pub fn morph_row<BD: BitDepth>(bd: BD, dst: &mut [BD::Pixel], alpha: i32, beta: 
 /// itx DC-only row: `dst[x] = clip(dst[x] + dc)` for `x in 0..n`.
 #[inline]
 pub fn dc_add_row<BD: BitDepth>(bd: BD, dst: &mut [BD::Pixel], dc: i32, n: usize) {
+    #[cfg(target_arch = "aarch64")]
+    if BD::Pixel::BITDEPTH == 8 && neon::have_neon() && neon::kern_on("dc_add") {
+        // SAFETY: BITDEPTH==8 ⇒ Pixel is u8 (identical layout); the kernel
+        // writes only `dst[0..n]`, bit-exact with the scalar 8bpc path.
+        let d: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+        unsafe { neon_kernels::dc_add_row_u8(d, dc, n) };
+        return;
+    }
     let dc_v = i32x8::splat(dc);
     let mut x = 0;
     while x + 8 <= n {
@@ -251,6 +305,12 @@ pub fn dc_add_row<BD: BitDepth>(bd: BD, dst: &mut [BD::Pixel], dc: i32, n: usize
 /// itx row-clip pass: `tmp[i] = clip((tmp[i] + rnd) >> shift, min, max)` in place.
 #[inline]
 pub fn row_clip(tmp: &mut [i32], n: usize, rnd: i32, shift: i32, min: i32, max: i32) {
+    #[cfg(target_arch = "aarch64")]
+    if neon::have_neon() && neon::kern_on("row_clip") {
+        // SAFETY: kernel writes only `tmp[0..n]`; bit-exact with scalar below.
+        unsafe { neon_kernels::row_clip_i32(tmp, n, rnd, shift, min, max) };
+        return;
+    }
     let rnd_v = i32x8::splat(rnd);
     let min_v = i32x8::splat(min);
     let max_v = i32x8::splat(max);
@@ -278,6 +338,15 @@ pub fn residual_add_row<BD: BitDepth>(
     rnd: i32,
     shift: i32,
 ) {
+    #[cfg(target_arch = "aarch64")]
+    if BD::Pixel::BITDEPTH == 8 && neon::have_neon() && neon::kern_on("residual_add") {
+        // SAFETY: BITDEPTH==8 ⇒ Pixel is u8 (identical layout); the kernel
+        // writes only `dst[0..n]`, bit-exact with the scalar 8bpc path.
+        let d: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+        unsafe { neon_kernels::residual_add_row_u8(d, c, n, rnd, shift) };
+        return;
+    }
     let rnd_v = i32x8::splat(rnd);
     let mut x = 0;
     while x + 8 <= n {
@@ -531,6 +600,211 @@ pub(crate) fn gdf_gradient_group(
     let arr = acc.to_array();
     for k in 0..ncells {
         dst[base_cell + k][d] = (arr[2 * k] + arr[2 * k + 1]) as u16;
+    }
+}
+
+// ===========================================================================
+// NEON intrinsic kernels (aarch64, 8bpc u8 paths).
+// ===========================================================================
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod neon_kernels {
+    use core::arch::aarch64::*;
+
+    /// SAD over a `w`x`h` block walking rows in steps of 2 (matching
+    /// `mc::sad_nxn`: it reads rows `0,2,4,...`, full width, no shift).
+    /// `p0`/`p1` are 8bpc rows; `p0_stride`/`p1_stride` are pixel strides.
+    /// Returns the exact integer `sum |p0-p1|` (caller applies `>> bd_min8`).
+    ///
+    /// # Safety
+    /// Requires NEON (caller gates on `have_neon()`). Reads `w` bytes from each
+    /// of rows `0,2,..` within bounds: caller guarantees `p0`/`p1` cover the
+    /// block (each row offset is `< len`, and `w` bytes fit). The 16-wide loads
+    /// read at most `w` bytes; the `<16` tail is handled scalar so no over-read.
+    #[target_feature(enable = "neon")]
+    pub(crate) unsafe fn sad_nxn_stride2(
+        p0: &[u8],
+        p0_stride: usize,
+        p1: &[u8],
+        p1_stride: usize,
+        w: usize,
+        h: usize,
+    ) -> i32 {
+        unsafe {
+            // u32x4 accumulator of pairwise-widened abs diffs. Each byte abs
+            // diff is in [0,255]; widening to u16 then accumulating into u32
+            // lanes never overflows for any realistic block (a 64x64 block
+            // contributes at most 64*64*255 ≈ 1.04M, far below u32 max).
+            let mut acc = vdupq_n_u32(0);
+            let mut o0 = 0usize;
+            let mut o1 = 0usize;
+            let mut y = 0usize;
+            while y < h {
+                let r0 = p0.as_ptr().add(o0);
+                let r1 = p1.as_ptr().add(o1);
+                let mut x = 0usize;
+                while x + 16 <= w {
+                    let a = vld1q_u8(r0.add(x));
+                    let b = vld1q_u8(r1.add(x));
+                    let d = vabdq_u8(a, b); // |a-b| per byte, exact
+                    // u8x16 -> u16x8 (pairwise add) -> accumulate into u32x4.
+                    acc = vpadalq_u16(acc, vpaddlq_u8(d));
+                    x += 16;
+                }
+                // 8-wide step for the remaining 8..16.
+                if x + 8 <= w {
+                    let a = vld1_u8(r0.add(x));
+                    let b = vld1_u8(r1.add(x));
+                    let d = vabd_u8(a, b); // u8x8 abs diffs
+                    acc = vpadalq_u16(acc, vmovl_u8(d)); // u8x8 -> u16x8 -> u32x4
+                    x += 8;
+                }
+                // scalar tail (<8).
+                let mut tail = 0i32;
+                while x < w {
+                    let av = *r0.add(x) as i32;
+                    let bv = *r1.add(x) as i32;
+                    tail += (av - bv).abs();
+                    x += 1;
+                }
+                acc = vaddq_u32(acc, vsetq_lane_u32(tail as u32, vdupq_n_u32(0), 0));
+                o0 += p0_stride * 2;
+                o1 += p1_stride * 2;
+                y += 2;
+            }
+            vaddvq_u32(acc) as i32
+        }
+    }
+
+    /// SAD over a full 8x8 block (all 8 rows, 8 cols), matching `mc::sad8x8`
+    /// (`>> bd_min8` applied by caller). Returns the exact `u32` sum.
+    ///
+    /// # Safety
+    /// Requires NEON. Caller guarantees `p0`/`p1` cover an 8x8 block at the
+    /// given strides.
+    #[target_feature(enable = "neon")]
+    pub(crate) unsafe fn sad_8x8(p0: &[u8], p0_stride: usize, p1: &[u8], p1_stride: usize) -> u32 {
+        unsafe {
+            let mut acc = vdupq_n_u16(0);
+            for y in 0..8usize {
+                let a = vld1_u8(p0.as_ptr().add(y * p0_stride));
+                let b = vld1_u8(p1.as_ptr().add(y * p1_stride));
+                acc = vabal_u8(acc, a, b); // acc += |a-b| widened to u16
+            }
+            vaddlvq_u16(acc) // horizontal sum u16 lanes -> u32
+        }
+    }
+
+    /// itx DC-only row, 8bpc: `dst[x] = clip(dst[x] + dc, 0, 255)`.
+    ///
+    /// Pixels widen u8→s32 and `dc` is added in s32 (the scalar path computes
+    /// in i32 and `dc` can exceed s16 range), so no intermediate overflows.
+    /// Narrowing is sat s32→s16 then sat s16→u8 (`vqmovun_s16` clamps to
+    /// `[0,255]`, matching `pixel_clip` for 8bpc).
+    ///
+    /// # Safety
+    /// Requires NEON. `dst.len() >= n`.
+    #[target_feature(enable = "neon")]
+    pub(crate) unsafe fn dc_add_row_u8(dst: &mut [u8], dc: i32, n: usize) {
+        unsafe {
+            let dcv32 = vdupq_n_s32(dc);
+            let p = dst.as_mut_ptr();
+            let mut x = 0usize;
+            while x + 8 <= n {
+                let d = vld1_u8(p.add(x)); // 8x u8
+                let dw = vreinterpretq_s16_u16(vmovl_u8(d)); // 8x s16 (0..255)
+                let lo = vaddq_s32(vmovl_s16(vget_low_s16(dw)), dcv32);
+                let hi = vaddq_s32(vmovl_s16(vget_high_s16(dw)), dcv32);
+                let n16 = vcombine_s16(vqmovn_s32(lo), vqmovn_s32(hi));
+                let out = vqmovun_s16(n16);
+                vst1_u8(p.add(x), out);
+                x += 8;
+            }
+            while x < n {
+                let v = dst[x] as i32 + dc;
+                dst[x] = v.clamp(0, 255) as u8;
+                x += 1;
+            }
+        }
+    }
+
+    /// itx plain residual-add row, 8bpc:
+    /// `dst[x] = clip(dst[x] + ((c[x]+rnd)>>shift), 0, 255)`.
+    ///
+    /// # Safety
+    /// Requires NEON. `dst.len() >= n`, `c.len() >= n`. `shift >= 0`.
+    #[target_feature(enable = "neon")]
+    pub(crate) unsafe fn residual_add_row_u8(
+        dst: &mut [u8],
+        c: &[i32],
+        n: usize,
+        rnd: i32,
+        shift: i32,
+    ) {
+        unsafe {
+            let rndv = vdupq_n_s32(rnd);
+            let negsh = vdupq_n_s32(-shift); // vshlq by negative == arith right shift
+            let p = dst.as_mut_ptr();
+            let cp = c.as_ptr();
+            let mut x = 0usize;
+            while x + 8 <= n {
+                let c0 = vld1q_s32(cp.add(x));
+                let c1 = vld1q_s32(cp.add(x + 4));
+                let cf0 = vshlq_s32(vaddq_s32(c0, rndv), negsh);
+                let cf1 = vshlq_s32(vaddq_s32(c1, rndv), negsh);
+                let d = vld1_u8(p.add(x));
+                let dw = vreinterpretq_s16_u16(vmovl_u8(d));
+                let dlo = vmovl_s16(vget_low_s16(dw));
+                let dhi = vmovl_s16(vget_high_s16(dw));
+                let rlo = vaddq_s32(dlo, cf0);
+                let rhi = vaddq_s32(dhi, cf1);
+                let n16 = vcombine_s16(vqmovn_s32(rlo), vqmovn_s32(rhi));
+                let out = vqmovun_s16(n16);
+                vst1_u8(p.add(x), out);
+                x += 8;
+            }
+            while x < n {
+                let cf = (c[x] + rnd) >> shift;
+                let v = dst[x] as i32 + cf;
+                dst[x] = v.clamp(0, 255) as u8;
+                x += 1;
+            }
+        }
+    }
+
+    /// itx row-clip pass (pure i32):
+    /// `tmp[i] = clip((tmp[i]+rnd)>>shift, min, max)` in place.
+    ///
+    /// # Safety
+    /// Requires NEON. `tmp.len() >= n`. `shift >= 0`.
+    #[target_feature(enable = "neon")]
+    pub(crate) unsafe fn row_clip_i32(
+        tmp: &mut [i32],
+        n: usize,
+        rnd: i32,
+        shift: i32,
+        min: i32,
+        max: i32,
+    ) {
+        unsafe {
+            let rndv = vdupq_n_s32(rnd);
+            let negsh = vdupq_n_s32(-shift);
+            let minv = vdupq_n_s32(min);
+            let maxv = vdupq_n_s32(max);
+            let p = tmp.as_mut_ptr();
+            let mut i = 0usize;
+            while i + 4 <= n {
+                let v = vld1q_s32(p.add(i));
+                let s = vshlq_s32(vaddq_s32(v, rndv), negsh);
+                let cl = vminq_s32(vmaxq_s32(s, minv), maxv);
+                vst1q_s32(p.add(i), cl);
+                i += 4;
+            }
+            while i < n {
+                tmp[i] = (((tmp[i] + rnd) >> shift).max(min)).min(max);
+                i += 1;
+            }
+        }
     }
 }
 
@@ -1021,6 +1295,129 @@ mod tests {
                         got, want,
                         "gdf_grad shift={shift} ro={row_off} co={col_off}"
                     );
+                }
+            }
+        }
+    }
+
+    // --- NEON intrinsic kernel guard tests (aarch64) ---
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_sad_nxn_matches_scalar() {
+        use super::neon_kernels::sad_nxn_stride2;
+        let mut rng = Rng(0x5AD0_1234);
+        // Cover the spec MC block widths plus odd/tail widths, varying strides.
+        for &(w, h) in &[
+            (4usize, 4usize),
+            (8, 8),
+            (16, 16),
+            (32, 32),
+            (64, 64),
+            (8, 4),
+            (16, 8),
+            (3, 4),
+            (7, 6),
+            (12, 10),
+            (13, 2),
+            (24, 8),
+            (1, 2),
+            (2, 2),
+        ] {
+            let p0s = w + 5;
+            let p1s = w + 3;
+            let p0: Vec<u8> = (0..p0s * h).map(|_| rng.u8b()).collect();
+            let p1: Vec<u8> = (0..p1s * h).map(|_| rng.u8b()).collect();
+            let got = unsafe { sad_nxn_stride2(&p0, p0s, &p1, p1s, w, h) };
+            // independent scalar reference (same stride-2 walk).
+            let mut want = 0i32;
+            let (mut o0, mut o1, mut y) = (0usize, 0usize, 0usize);
+            while y < h {
+                for x in 0..w {
+                    want += (p0[o0 + x] as i32 - p1[o1 + x] as i32).abs();
+                }
+                o0 += p0s * 2;
+                o1 += p1s * 2;
+                y += 2;
+            }
+            assert_eq!(got, want, "sad_nxn w={w} h={h}");
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_sad_8x8_matches_scalar() {
+        use super::neon_kernels::sad_8x8;
+        let mut rng = Rng(0x8888_AAAA);
+        for _ in 0..64 {
+            let p0s = 8 + (rng.next() % 8) as usize;
+            let p1s = 8 + (rng.next() % 8) as usize;
+            let p0: Vec<u8> = (0..p0s * 8).map(|_| rng.u8b()).collect();
+            let p1: Vec<u8> = (0..p1s * 8).map(|_| rng.u8b()).collect();
+            let got = unsafe { sad_8x8(&p0, p0s, &p1, p1s) };
+            let mut want = 0u32;
+            for y in 0..8 {
+                for x in 0..8 {
+                    want += (p0[y * p0s + x] as i32 - p1[y * p1s + x] as i32).unsigned_abs();
+                }
+            }
+            assert_eq!(got, want, "sad_8x8 p0s={p0s} p1s={p1s}");
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_dc_add_matches_scalar() {
+        use super::neon_kernels::dc_add_row_u8;
+        let mut rng = Rng(0x0DC0_1357);
+        for dc in [-300i32, -256, -1, 0, 1, 50, 255, 5000, -40000, 40000] {
+            for n in 0..=40usize {
+                let d0: Vec<u8> = (0..n).map(|_| rng.u8b()).collect();
+                let mut got = d0.clone();
+                unsafe { dc_add_row_u8(&mut got, dc, n) };
+                let want: Vec<u8> = (0..n)
+                    .map(|i| (d0[i] as i32 + dc).clamp(0, 255) as u8)
+                    .collect();
+                assert_eq!(got, want, "neon dc_add n={n} dc={dc}");
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_residual_add_matches_scalar() {
+        use super::neon_kernels::residual_add_row_u8;
+        let mut rng = Rng(0x12E5_AD00);
+        for &(rnd, shift) in &[(8i32, 4i32), (2048, 12), (0, 0), (1, 1)] {
+            for n in 0..=40usize {
+                let c: Vec<i32> = (0..n).map(|_| (rng.next() as i32) >> 12).collect();
+                let d0: Vec<u8> = (0..n).map(|_| rng.u8b()).collect();
+                let mut got = d0.clone();
+                unsafe { residual_add_row_u8(&mut got, &c, n, rnd, shift) };
+                let want: Vec<u8> = (0..n)
+                    .map(|i| (d0[i] as i32 + ((c[i] + rnd) >> shift)).clamp(0, 255) as u8)
+                    .collect();
+                assert_eq!(got, want, "neon resadd n={n} rnd={rnd} sh={shift}");
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_row_clip_matches_scalar() {
+        use super::neon_kernels::row_clip_i32;
+        let mut rng = Rng(0x12_ABCD_99);
+        for &(min, max) in &[(i16::MIN as i32, i16::MAX as i32), (-524288, 524287)] {
+            for &(rnd, shift) in &[(8i32, 4i32), (1, 1), (2048, 12), (0, 0)] {
+                for n in 0..=40usize {
+                    let v0: Vec<i32> = (0..n).map(|_| (rng.next() as i32) >> 8).collect();
+                    let mut got = v0.clone();
+                    unsafe { row_clip_i32(&mut got, n, rnd, shift, min, max) };
+                    let want: Vec<i32> = v0
+                        .iter()
+                        .map(|&v| ((v + rnd) >> shift).clamp(min, max))
+                        .collect();
+                    assert_eq!(got, want, "neon row_clip n={n} sh={shift}");
                 }
             }
         }

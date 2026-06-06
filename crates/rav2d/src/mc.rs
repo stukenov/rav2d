@@ -184,11 +184,7 @@ pub fn mask_fn<BD: BitDepth>(
         let t1 = &tmp1[yw.min(tmp1.len())..];
         let t2 = &tmp2[yw.min(tmp2.len())..];
         let mk = &mask[yw.min(mask.len())..];
-        let n = w
-            .min(d.len())
-            .min(t1.len())
-            .min(t2.len())
-            .min(mk.len());
+        let n = w.min(d.len()).min(t1.len()).min(t2.len()).min(mk.len());
         crate::simd::mask_row(bd, d, t1, t2, mk, n, rnd, sh);
     }
 }
@@ -353,6 +349,22 @@ pub fn sad_nxn<P: Pixel>(
     h: usize,
     bd_min8: i32,
 ) -> i32 {
+    // 8bpc (P == u8): route to the NEON intrinsic kernel when available.
+    #[cfg(target_arch = "aarch64")]
+    if P::BITDEPTH == 8 && crate::simd::neon::have_neon() && crate::simd::neon::kern_on("sad") {
+        // SAFETY: `P::BITDEPTH == 8` means `P` is the crate's 8-bit pixel
+        // (`u8`); the two have identical layout, so casting the slices to
+        // `&[u8]` is sound. The NEON kernel reads only `w` bytes from rows
+        // `0,2,..` (matching the scalar walk below), all within the caller's
+        // block bounds. `bd_min8` is applied identically afterwards.
+        let p0u: &[u8] = unsafe { core::slice::from_raw_parts(p0.as_ptr() as *const u8, p0.len()) };
+        let p1u: &[u8] = unsafe { core::slice::from_raw_parts(p1.as_ptr() as *const u8, p1.len()) };
+        let sad = unsafe {
+            crate::simd::neon_kernels::sad_nxn_stride2(p0u, p0_stride, p1u, p1_stride, w, h)
+        };
+        return sad >> bd_min8;
+    }
+
     let mut sad = 0i32;
     let mut o0 = 0;
     let mut o1 = 0;
@@ -898,6 +910,19 @@ pub fn sad8x8<P: Pixel>(
     p1_stride: usize,
     bd_min8: i32,
 ) -> u32 {
+    // 8bpc (P == u8): route to the NEON intrinsic kernel when available.
+    #[cfg(target_arch = "aarch64")]
+    if P::BITDEPTH == 8 && crate::simd::neon::have_neon() && crate::simd::neon::kern_on("sad") {
+        // SAFETY: see `sad_nxn` — `P::BITDEPTH == 8` ⇒ `P` is `u8`, identical
+        // layout, so the slice casts are sound. The kernel reads an 8x8 block
+        // at the given strides, within the caller's bounds. `>> bd_min8`
+        // matches the scalar path.
+        let p0u: &[u8] = unsafe { core::slice::from_raw_parts(p0.as_ptr() as *const u8, p0.len()) };
+        let p1u: &[u8] = unsafe { core::slice::from_raw_parts(p1.as_ptr() as *const u8, p1.len()) };
+        let sad = unsafe { crate::simd::neon_kernels::sad_8x8(p0u, p0_stride, p1u, p1_stride) };
+        return sad >> bd_min8;
+    }
+
     let mut sad = 0u32;
     for y in 0..8 {
         for x in 0..8 {
