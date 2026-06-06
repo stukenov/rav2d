@@ -1,8 +1,31 @@
 use crate::intops::{iclip, imax, imin};
+use crate::pixel::{BitDepth, BitDepth8, Pixel};
 use crate::tables::{EXT_WARP_FILTER, MC_SUBPEL_FILTERS, MC_WARP_FILTER};
 
 pub const INTERMEDIATE_BITS_8BPC: i32 = 4;
 pub const PREP_BIAS_8BPC: i32 = 0;
+
+/// `get_intermediate_bits(bitdepth_max)` (mc_tmpl.c): 4 for 8bpc, `14 - bd` for
+/// HBD (10-bit -> 4, 12-bit -> 2).
+#[inline(always)]
+fn intermediate_bits<BD: BitDepth>(bd: BD) -> i32 {
+    if BD::BPC == 8 {
+        4
+    } else {
+        14 - bd.bitdepth() as i32
+    }
+}
+
+/// `PREP_BIAS` (mc_tmpl.c): 0 for 8bpc, 8192 for HBD. The MC prep tmp buffer
+/// stays `int16_t` for both; the bias keeps HBD prepped values in i16 range.
+#[inline(always)]
+fn prep_bias<BD: BitDepth>(_bd: BD) -> i32 {
+    if BD::BPC == 8 {
+        0
+    } else {
+        8192
+    }
+}
 
 pub fn put_8bpc(
     dst: &mut [u8],
@@ -12,6 +35,10 @@ pub fn put_8bpc(
     w: usize,
     h: usize,
 ) {
+    put(dst, dst_stride, src, src_stride, w, h);
+}
+
+pub fn put<P: Pixel>(dst: &mut [P], dst_stride: usize, src: &[P], src_stride: usize, w: usize, h: usize) {
     for y in 0..h {
         dst[y * dst_stride..y * dst_stride + w]
             .copy_from_slice(&src[y * src_stride..y * src_stride + w]);
@@ -26,22 +53,49 @@ pub fn prep_8bpc(
     w: usize,
     h: usize,
 ) {
+    prep(BitDepth8, tmp, tmp_stride, src, src_stride, w, h);
+}
+
+pub fn prep<BD: BitDepth>(
+    bd: BD,
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[BD::Pixel],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
+    let ib = intermediate_bits(bd);
+    let bias = prep_bias(bd);
     for y in 0..h {
         for x in 0..w {
-            tmp[y * tmp_stride + x] =
-                ((src[y * src_stride + x] as i32) << INTERMEDIATE_BITS_8BPC) as i16;
+            let s: i32 = src[y * src_stride + x].into();
+            tmp[y * tmp_stride + x] = ((s << ib) - bias) as i16;
         }
     }
 }
 
 pub fn avg_8bpc(dst: &mut [u8], dst_stride: usize, tmp1: &[i16], tmp2: &[i16], w: usize, h: usize) {
-    let sh = INTERMEDIATE_BITS_8BPC + 1;
-    let rnd = 1 << INTERMEDIATE_BITS_8BPC;
+    avg(BitDepth8, dst, dst_stride, tmp1, tmp2, w, h);
+}
+
+pub fn avg<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
+) {
+    let ib = intermediate_bits(bd);
+    let sh = ib + 1;
+    let rnd = (1 << ib) + prep_bias(bd) * 2;
     for y in 0..h {
         for x in 0..w {
             let ti = y * w + x;
             dst[y * dst_stride + x] =
-                iclip((tmp1[ti] as i32 + tmp2[ti] as i32 + rnd) >> sh, 0, 255) as u8;
+                bd.pixel_clip((tmp1[ti] as i32 + tmp2[ti] as i32 + rnd) >> sh);
         }
     }
 }
@@ -55,16 +109,29 @@ pub fn w_avg_8bpc(
     h: usize,
     weight: i32,
 ) {
-    let sh = INTERMEDIATE_BITS_8BPC + 4;
-    let rnd = 8 << INTERMEDIATE_BITS_8BPC;
+    w_avg(BitDepth8, dst, dst_stride, tmp1, tmp2, w, h, weight);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn w_avg<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
+    weight: i32,
+) {
+    let ib = intermediate_bits(bd);
+    let sh = ib + 4;
+    let rnd = (8 << ib) + prep_bias(bd) * 16;
     for y in 0..h {
         for x in 0..w {
             let ti = y * w + x;
-            dst[y * dst_stride + x] = iclip(
+            dst[y * dst_stride + x] = bd.pixel_clip(
                 (tmp1[ti] as i32 * weight + tmp2[ti] as i32 * (16 - weight) + rnd) >> sh,
-                0,
-                255,
-            ) as u8;
+            );
         }
     }
 }
@@ -78,41 +145,73 @@ pub fn mask_8bpc(
     h: usize,
     mask: &[u8],
 ) {
-    let sh = INTERMEDIATE_BITS_8BPC + 6;
-    let rnd = 32 << INTERMEDIATE_BITS_8BPC;
+    mask_fn(BitDepth8, dst, dst_stride, tmp1, tmp2, w, h, mask);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn mask_fn<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
+    mask: &[u8],
+) {
+    let ib = intermediate_bits(bd);
+    let sh = ib + 6;
+    let rnd = (32 << ib) + prep_bias(bd) * 64;
     for y in 0..h {
         for x in 0..w {
             let ti = y * w + x;
             let m = mask[ti] as i32;
-            dst[y * dst_stride + x] = iclip(
-                (tmp1[ti] as i32 * m + tmp2[ti] as i32 * (64 - m) + rnd) >> sh,
-                0,
-                255,
-            ) as u8;
+            dst[y * dst_stride + x] =
+                bd.pixel_clip((tmp1[ti] as i32 * m + tmp2[ti] as i32 * (64 - m) + rnd) >> sh);
         }
     }
 }
 
 pub fn blend_8bpc(dst: &mut [u8], dst_stride: usize, tmp: &[u8], w: usize, h: usize, mask: &[u8]) {
+    blend(dst, dst_stride, tmp, w, h, mask);
+}
+
+pub fn blend<P: Pixel>(dst: &mut [P], dst_stride: usize, tmp: &[P], w: usize, h: usize, mask: &[u8]) {
     for y in 0..h {
         for x in 0..w {
             let di = y * dst_stride + x;
             let ti = y * w + x;
             let m = mask[ti] as i32;
-            dst[di] = ((dst[di] as i32 * (64 - m) + tmp[ti] as i32 * m + 32) >> 6) as u8;
+            let d: i32 = dst[di].into();
+            let t: i32 = tmp[ti].into();
+            dst[di] = P::from_i32((d * (64 - m) + t * m + 32) >> 6);
         }
     }
 }
 
 pub fn morph_8bpc(dst: &mut [u8], dst_stride: usize, alpha: i32, beta: i32, w: usize, h: usize) {
+    morph(BitDepth8, dst, dst_stride, alpha, beta, w, h);
+}
+
+pub fn morph<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    alpha: i32,
+    beta: i32,
+    w: usize,
+    h: usize,
+) {
     for y in 0..h {
         for x in 0..w {
             let di = y * dst_stride + x;
-            dst[di] = iclip((alpha * dst[di] as i32 + beta) >> 8, 0, 255) as u8;
+            let d: i32 = dst[di].into();
+            dst[di] = bd.pixel_clip((alpha * d + beta) >> 8);
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emu_edge_8bpc(
     bw: usize,
     bh: usize,
@@ -123,6 +222,22 @@ pub fn emu_edge_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
     r: &[u8],
+    ref_stride: usize,
+) {
+    emu_edge(bw, bh, iw, ih, x, y, dst, dst_stride, r, ref_stride);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emu_edge<P: Pixel>(
+    bw: usize,
+    bh: usize,
+    iw: usize,
+    ih: usize,
+    x: isize,
+    y: isize,
+    dst: &mut [P],
+    dst_stride: usize,
+    r: &[P],
     ref_stride: usize,
 ) {
     let ref_y = iclip(y as i32, 0, ih as i32 - 1) as usize;
@@ -176,13 +291,26 @@ pub fn sad_nxn_8bpc(
     w: usize,
     h: usize,
 ) -> i32 {
+    sad_nxn(p0, p0_stride, p1, p1_stride, w, h)
+}
+
+pub fn sad_nxn<P: Pixel>(
+    p0: &[P],
+    p0_stride: usize,
+    p1: &[P],
+    p1_stride: usize,
+    w: usize,
+    h: usize,
+) -> i32 {
     let mut sad = 0i32;
     let mut o0 = 0;
     let mut o1 = 0;
     let mut y = 0;
     while y < h {
         for x in 0..w {
-            sad += (p0[o0 + x] as i32 - p1[o1 + x] as i32).abs();
+            let a: i32 = p0[o0 + x].into();
+            let b: i32 = p1[o1 + x].into();
+            sad += (a - b).abs();
         }
         o0 += p0_stride * 2;
         o1 += p1_stride * 2;
@@ -220,16 +348,17 @@ fn get_v_filter(my: i32, filter_type: i32, h: usize) -> Option<[i8; 8]> {
 }
 
 #[inline(always)]
-fn filter_8tap_u8(src: &[u8], center: usize, f: &[i8; 8], stride: isize) -> i32 {
+fn filter_8tap_px<P: Pixel>(src: &[P], center: usize, f: &[i8; 8], stride: isize) -> i32 {
     let c = center as isize;
-    f[0] as i32 * src[(c - 3 * stride) as usize] as i32
-        + f[1] as i32 * src[(c - 2 * stride) as usize] as i32
-        + f[2] as i32 * src[(c - stride) as usize] as i32
-        + f[3] as i32 * src[center] as i32
-        + f[4] as i32 * src[(c + stride) as usize] as i32
-        + f[5] as i32 * src[(c + 2 * stride) as usize] as i32
-        + f[6] as i32 * src[(c + 3 * stride) as usize] as i32
-        + f[7] as i32 * src[(c + 4 * stride) as usize] as i32
+    let s = |i: isize| -> i32 { src[i as usize].into() };
+    f[0] as i32 * s(c - 3 * stride)
+        + f[1] as i32 * s(c - 2 * stride)
+        + f[2] as i32 * s(c - stride)
+        + f[3] as i32 * s(c)
+        + f[4] as i32 * s(c + stride)
+        + f[5] as i32 * s(c + 2 * stride)
+        + f[6] as i32 * s(c + 3 * stride)
+        + f[7] as i32 * s(c + 4 * stride)
 }
 
 #[inline(always)]
@@ -247,6 +376,7 @@ fn filter_8tap_i16(mid: &[i16], center: usize, f: &[i8; 8], stride: isize) -> i3
 
 /// 8-tap subpixel MC filter. `src_off` is the origin in `src` — must have
 /// 3 rows above and 4 rows below, and 3 cols left and 4 cols right of padding.
+#[allow(clippy::too_many_arguments)]
 pub fn put_8tap_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
@@ -259,8 +389,27 @@ pub fn put_8tap_8bpc(
     my: i32,
     filter_type: i32,
 ) {
+    put_8tap(
+        BitDepth8, dst, dst_stride, src, src_off, src_stride, w, h, mx, my, filter_type,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn put_8tap<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    src: &[BD::Pixel],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+    filter_type: i32,
+) {
     let bits = 6 + (filter_type < 0) as i32;
-    let intermediate_bits = INTERMEDIATE_BITS_8BPC;
+    let intermediate_bits = intermediate_bits(bd);
     let intermediate_rnd = ((1 << bits) >> 1) + ((1 << (bits - intermediate_bits)) >> 1);
     let fh = get_h_filter(mx, filter_type, w);
     let fv = get_v_filter(my, filter_type, h);
@@ -275,7 +424,7 @@ pub fn put_8tap_8bpc(
                     let si = (src_off as isize
                         + (y as isize - 3) * src_stride as isize
                         + x as isize) as usize;
-                    mid[y * 64 + x] = ((filter_8tap_u8(src, si, &fh, 1)
+                    mid[y * 64 + x] = ((filter_8tap_px(src, si, &fh, 1)
                         + ((1 << (bits - intermediate_bits)) >> 1))
                         >> (bits - intermediate_bits)) as i16;
                 }
@@ -283,13 +432,11 @@ pub fn put_8tap_8bpc(
             for y in 0..h {
                 for x in 0..w {
                     let mi = (y + 3) * 64 + x;
-                    dst[y * dst_stride + x] = iclip(
+                    dst[y * dst_stride + x] = bd.pixel_clip(
                         (filter_8tap_i16(&mid, mi, &fv, 64)
                             + ((1 << (bits + intermediate_bits)) >> 1))
                             >> (bits + intermediate_bits),
-                        0,
-                        255,
-                    ) as u8;
+                    );
                 }
             }
         }
@@ -297,11 +444,8 @@ pub fn put_8tap_8bpc(
             for y in 0..h {
                 for x in 0..w {
                     let si = src_off + y * src_stride + x;
-                    dst[y * dst_stride + x] = iclip(
-                        (filter_8tap_u8(src, si, &fh, 1) + intermediate_rnd) >> bits,
-                        0,
-                        255,
-                    ) as u8;
+                    dst[y * dst_stride + x] =
+                        bd.pixel_clip((filter_8tap_px(src, si, &fh, 1) + intermediate_rnd) >> bits);
                 }
             }
         }
@@ -309,20 +453,18 @@ pub fn put_8tap_8bpc(
             for y in 0..h {
                 for x in 0..w {
                     let si = src_off + y * src_stride + x;
-                    dst[y * dst_stride + x] = iclip(
-                        (filter_8tap_u8(src, si, &fv, ss) + ((1 << bits) >> 1)) >> bits,
-                        0,
-                        255,
-                    ) as u8;
+                    dst[y * dst_stride + x] =
+                        bd.pixel_clip((filter_8tap_px(src, si, &fv, ss) + ((1 << bits) >> 1)) >> bits);
                 }
             }
         }
         (None, None) => {
-            put_8bpc(dst, dst_stride, &src[src_off..], src_stride, w, h);
+            put(dst, dst_stride, &src[src_off..], src_stride, w, h);
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prep_8tap_8bpc(
     tmp: &mut [i16],
     tmp_stride: usize,
@@ -335,8 +477,28 @@ pub fn prep_8tap_8bpc(
     my: i32,
     filter_type: i32,
 ) {
+    prep_8tap(
+        BitDepth8, tmp, tmp_stride, src, src_off, src_stride, w, h, mx, my, filter_type,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prep_8tap<BD: BitDepth>(
+    bd: BD,
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[BD::Pixel],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+    filter_type: i32,
+) {
     let bits = 6 + (filter_type < 0) as i32;
-    let intermediate_bits = INTERMEDIATE_BITS_8BPC;
+    let intermediate_bits = intermediate_bits(bd);
+    let bias = prep_bias(bd) as i16;
     let fh = get_h_filter(mx, filter_type, w);
     let fv = get_v_filter(my, filter_type, h);
     let ss = src_stride as isize;
@@ -350,7 +512,7 @@ pub fn prep_8tap_8bpc(
                     let si = (src_off as isize
                         + (y as isize - 3) * src_stride as isize
                         + x as isize) as usize;
-                    mid[y * 64 + x] = ((filter_8tap_u8(src, si, &fh, 1)
+                    mid[y * 64 + x] = ((filter_8tap_px(src, si, &fh, 1)
                         + ((1 << (bits - intermediate_bits)) >> 1))
                         >> (bits - intermediate_bits)) as i16;
                 }
@@ -360,7 +522,7 @@ pub fn prep_8tap_8bpc(
                     let mi = (y + 3) * 64 + x;
                     tmp[y * tmp_stride + x] =
                         ((filter_8tap_i16(&mid, mi, &fv, 64) + ((1 << bits) >> 1)) >> bits) as i16
-                            - PREP_BIAS_8BPC as i16;
+                            - bias;
                 }
             }
         }
@@ -368,11 +530,11 @@ pub fn prep_8tap_8bpc(
             for y in 0..h {
                 for x in 0..w {
                     let si = src_off + y * src_stride + x;
-                    tmp[y * tmp_stride + x] = ((filter_8tap_u8(src, si, &fh, 1)
+                    tmp[y * tmp_stride + x] = ((filter_8tap_px(src, si, &fh, 1)
                         + ((1 << (bits - intermediate_bits)) >> 1))
                         >> (bits - intermediate_bits))
                         as i16
-                        - PREP_BIAS_8BPC as i16;
+                        - bias;
                 }
             }
         }
@@ -380,20 +542,21 @@ pub fn prep_8tap_8bpc(
             for y in 0..h {
                 for x in 0..w {
                     let si = src_off + y * src_stride + x;
-                    tmp[y * tmp_stride + x] = ((filter_8tap_u8(src, si, &fv, ss)
+                    tmp[y * tmp_stride + x] = ((filter_8tap_px(src, si, &fv, ss)
                         + ((1 << (bits - intermediate_bits)) >> 1))
                         >> (bits - intermediate_bits))
                         as i16
-                        - PREP_BIAS_8BPC as i16;
+                        - bias;
                 }
             }
         }
         (None, None) => {
-            prep_8bpc(tmp, tmp_stride, &src[src_off..], src_stride, w, h);
+            prep(bd, tmp, tmp_stride, &src[src_off..], src_stride, w, h);
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn w_mask_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
@@ -407,9 +570,30 @@ pub fn w_mask_8bpc(
     ss_hor: bool,
     ss_ver: bool,
 ) {
-    let sh = INTERMEDIATE_BITS_8BPC + 6;
-    let rnd = 32 << INTERMEDIATE_BITS_8BPC;
-    let mask_sh = 8; // bitdepth(8) + intermediate_bits(4) - 4
+    w_mask(
+        BitDepth8, dst, dst_stride, tmp1, tmp2, w, h, mask, mask_stride, sign, ss_hor, ss_ver,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn w_mask<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    tmp1: &[i16],
+    tmp2: &[i16],
+    w: usize,
+    h: usize,
+    mask: &mut [u8],
+    mask_stride: usize,
+    sign: i32,
+    ss_hor: bool,
+    ss_ver: bool,
+) {
+    let ib = intermediate_bits(bd);
+    let sh = ib + 6;
+    let rnd = (32 << ib) + prep_bias(bd) * 64;
+    let mask_sh = bd.bitdepth() as i32 + ib - 4;
     let mask_rnd = 1i32 << (mask_sh - 5);
 
     let mut t1off = 0usize;
@@ -425,11 +609,9 @@ pub fn w_mask_8bpc(
                     >> mask_sh),
                 64,
             );
-            dst[doff + x] = iclip(
+            dst[doff + x] = bd.pixel_clip(
                 (tmp1[t1off + x] as i32 * m + tmp2[t2off + x] as i32 * (64 - m) + rnd) >> sh,
-                0,
-                255,
-            ) as u8;
+            );
 
             if ss_hor {
                 x += 1;
@@ -438,11 +620,9 @@ pub fn w_mask_8bpc(
                         >> mask_sh),
                     64,
                 );
-                dst[doff + x] = iclip(
+                dst[doff + x] = bd.pixel_clip(
                     (tmp1[t1off + x] as i32 * n + tmp2[t2off + x] as i32 * (64 - n) + rnd) >> sh,
-                    0,
-                    255,
-                ) as u8;
+                );
 
                 if row & 1 != 0 && ss_ver {
                     mask[moff + (x >> 1)] =
@@ -477,6 +657,7 @@ fn bilin_rnd(a: i32, b: i32, mxy: i32, sh: i32) -> i32 {
     (bilin(a, b, mxy) + ((1 << sh) >> 1)) >> sh
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn put_bilin_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
@@ -487,31 +668,49 @@ pub fn put_bilin_8bpc(
     mx: i32,
     my: i32,
 ) {
+    put_bilin(BitDepth8, dst, dst_stride, src, src_stride, w, h, mx, my);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn put_bilin<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    src: &[BD::Pixel],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+) {
+    let ib = intermediate_bits(bd);
+    let intermediate_rnd = (1 << ib) >> 1;
     if mx != 0 {
         if my != 0 {
             let mut mid = vec![0i16; 64 * (h + 1)];
             for y in 0..h + 1 {
                 for x in 0..w {
                     let si = y * src_stride + x;
-                    mid[y * 64 + x] = bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0) as i16;
+                    let a: i32 = src[si].into();
+                    let b: i32 = src[si + 1].into();
+                    mid[y * 64 + x] = bilin_rnd(a, b, mx, 4 - ib) as i16;
                 }
             }
             for y in 0..h {
                 for x in 0..w {
                     let mi = y * 64 + x;
-                    dst[y * dst_stride + x] = iclip(
-                        bilin_rnd(mid[mi] as i32, mid[mi + 64] as i32, my, 8),
-                        0,
-                        255,
-                    ) as u8;
+                    dst[y * dst_stride + x] =
+                        bd.pixel_clip(bilin_rnd(mid[mi] as i32, mid[mi + 64] as i32, my, 4 + ib));
                 }
             }
         } else {
             for y in 0..h {
                 for x in 0..w {
                     let si = y * src_stride + x;
-                    let px = bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0);
-                    dst[y * dst_stride + x] = iclip((px + 8) >> 4, 0, 255) as u8;
+                    let a: i32 = src[si].into();
+                    let b: i32 = src[si + 1].into();
+                    let px = bilin_rnd(a, b, mx, 4 - ib);
+                    dst[y * dst_stride + x] = bd.pixel_clip((px + intermediate_rnd) >> ib);
                 }
             }
         }
@@ -519,18 +718,17 @@ pub fn put_bilin_8bpc(
         for y in 0..h {
             for x in 0..w {
                 let si = y * src_stride + x;
-                dst[y * dst_stride + x] = iclip(
-                    bilin_rnd(src[si] as i32, src[si + src_stride] as i32, my, 4),
-                    0,
-                    255,
-                ) as u8;
+                let a: i32 = src[si].into();
+                let b: i32 = src[si + src_stride].into();
+                dst[y * dst_stride + x] = bd.pixel_clip(bilin_rnd(a, b, my, 4));
             }
         }
     } else {
-        put_8bpc(dst, dst_stride, src, src_stride, w, h);
+        put(dst, dst_stride, src, src_stride, w, h);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prep_bilin_8bpc(
     tmp: &mut [i16],
     tmp_stride: usize,
@@ -541,28 +739,48 @@ pub fn prep_bilin_8bpc(
     mx: i32,
     my: i32,
 ) {
+    prep_bilin(BitDepth8, tmp, tmp_stride, src, src_stride, w, h, mx, my);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prep_bilin<BD: BitDepth>(
+    bd: BD,
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[BD::Pixel],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+) {
+    let ib = intermediate_bits(bd);
+    let bias = prep_bias(bd) as i16;
     if mx != 0 {
         if my != 0 {
             let mut mid = vec![0i16; 64 * (h + 1)];
             for y in 0..h + 1 {
                 for x in 0..w {
                     let si = y * src_stride + x;
-                    mid[y * 64 + x] = bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0) as i16;
+                    let a: i32 = src[si].into();
+                    let b: i32 = src[si + 1].into();
+                    mid[y * 64 + x] = bilin_rnd(a, b, mx, 4 - ib) as i16;
                 }
             }
             for y in 0..h {
                 for x in 0..w {
                     let mi = y * 64 + x;
                     tmp[y * tmp_stride + x] =
-                        bilin_rnd(mid[mi] as i32, mid[mi + 64] as i32, my, 4) as i16;
+                        bilin_rnd(mid[mi] as i32, mid[mi + 64] as i32, my, 4) as i16 - bias;
                 }
             }
         } else {
             for y in 0..h {
                 for x in 0..w {
                     let si = y * src_stride + x;
-                    tmp[y * tmp_stride + x] =
-                        bilin_rnd(src[si] as i32, src[si + 1] as i32, mx, 0) as i16;
+                    let a: i32 = src[si].into();
+                    let b: i32 = src[si + 1].into();
+                    tmp[y * tmp_stride + x] = bilin_rnd(a, b, mx, 4 - ib) as i16 - bias;
                 }
             }
         }
@@ -570,20 +788,27 @@ pub fn prep_bilin_8bpc(
         for y in 0..h {
             for x in 0..w {
                 let si = y * src_stride + x;
-                tmp[y * tmp_stride + x] =
-                    bilin_rnd(src[si] as i32, src[si + src_stride] as i32, my, 0) as i16;
+                let a: i32 = src[si].into();
+                let b: i32 = src[si + src_stride].into();
+                tmp[y * tmp_stride + x] = bilin_rnd(a, b, my, 4 - ib) as i16 - bias;
             }
         }
     } else {
-        prep_8bpc(tmp, tmp_stride, src, src_stride, w, h);
+        prep(bd, tmp, tmp_stride, src, src_stride, w, h);
     }
 }
 
 pub fn sad8x8_8bpc(p0: &[u8], p0_stride: usize, p1: &[u8], p1_stride: usize) -> u32 {
+    sad8x8(p0, p0_stride, p1, p1_stride)
+}
+
+pub fn sad8x8<P: Pixel>(p0: &[P], p0_stride: usize, p1: &[P], p1_stride: usize) -> u32 {
     let mut sad = 0u32;
     for y in 0..8 {
         for x in 0..8 {
-            sad += (p0[y * p0_stride + x] as i32 - p1[y * p1_stride + x] as i32).unsigned_abs();
+            let a: i32 = p0[y * p0_stride + x].into();
+            let b: i32 = p1[y * p1_stride + x].into();
+            sad += (a - b).unsigned_abs();
         }
     }
     sad
@@ -598,6 +823,19 @@ pub fn sad_refine_mv_8bpc(
     h: usize,
     is_implicit: bool,
 ) -> (i32, i32) {
+    sad_refine_mv(p0, p0_stride, p1, p1_stride, w, h, is_implicit)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sad_refine_mv<P: Pixel>(
+    p0: &[P],
+    p0_stride: usize,
+    p1: &[P],
+    p1_stride: usize,
+    w: usize,
+    h: usize,
+    is_implicit: bool,
+) -> (i32, i32) {
     let sadw = w + 4;
     let sadh = h + 4;
     let sad_thr = (sadw * sadh * 2) as i32;
@@ -606,7 +844,7 @@ pub fn sad_refine_mv_8bpc(
     let mut best_dy = 0i32;
 
     if is_implicit {
-        best_sad = sad_nxn_8bpc(
+        best_sad = sad_nxn(
             &p0[2 * p0_stride + 2..],
             p0_stride,
             &p1[2 * p1_stride + 2..],
@@ -625,7 +863,7 @@ pub fn sad_refine_mv_8bpc(
             if x_off == 0 && y_off == 0 {
                 continue;
             }
-            let sad = sad_nxn_8bpc(
+            let sad = sad_nxn(
                 &p0[((2 + y_off) as usize) * p0_stride + (2 + x_off) as usize..],
                 p0_stride,
                 &p1[((2 - y_off) as usize) * p1_stride + (2 - x_off) as usize..],
@@ -653,6 +891,7 @@ pub struct OpflRegressionData {
     pub svw: i32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn opfl_derive_mv_8bpc(
     out: &mut [OpflRegressionData],
     p0: &[u8],
@@ -664,15 +903,43 @@ pub fn opfl_derive_mv_8bpc(
     bs: usize,
     d: [i8; 2],
 ) {
+    opfl_derive_mv(BitDepth8, out, p0, p0_stride, p1, p1_stride, w, h, bs, d);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn opfl_derive_mv<BD: BitDepth>(
+    bd: BD,
+    out: &mut [OpflRegressionData],
+    p0: &[BD::Pixel],
+    p0_stride: usize,
+    p1: &[BD::Pixel],
+    p1_stride: usize,
+    w: usize,
+    h: usize,
+    bs: usize,
+    d: [i8; 2],
+) {
     let mut tmp0 = [0i16; 64 * 16];
     let mut tmp1 = [0i16; 64 * 16];
 
+    // mc_tmpl.c opfl_derive_mv_c: HBD scales the difference/weighted sum down by
+    // (bd - 8) with round-to-nearest-away-from-zero; 8bpc leaves them as-is.
+    let bd_min8 = bd.bitdepth_min_8();
+    let rnd = (1 << bd_min8) >> 1;
+
     for y in 0..h {
         for x in 0..w {
-            let p0p = p0[y * p0_stride + x] as i32;
-            let p1p = p1[y * p1_stride + x] as i32;
-            tmp0[y * 64 + x] = (d[0] as i32 * p0p + d[1] as i32 * p1p) as i16;
-            tmp1[y * 64 + x] = (p0p - p1p) as i16;
+            let p0p: i32 = p0[y * p0_stride + x].into();
+            let p1p: i32 = p1[y * p1_stride + x].into();
+            let v = d[0] as i32 * p0p + d[1] as i32 * p1p;
+            if BD::BPC == 8 {
+                tmp0[y * 64 + x] = v as i16;
+                tmp1[y * 64 + x] = (p0p - p1p) as i16;
+            } else {
+                tmp0[y * 64 + x] = ((v + rnd - (v < 0) as i32) >> bd_min8) as i16;
+                tmp1[y * 64 + x] =
+                    ((p0p - p1p + rnd - (p1p > p0p) as i32) >> bd_min8) as i16;
+            }
         }
     }
 
@@ -756,19 +1023,21 @@ fn filter_warp_rnd(src: &[i16], x: usize, f: &[i8; 8], stride: usize, sh: i32) -
     (v >> sh) as i16
 }
 
-fn filter_warp_rnd_px(src: &[u8], x: usize, f: &[i8; 8], stride: usize, sh: i32) -> i16 {
-    let v = f[0] as i32 * src[x.wrapping_sub(3 * stride)] as i32
-        + f[1] as i32 * src[x.wrapping_sub(2 * stride)] as i32
-        + f[2] as i32 * src[x.wrapping_sub(stride)] as i32
-        + f[3] as i32 * src[x] as i32
-        + f[4] as i32 * src[x + stride] as i32
-        + f[5] as i32 * src[x + 2 * stride] as i32
-        + f[6] as i32 * src[x + 3 * stride] as i32
-        + f[7] as i32 * src[x + 4 * stride] as i32
+fn filter_warp_rnd_px<P: Pixel>(src: &[P], x: usize, f: &[i8; 8], stride: usize, sh: i32) -> i16 {
+    let s = |i: usize| -> i32 { src[i].into() };
+    let v = f[0] as i32 * s(x.wrapping_sub(3 * stride))
+        + f[1] as i32 * s(x.wrapping_sub(2 * stride))
+        + f[2] as i32 * s(x.wrapping_sub(stride))
+        + f[3] as i32 * s(x)
+        + f[4] as i32 * s(x + stride)
+        + f[5] as i32 * s(x + 2 * stride)
+        + f[6] as i32 * s(x + 3 * stride)
+        + f[7] as i32 * s(x + 4 * stride)
         + ((1 << sh) >> 1);
     (v >> sh) as i16
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn warp_affine_8x8_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
@@ -776,9 +1045,27 @@ pub fn warp_affine_8x8_8bpc(
     src_stride: usize,
     src_off: usize,
     abcd: &[i16; 4],
+    mx: i32,
+    my: i32,
+) {
+    warp_affine_8x8(
+        BitDepth8, dst, dst_stride, src, src_stride, src_off, abcd, mx, my,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn warp_affine_8x8<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    src: &[BD::Pixel],
+    src_stride: usize,
+    src_off: usize,
+    abcd: &[i16; 4],
     mut mx: i32,
     mut my: i32,
 ) {
+    let ib = intermediate_bits(bd);
     let mut mid = [0i16; 15 * 8];
 
     let mut soff = src_off.wrapping_sub(3 * src_stride);
@@ -787,7 +1074,7 @@ pub fn warp_affine_8x8_8bpc(
         for x in 0..8 {
             let fi = (192 + ((tmx + 512) >> 10)) as usize;
             let f = &MC_WARP_FILTER[fi];
-            mid[y * 8 + x] = filter_warp_rnd_px(src, soff + x, f, 1, 3);
+            mid[y * 8 + x] = filter_warp_rnd_px(src, soff + x, f, 1, 7 - ib);
             tmx += abcd[0] as i32;
         }
         soff += src_stride;
@@ -800,14 +1087,15 @@ pub fn warp_affine_8x8_8bpc(
         for x in 0..8 {
             let fi = (192 + ((tmy + 512) >> 10)) as usize;
             let f = &MC_WARP_FILTER[fi];
-            let v = filter_warp_rnd(&mid, mid_base + x, f, 8, 11);
-            dst[y * dst_stride + x] = iclip(v as i32, 0, 255) as u8;
+            let v = filter_warp_rnd(&mid, mid_base + x, f, 8, 7 + ib);
+            dst[y * dst_stride + x] = bd.pixel_clip(v as i32);
             tmy += abcd[2] as i32;
         }
         my += abcd[3] as i32;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn warp_affine_8x8t_8bpc(
     tmp: &mut [i16],
     tmp_stride: usize,
@@ -815,9 +1103,28 @@ pub fn warp_affine_8x8t_8bpc(
     src_stride: usize,
     src_off: usize,
     abcd: &[i16; 4],
+    mx: i32,
+    my: i32,
+) {
+    warp_affine_8x8t(
+        BitDepth8, tmp, tmp_stride, src, src_stride, src_off, abcd, mx, my,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn warp_affine_8x8t<BD: BitDepth>(
+    bd: BD,
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[BD::Pixel],
+    src_stride: usize,
+    src_off: usize,
+    abcd: &[i16; 4],
     mut mx: i32,
     mut my: i32,
 ) {
+    let ib = intermediate_bits(bd);
+    let bias = prep_bias(bd) as i16;
     let mut mid = [0i16; 15 * 8];
 
     let mut soff = src_off.wrapping_sub(3 * src_stride);
@@ -826,7 +1133,7 @@ pub fn warp_affine_8x8t_8bpc(
         for x in 0..8 {
             let fi = (192 + ((tmx + 512) >> 10)) as usize;
             let f = &MC_WARP_FILTER[fi];
-            mid[y * 8 + x] = filter_warp_rnd_px(src, soff + x, f, 1, 3);
+            mid[y * 8 + x] = filter_warp_rnd_px(src, soff + x, f, 1, 7 - ib);
             tmx += abcd[0] as i32;
         }
         soff += src_stride;
@@ -839,8 +1146,7 @@ pub fn warp_affine_8x8t_8bpc(
         for x in 0..8 {
             let fi = (192 + ((tmy + 512) >> 10)) as usize;
             let f = &MC_WARP_FILTER[fi];
-            tmp[y * tmp_stride + x] =
-                filter_warp_rnd(&mid, mid_base + x, f, 8, 7) - PREP_BIAS_8BPC as i16;
+            tmp[y * tmp_stride + x] = filter_warp_rnd(&mid, mid_base + x, f, 8, 7) - bias;
             tmy += abcd[2] as i32;
         }
         my += abcd[3] as i32;
@@ -855,10 +1161,32 @@ fn filter_8tap_ring(rows: &[[i16; 64]; 8], order: &[usize; 8], x: usize, f: &[i8
     sum
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn put_8tap_scaled_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
     src: &[u8],
+    src_off: usize,
+    src_stride: isize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+    dx: i32,
+    dy: i32,
+    filter_type: i32,
+) {
+    put_8tap_scaled(
+        BitDepth8, dst, dst_stride, src, src_off, src_stride, w, h, mx, my, dx, dy, filter_type,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn put_8tap_scaled<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    src: &[BD::Pixel],
     src_off: usize,
     src_stride: isize,
     w: usize,
@@ -869,7 +1197,7 @@ pub fn put_8tap_scaled_8bpc(
     dy: i32,
     filter_type: i32,
 ) {
-    let intermediate_bits: i32 = 4;
+    let intermediate_bits: i32 = intermediate_bits(bd);
     let intermediate_rnd: i32 = 1 << (intermediate_bits - 1);
     let mut mid = [[0i16; 64]; 8];
     let mut order = [0usize; 8];
@@ -900,9 +1228,9 @@ pub fn put_8tap_scaled_8bpc(
                 let fh = get_h_filter(imx >> 6, filter_type, w);
                 mid[row][x] = if let Some(ref f) = fh {
                     let c = src_p + ioff;
-                    (filter_8tap_u8(src, c, f, 1) >> (6 - intermediate_bits)) as i16
+                    (filter_8tap_px(src, c, f, 1) >> (6 - intermediate_bits)) as i16
                 } else {
-                    ((src[src_p + ioff] as i32) << intermediate_bits) as i16
+                    (Into::<i32>::into(src[src_p + ioff]) << intermediate_bits) as i16
                 };
                 imx += dx;
                 ioff += (imx >> 10) as usize;
@@ -916,17 +1244,9 @@ pub fn put_8tap_scaled_8bpc(
         for x in 0..w {
             dst[dst_p + x] = if let Some(ref f) = fv {
                 let sum = filter_8tap_ring(&mid, &order, x, f);
-                iclip(
-                    (sum + (1 << (5 + intermediate_bits))) >> (6 + intermediate_bits),
-                    0,
-                    255,
-                ) as u8
+                bd.pixel_clip((sum + (1 << (5 + intermediate_bits))) >> (6 + intermediate_bits))
             } else {
-                iclip(
-                    (mid[order[3]][x] as i32 + intermediate_rnd) >> intermediate_bits,
-                    0,
-                    255,
-                ) as u8
+                bd.pixel_clip((mid[order[3]][x] as i32 + intermediate_rnd) >> intermediate_bits)
             };
         }
 
@@ -935,10 +1255,32 @@ pub fn put_8tap_scaled_8bpc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prep_8tap_scaled_8bpc(
     tmp: &mut [i16],
     tmp_stride: usize,
     src: &[u8],
+    src_off: usize,
+    src_stride: isize,
+    w: usize,
+    h: usize,
+    mx: i32,
+    my: i32,
+    dx: i32,
+    dy: i32,
+    filter_type: i32,
+) {
+    prep_8tap_scaled(
+        BitDepth8, tmp, tmp_stride, src, src_off, src_stride, w, h, mx, my, dx, dy, filter_type,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prep_8tap_scaled<BD: BitDepth>(
+    bd: BD,
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[BD::Pixel],
     src_off: usize,
     src_stride: isize,
     w: usize,
@@ -949,7 +1291,8 @@ pub fn prep_8tap_scaled_8bpc(
     dy: i32,
     filter_type: i32,
 ) {
-    let intermediate_bits: i32 = 4;
+    let intermediate_bits: i32 = intermediate_bits(bd);
+    let bias = prep_bias(bd) as i16;
     let mut mid = [[0i16; 64]; 8];
     let mut order = [0usize; 8];
     for i in 0..8 {
@@ -979,9 +1322,9 @@ pub fn prep_8tap_scaled_8bpc(
                 let fh = get_h_filter(imx >> 6, filter_type, w);
                 mid[row][x] = if let Some(ref f) = fh {
                     let c = src_p + ioff;
-                    (filter_8tap_u8(src, c, f, 1) >> (6 - intermediate_bits)) as i16
+                    (filter_8tap_px(src, c, f, 1) >> (6 - intermediate_bits)) as i16
                 } else {
-                    ((src[src_p + ioff] as i32) << intermediate_bits) as i16
+                    (Into::<i32>::into(src[src_p + ioff]) << intermediate_bits) as i16
                 };
                 imx += dx;
                 ioff += (imx >> 10) as usize;
@@ -995,9 +1338,9 @@ pub fn prep_8tap_scaled_8bpc(
         for x in 0..w {
             tmp[tmp_p + x] = if let Some(ref f) = fv {
                 let sum = filter_8tap_ring(&mid, &order, x, f);
-                ((sum + (1 << 5)) >> 6) as i16
+                ((sum + (1 << 5)) >> 6) as i16 - bias
             } else {
-                mid[order[3]][x]
+                mid[order[3]][x] - bias
             };
         }
 
@@ -1006,6 +1349,7 @@ pub fn prep_8tap_scaled_8bpc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn put_bilin_scaled_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
@@ -1015,11 +1359,31 @@ pub fn put_bilin_scaled_8bpc(
     w: usize,
     h: usize,
     mx: i32,
+    my: i32,
+    dx: i32,
+    dy: i32,
+) {
+    put_bilin_scaled(
+        BitDepth8, dst, dst_stride, src, src_off, src_stride, w, h, mx, my, dx, dy,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn put_bilin_scaled<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    src: &[BD::Pixel],
+    src_off: usize,
+    src_stride: isize,
+    w: usize,
+    h: usize,
+    mx: i32,
     mut my: i32,
     dx: i32,
     dy: i32,
 ) {
-    let intermediate_bits: i32 = 4;
+    let intermediate_bits: i32 = intermediate_bits(bd);
     let mut mid = [[0i16; 64]; 2];
     let mut in_y: i32 = -2;
     let mut src_p = src_off;
@@ -1037,12 +1401,9 @@ pub fn put_bilin_scaled_8bpc(
             let ri = (in_y & 1) as usize;
             for x in 0..w {
                 let frac = imx >> 6;
-                mid[ri][x] = bilin_rnd(
-                    src[src_p + ioff] as i32,
-                    src[src_p + ioff + 1] as i32,
-                    frac,
-                    4 - intermediate_bits,
-                ) as i16;
+                let a: i32 = src[src_p + ioff].into();
+                let b: i32 = src[src_p + ioff + 1].into();
+                mid[ri][x] = bilin_rnd(a, b, frac, 4 - intermediate_bits) as i16;
                 imx += dx;
                 ioff += (imx >> 10) as usize;
                 imx &= 0x3ff;
@@ -1052,16 +1413,12 @@ pub fn put_bilin_scaled_8bpc(
         }
 
         for x in 0..w {
-            dst[dst_p + x] = iclip(
-                bilin_rnd(
-                    mid[mid1_idx][x] as i32,
-                    mid[mid2_idx][x] as i32,
-                    dmy >> 6,
-                    4 + intermediate_bits,
-                ),
-                0,
-                255,
-            ) as u8;
+            dst[dst_p + x] = bd.pixel_clip(bilin_rnd(
+                mid[mid1_idx][x] as i32,
+                mid[mid2_idx][x] as i32,
+                dmy >> 6,
+                4 + intermediate_bits,
+            ));
         }
 
         my += dy;
@@ -1069,6 +1426,7 @@ pub fn put_bilin_scaled_8bpc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prep_bilin_scaled_8bpc(
     tmp: &mut [i16],
     tmp_stride: usize,
@@ -1078,11 +1436,32 @@ pub fn prep_bilin_scaled_8bpc(
     w: usize,
     h: usize,
     mx: i32,
+    my: i32,
+    dx: i32,
+    dy: i32,
+) {
+    prep_bilin_scaled(
+        BitDepth8, tmp, tmp_stride, src, src_off, src_stride, w, h, mx, my, dx, dy,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prep_bilin_scaled<BD: BitDepth>(
+    bd: BD,
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[BD::Pixel],
+    src_off: usize,
+    src_stride: isize,
+    w: usize,
+    h: usize,
+    mx: i32,
     mut my: i32,
     dx: i32,
     dy: i32,
 ) {
-    let intermediate_bits: i32 = 4;
+    let intermediate_bits: i32 = intermediate_bits(bd);
+    let bias = prep_bias(bd) as i16;
     let mut mid = [[0i16; 64]; 2];
     let mut in_y: i32 = -2;
     let mut src_p = src_off;
@@ -1100,12 +1479,9 @@ pub fn prep_bilin_scaled_8bpc(
             let ri = (in_y & 1) as usize;
             for x in 0..w {
                 let frac = imx >> 6;
-                mid[ri][x] = bilin_rnd(
-                    src[src_p + ioff] as i32,
-                    src[src_p + ioff + 1] as i32,
-                    frac,
-                    4 - intermediate_bits,
-                ) as i16;
+                let a: i32 = src[src_p + ioff].into();
+                let b: i32 = src[src_p + ioff + 1].into();
+                mid[ri][x] = bilin_rnd(a, b, frac, 4 - intermediate_bits) as i16;
                 imx += dx;
                 ioff += (imx >> 10) as usize;
                 imx &= 0x3ff;
@@ -1115,12 +1491,9 @@ pub fn prep_bilin_scaled_8bpc(
         }
 
         for x in 0..w {
-            tmp[tmp_p + x] = bilin_rnd(
-                mid[mid1_idx][x] as i32,
-                mid[mid2_idx][x] as i32,
-                dmy >> 6,
-                4,
-            ) as i16;
+            tmp[tmp_p + x] =
+                bilin_rnd(mid[mid1_idx][x] as i32, mid[mid2_idx][x] as i32, dmy >> 6, 4) as i16
+                    - bias;
         }
 
         my += dy;
@@ -1749,5 +2122,46 @@ mod tests {
             assert_eq!(r.su2, 16);
             assert_eq!(r.suv, 0);
         }
+    }
+
+    use crate::pixel::BitDepth16;
+
+    #[test]
+    fn test_avg_hbd_10bit_midtone() {
+        // 10-bit avg of two prepped 600-valued samples must round-trip to 600
+        // (prep shifts by intermediate_bits=4 and subtracts PREP_BIAS=8192).
+        let bd = BitDepth16::new(10);
+        let src = vec![600u16; 16 * 16];
+        let mut t1 = vec![0i16; 8 * 8];
+        let mut t2 = vec![0i16; 8 * 8];
+        prep(bd, &mut t1, 8, &src, 16, 8, 8);
+        prep(bd, &mut t2, 8, &src, 16, 8, 8);
+        let mut dst = vec![0u16; 8 * 8];
+        avg(bd, &mut dst, 8, &t1, &t2, 8, 8);
+        assert!(dst.iter().all(|&v| v == 600), "got {}", dst[0]);
+    }
+
+    #[test]
+    fn test_put_8tap_hbd_clamps_to_10bit() {
+        // A saturated 10-bit source through the H+V subpel path stays <= 1023.
+        let bd = BitDepth16::new(10);
+        let stride = 32usize;
+        let src = vec![1023u16; stride * 32];
+        let mut dst = vec![0u16; 8 * 8];
+        let src_off = 8 * stride + 8;
+        put_8tap(bd, &mut dst, 8, &src, src_off, stride, 8, 8, 4, 4, 0);
+        assert!(dst.iter().all(|&v| v <= 1023));
+        assert!(dst.iter().any(|&v| v > 255));
+    }
+
+    #[test]
+    fn test_prep_8bpc_matches_generic() {
+        // The 8bpc prep wrapper must be byte-identical to prep::<BitDepth8>.
+        let src: Vec<u8> = (0..256).map(|i| (i & 0xff) as u8).collect();
+        let mut a = vec![0i16; 8 * 8];
+        let mut b = vec![0i16; 8 * 8];
+        prep_8bpc(&mut a, 8, &src, 16, 8, 8);
+        prep(crate::pixel::BitDepth8, &mut b, 8, &src, 16, 8, 8);
+        assert_eq!(a, b);
     }
 }
