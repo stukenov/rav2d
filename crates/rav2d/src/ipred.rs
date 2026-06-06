@@ -1849,8 +1849,11 @@ pub fn cfl_gen_y_420<P: Pixel>(
         dst_p += tw;
     }
 
-    // bl: bottom-left extension rows
-    let n_bl = refh - th;
+    // bl: bottom-left extension rows. For valid streams refh >= th; a malformed
+    // stream can derive an inconsistent CfL geometry where refh < th, so use a
+    // saturating subtraction (yielding no extension rows) instead of a usize
+    // underflow. No-op for valid input.
+    let n_bl = refh.saturating_sub(th);
     for _y in 0..n_bl {
         let top_sp_bl = sp - src_stride;
         for x in 0..n_left {

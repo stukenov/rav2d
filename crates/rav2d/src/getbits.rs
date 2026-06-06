@@ -131,7 +131,13 @@ impl<'a> GetBits<'a> {
     }
 
     pub fn get_uniform(&mut self, max: u32) -> u32 {
-        debug_assert!(max > 1);
+        // Valid streams always call this with max > 1. A malformed stream can
+        // derive max <= 1 (e.g. a corrupted subexp range); the only legal value
+        // in a range of size <= 1 is 0, so return it without consuming bits or
+        // hitting ulog2(0) UB. No-op for valid input.
+        if max <= 1 {
+            return 0;
+        }
         let l = ulog2(max) + 1;
         debug_assert!(l > 1);
         let m = (1u32 << l) - max;
