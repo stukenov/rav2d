@@ -2078,15 +2078,19 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
 /// invisible frames emitted in coding order) and asserts every plane of every
 /// frame is byte-identical — the 16bpc analogue of the 8bpc full-clip sweep.
 #[test]
-#[ignore = "HBD recon WIP: the entropy/header/refmvs path already decodes the \
-            10-bit streams with the right frame count and geometry, but the pixel \
-            recon path is still u8-hardcoded — ReconCtx.dst_* are &mut [u8] and \
-            y_stride_px holds the BYTE stride, so prediction/residual write 8-bit \
-            samples at byte offsets into the 16-bit planes (first diff at plane 0 \
-            sample 0: intra frames yield rav2d=0, inter frames pack two bytes e.g. \
-            0x6565=25957). Foundation (BitDepth trait) and itx (inv_txfm_add) are \
-            generic; remaining: make ipred/cfl/mc/deblock/cdef generic and thread \
-            BitDepth through recon_b_intra*/recon_b_inter*/ReconCtx in decode.rs."]
+#[ignore = "HBD recon: Stage B done — ReconCtx<BD> is generic and the frame \
+            driver dispatches u8/u16 with sample strides. The 10-bit INTRA vector \
+            (hbd-10bit-128x128-intra.obu) is fully bit-exact (2 frames). The 10-bit \
+            8f INTER vector is bit-exact through coding-index 3 (poc 0/7/3/1) but \
+            diverges from coding-index 4 (poc 2). First diff: plane 0 sample 2064 \
+            (row 16, col 16), a compound AVG, zero-MV block (ref0=0 ref1=1 mm=0); \
+            small magnitude (e.g. dav2d=200 rav2d=237). avg/w_avg/mask/w_mask, prep, \
+            put_8tap and warp_affine HBD math all verified == dav2d, so the root \
+            cause is a reference *picture* used for MC that differs even though the \
+            corresponding output frame is byte-exact — i.e. an inter-frame ref-buffer \
+            / coding-order issue, not a kernel. Un-ignore once that ref divergence is \
+            resolved (likely a non-shown ref frame or padding/extension in the \
+            reference plane fed to inter MC)."]
 fn bit_exact_hbd_sweep() {
     let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
     let mut all = Vec::new();
