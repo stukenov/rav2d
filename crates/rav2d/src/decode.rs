@@ -16259,7 +16259,11 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
     dir_ptr: &mut i32,
 ) -> Result<(), ()> {
     let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
-    assert!(bs != BlockSize::Invalid);
+    // bs is always valid for a well-formed partition tree; a malformed stream can
+    // leave both block sizes invalid, so abort gracefully rather than panic.
+    if bs == BlockSize::Invalid {
+        return Err(());
+    }
 
     if std::env::var("RAV2D_TRACE_SB").is_ok() {
         eprintln!(
@@ -16772,7 +16776,14 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
             }
         }
         BlockPartition::Split => {
-            assert!(have_v_split && have_h_split && cbs == lbs);
+            // For valid streams a square SPLIT is only decoded when both child
+            // splits are available and cbs == lbs (dav2d asserts the same). A
+            // malformed stream can desync the partition decode and reach here
+            // with the invariant broken; abort the tile gracefully instead of
+            // panicking. No effect on valid input.
+            if !(have_v_split && have_h_split && cbs == lbs) {
+                return Err(());
+            }
             let sbs = unsafe { BlockSize::from_raw(pcc.part[0][3]) };
             decode_sb(
                 fi,
