@@ -8,7 +8,7 @@ pub const PREP_BIAS_8BPC: i32 = 0;
 /// `get_intermediate_bits(bitdepth_max)` (mc_tmpl.c): 4 for 8bpc, `14 - bd` for
 /// HBD (10-bit -> 4, 12-bit -> 2).
 #[inline(always)]
-fn intermediate_bits<BD: BitDepth>(bd: BD) -> i32 {
+pub(crate) fn intermediate_bits<BD: BitDepth>(bd: BD) -> i32 {
     if BD::BPC == 8 {
         4
     } else {
