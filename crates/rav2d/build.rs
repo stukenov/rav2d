@@ -62,10 +62,14 @@
 //! has no NEON in dav2d, so LR is scalar by construction.
 //!
 //! The dav2d submodule is referenced read-only; nothing under `dav2d/src` or
-//! `dav2d/include` is modified.
+//! `dav2d/include` is modified. When the submodule is absent (e.g. a crate
+//! published to crates.io), the kernels and their headers/tables are assembled
+//! from verbatim copies vendored under `vendor/dav2d-asm/` instead — see
+//! `dav2d_root()` and `vendor/dav2d-asm/NOTICE.md`.
 //!
-//! On other architectures this is a no-op and the decoder uses the scalar Rust
-//! kernels in `src/mc.rs` / `src/itx.rs` / `src/ipred.rs`.
+//! On other architectures, and if neither the submodule nor the vendored asm is
+//! present, this is a no-op and the decoder uses the scalar Rust kernels in
+//! `src/mc.rs` / `src/itx.rs` / `src/ipred.rs`.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -80,10 +84,28 @@ fn main() {
     }
 }
 
-fn build_neon_mc() {
+/// Locate the dav2d asm sources used to assemble the NEON kernels.
+///
+/// In a workspace checkout the `dav2d` git submodule lives at `../../dav2d`
+/// (next to the workspace root) and carries a meson `build/` directory with the
+/// generated `config.h`. When the crate is published to crates.io the submodule
+/// is gone, so we fall back to the verbatim copies vendored under
+/// `crates/rav2d/vendor/dav2d-asm/` (see that directory's NOTICE.md). Whichever
+/// root we pick must contain both the kernel `.S` and a `build/config.h`.
+fn dav2d_root() -> PathBuf {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let dav2d = manifest.join("../../dav2d");
-    let dav2d = dav2d.canonicalize().unwrap_or(dav2d).to_path_buf();
+
+    let submodule = manifest.join("../../dav2d");
+    if submodule.join("src/arm/64/mc.S").exists() && submodule.join("build/config.h").exists() {
+        return submodule.canonicalize().unwrap_or(submodule);
+    }
+
+    let vendored = manifest.join("vendor/dav2d-asm");
+    vendored.canonicalize().unwrap_or(vendored)
+}
+
+fn build_neon_mc() {
+    let dav2d = dav2d_root();
     let src = dav2d.join("src");
     let include = dav2d.join("include");
     let build = dav2d.join("build");
@@ -171,9 +193,7 @@ fn dav2d_includes(
 /// read-only tables they reference (`dav2d_sm_weights`, `dav2d_filter_intra_taps`),
 /// copied verbatim from `dav2d/src/tables.c` into a generated C TU.
 fn build_neon_ipred() {
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let dav2d = manifest.join("../../dav2d");
-    let dav2d = dav2d.canonicalize().unwrap_or(dav2d).to_path_buf();
+    let dav2d = dav2d_root();
     let src = dav2d.join("src");
     let include = dav2d.join("include");
     let build = dav2d.join("build");
