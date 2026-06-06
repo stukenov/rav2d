@@ -99,7 +99,10 @@ fn parse_tile_info(
         let mut extra = imax(0, fsbw - (tile_w << thdr.log2_cols));
         thdr.cols = 0;
         let mut sbx = 0;
-        while sbx < fsbw {
+        // log2_cols is capped at max_log2_cols so this is already bounded for
+        // valid streams; the explicit MAX_TILE_COLS guard protects against any
+        // residual overflow of col_start_sb on malformed input.
+        while sbx < fsbw && (thdr.cols as usize) < crate::headers::MAX_TILE_COLS {
             thdr.col_start_sb[thdr.cols as usize] = (sbx * sbmul) as u16;
             let add = tile_w + if extra > 0 { 1 } else { 0 };
             sbx += add;
@@ -116,7 +119,7 @@ fn parse_tile_info(
         let mut extra = imax(0, fsbh - (tile_h << thdr.log2_rows));
         thdr.rows = 0;
         let mut sby = 0;
-        while sby < fsbh {
+        while sby < fsbh && (thdr.rows as usize) < crate::headers::MAX_TILE_ROWS {
             thdr.row_start_sb[thdr.rows as usize] = (sby * sbmul) as u16;
             let add = tile_h + if extra > 0 { 1 } else { 0 };
             sby += add;
@@ -127,7 +130,9 @@ fn parse_tile_info(
         let mut widest_tile = 0;
         thdr.cols = 0;
         let mut sbx = 0;
-        while sbx < sbw {
+        // Bound the tile count to MAX_TILE_COLS (dav2d obu.c:141); without this a
+        // malformed frame size lets the loop run past the col_start_sb array.
+        while sbx < sbw && (thdr.cols as usize) < crate::headers::MAX_TILE_COLS {
             thdr.col_start_sb[thdr.cols as usize] = sbx as u16;
             let max_width = imin(sbw - sbx, max_tile_width_sb);
             let w_tile = if max_width > 1 {
@@ -150,7 +155,8 @@ fn parse_tile_info(
 
         thdr.rows = 0;
         let mut sby = 0;
-        while sby < sbh {
+        // Bound the tile count to MAX_TILE_ROWS (dav2d obu.c:153).
+        while sby < sbh && (thdr.rows as usize) < crate::headers::MAX_TILE_ROWS {
             thdr.row_start_sb[thdr.rows as usize] = sby as u16;
             let max_height = imin(sbh - sby, max_tile_height_sb);
             let h_tile = if max_height > 1 {
