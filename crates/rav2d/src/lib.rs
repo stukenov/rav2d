@@ -62,6 +62,7 @@ pub(crate) mod itx_1d;
 pub(crate) mod lf_mask;
 pub(crate) mod looprestoration;
 pub(crate) mod mc;
+pub(crate) mod mc_neon;
 pub(crate) mod mem;
 pub(crate) mod msac;
 pub(crate) mod obu;

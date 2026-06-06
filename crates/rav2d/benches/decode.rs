@@ -13,10 +13,12 @@
 //!     per-iteration time and `Throughput::Elements` (samples/s) so the HTML
 //!     report can be diffed function-by-function.
 //!
-//! NOTE on fairness: dav2d is C with hand-written SIMD (NEON/AVX2). rav2d does
-//! not yet wire its assembly DSP dispatch, so it runs scalar Rust today. The
-//! ratio below therefore measures "scalar Rust vs C+SIMD"; it will tighten once
-//! the assembly dispatch lands. Both run single-threaded, film grain off.
+//! NOTE on fairness: dav2d is C with hand-written SIMD (NEON/AVX2). On aarch64
+//! rav2d now wires the motion-compensation DSP family to dav2d's NEON kernels
+//! (see `src/mc_neon.rs`); other DSP families (itx, intra, loop filters, …) are
+//! still scalar Rust, so the ratio below mixes NEON MC with scalar everything
+//! else and tightens further as more families are wired. Set `RAV2D_NEON_OFF=all`
+//! to force the all-scalar path. Both run single-threaded, film grain off.
 
 use std::path::PathBuf;
 use std::sync::Once;
@@ -247,7 +249,7 @@ fn print_comparison_table() {
         eprintln!(
             "(frames shown as rav2d/dav2d when they differ — rav2d still gaining inter coverage)"
         );
-        eprintln!("(dav2d uses SIMD; rav2d is scalar until the asm dispatch lands)");
+        eprintln!("(dav2d uses SIMD; rav2d uses NEON for MC on aarch64, scalar elsewhere)");
         eprintln!();
     });
 }

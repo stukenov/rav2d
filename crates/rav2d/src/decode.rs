@@ -8369,9 +8369,18 @@ fn inter_mc_plane_8bpc(
     };
 
     if is_bilin {
-        crate::mc::put_bilin_8bpc(dst, dst_stride, &src[src_off..], src_stride, w, h, mxf, myf);
+        crate::mc_neon::put_bilin_8bpc(
+            dst,
+            dst_stride,
+            &src[src_off..],
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+        );
     } else {
-        crate::mc::put_8tap_8bpc(
+        crate::mc_neon::put_8tap_8bpc(
             dst,
             dst_stride,
             src,
@@ -8477,9 +8486,18 @@ fn inter_mc_plane_prep_8bpc(
     };
 
     if is_bilin {
-        crate::mc::prep_bilin_8bpc(tmp, tmp_stride, &src[src_off..], src_stride, w, h, mxf, myf);
+        crate::mc_neon::prep_bilin_8bpc(
+            tmp,
+            tmp_stride,
+            &src[src_off..],
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+        );
     } else {
-        crate::mc::prep_8tap_8bpc(
+        crate::mc_neon::prep_8tap_8bpc(
             tmp,
             tmp_stride,
             src,
@@ -8592,7 +8610,7 @@ fn warp_affine_plane_8bpc(
                 eprintln!("{s}");
             }
             let dst_sub = (y as usize) * dst_stride + x as usize;
-            crate::mc::warp_affine_8x8_8bpc(
+            crate::mc_neon::warp_affine_8x8_8bpc(
                 &mut dst[dst_sub..],
                 dst_stride,
                 src,
@@ -8728,7 +8746,7 @@ fn ext_warp_plane_8bpc(
                     };
 
                     let dst_sub = (yy as usize) * dst_stride + xx as usize;
-                    crate::mc::put_8tap_8bpc(
+                    crate::mc_neon::put_8tap_8bpc(
                         &mut dst[dst_sub..],
                         dst_stride,
                         src,
@@ -8840,7 +8858,7 @@ fn warp_affine_plane_prep_8bpc(
                 };
 
             let dst_sub = (y as usize) * tmp_stride + x as usize;
-            crate::mc::warp_affine_8x8t_8bpc(
+            crate::mc_neon::warp_affine_8x8t_8bpc(
                 &mut tmp[dst_sub..],
                 tmp_stride,
                 src,
@@ -8960,7 +8978,7 @@ fn ext_warp_plane_prep_8bpc(
                     };
 
                     let dst_sub = (yy as usize) * tmp_stride + xx as usize;
-                    crate::mc::prep_8tap_8bpc(
+                    crate::mc_neon::prep_8tap_8bpc(
                         &mut tmp[dst_sub..],
                         tmp_stride,
                         src,
@@ -9795,7 +9813,7 @@ fn iiblend_plane_8bpc(
         1 => recon.dst_u,
         _ => recon.dst_v,
     };
-    crate::mc::blend_8bpc(&mut dst_plane[dst_off..], stride, &tmp, w, h, &mask);
+    crate::mc_neon::blend_8bpc(&mut dst_plane[dst_off..], stride, &tmp, w, h, &mask);
 }
 
 /// Splat a resolved COMPOUND block's MVs into the spatial refmvs grid + the
@@ -10203,7 +10221,8 @@ fn recon_b_inter_compound(
         let y_stride = recon.frame.y_stride_px;
         let dst_off = 4 * (by as usize * y_stride + bx as usize);
 
-        let mut tmp = [vec![0i16; w * h], vec![0i16; w * h]];
+        let _len = crate::mc_neon::compound_tmp_len(w, h);
+        let mut tmp = [vec![0i16; _len], vec![0i16; _len]];
         let mut opfl_bacp = false;
         if is_opfl {
             let w4 = imin(bw4, fi.bw - bx);
@@ -10275,7 +10294,15 @@ fn recon_b_inter_compound(
                 } else {
                     (&tmp1[0], &tmp0[0])
                 };
-                crate::mc::mask_8bpc(&mut recon.dst_y[dst_off..], y_stride, a0, a1, w, h, mask);
+                crate::mc_neon::mask_8bpc(
+                    &mut recon.dst_y[dst_off..],
+                    y_stride,
+                    a0,
+                    a1,
+                    w,
+                    h,
+                    mask,
+                );
             }
             3 => {
                 // SEG: luma w_mask derives subsampled seg mask for chroma reuse.
@@ -10285,7 +10312,7 @@ fn recon_b_inter_compound(
                 } else {
                     (&tmp1[0], &tmp0[0])
                 };
-                crate::mc::w_mask_8bpc(
+                crate::mc_neon::w_mask_8bpc(
                     &mut recon.dst_y[dst_off..],
                     y_stride,
                     a0,
@@ -10328,7 +10355,7 @@ fn recon_b_inter_compound(
                         ) as i32;
                     }
                     if bacp != 0 {
-                        crate::mc::mask_8bpc(
+                        crate::mc_neon::mask_8bpc(
                             &mut recon.dst_y[dst_off..],
                             y_stride,
                             &tmp0[0],
@@ -10338,7 +10365,7 @@ fn recon_b_inter_compound(
                             &seg_mask,
                         );
                     } else {
-                        crate::mc::avg_8bpc(
+                        crate::mc_neon::avg_8bpc(
                             &mut recon.dst_y[dst_off..],
                             y_stride,
                             &tmp0[0],
@@ -10348,7 +10375,7 @@ fn recon_b_inter_compound(
                         );
                     }
                 } else {
-                    crate::mc::w_avg_8bpc(
+                    crate::mc_neon::w_avg_8bpc(
                         &mut recon.dst_y[dst_off..],
                         y_stride,
                         &tmp0[0],
@@ -10492,7 +10519,8 @@ fn recon_b_inter_compound(
 
         for pl in (1..3usize).filter(|_| !sub8x8 && do_chroma_mc) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
-            let mut tmp = [vec![0i16; cw * ch], vec![0i16; cw * ch]];
+            let _len = crate::mc_neon::compound_tmp_len(cw, ch);
+            let mut tmp = [vec![0i16; _len], vec![0i16; _len]];
             let mut opfl_bacp_chroma = false;
             if is_opfl {
                 opfl_bacp_chroma = rmv_uvpred(
@@ -10571,7 +10599,7 @@ fn recon_b_inter_compound(
                     } else {
                         (&tmp1[0], &tmp0[0])
                     };
-                    crate::mc::mask_8bpc(dst, uv_stride, a0, a1, cw, ch, mask);
+                    crate::mc_neon::mask_8bpc(dst, uv_stride, a0, a1, cw, ch, mask);
                 }
                 3 => {
                     let (a0, a1) = if mask_sign == 0 {
@@ -10579,7 +10607,7 @@ fn recon_b_inter_compound(
                     } else {
                         (&tmp1[0], &tmp0[0])
                     };
-                    crate::mc::mask_8bpc(dst, uv_stride, a0, a1, cw, ch, &seg_mask);
+                    crate::mc_neon::mask_8bpc(dst, uv_stride, a0, a1, cw, ch, &seg_mask);
                 }
                 _ => {
                     if cwp_idx == 8 {
@@ -10591,11 +10619,13 @@ fn recon_b_inter_compound(
                         // NOT inherited from the luma plane.
                         if is_opfl {
                             if chroma_bacp {
-                                crate::mc::mask_8bpc(
+                                crate::mc_neon::mask_8bpc(
                                     dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask,
                                 );
                             } else {
-                                crate::mc::avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
+                                crate::mc_neon::avg_8bpc(
+                                    dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch,
+                                );
                             }
                         } else {
                             if pl == 1 {
@@ -10620,15 +10650,19 @@ fn recon_b_inter_compound(
                                 };
                             }
                             if chroma_bacp {
-                                crate::mc::mask_8bpc(
+                                crate::mc_neon::mask_8bpc(
                                     dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask,
                                 );
                             } else {
-                                crate::mc::avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
+                                crate::mc_neon::avg_8bpc(
+                                    dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch,
+                                );
                             }
                         }
                     } else {
-                        crate::mc::w_avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, cwp_idx);
+                        crate::mc_neon::w_avg_8bpc(
+                            dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, cwp_idx,
+                        );
                     }
                 }
             }
@@ -10738,7 +10772,7 @@ fn prep_opfl_prefetch_rect_8bpc(
         let off = dy as usize * ref_stride + dx as usize;
         (ref_data, off, ref_stride)
     };
-    crate::mc::put_bilin_8bpc(
+    crate::mc_neon::put_bilin_8bpc(
         p,
         p_stride,
         &src[src_off..],
@@ -11468,7 +11502,8 @@ fn recon_b_inter_tip(
         let y_stride = recon.frame.y_stride_px;
         let dst_off = 4 * (by as usize * y_stride + bx as usize);
 
-        let mut tmp = [vec![0i16; yw * yh], vec![0i16; yw * yh]];
+        let _len = crate::mc_neon::compound_tmp_len(yw, yh);
+        let mut tmp = [vec![0i16; _len], vec![0i16; _len]];
         if bacp {
             for m in seg_mask.iter_mut() {
                 *m = 0x20;
@@ -11753,7 +11788,7 @@ fn recon_b_inter_tip(
         let have_bacp = bacp && luma_bacp;
         let (tmp0, tmp1) = tmp.split_at(1);
         if have_bacp {
-            crate::mc::mask_8bpc(
+            crate::mc_neon::mask_8bpc(
                 &mut recon.dst_y[dst_off..],
                 y_stride,
                 &tmp0[0],
@@ -11763,7 +11798,7 @@ fn recon_b_inter_tip(
                 &seg_mask,
             );
         } else {
-            crate::mc::avg_8bpc(
+            crate::mc_neon::avg_8bpc(
                 &mut recon.dst_y[dst_off..],
                 y_stride,
                 &tmp0[0],
@@ -11840,7 +11875,8 @@ fn recon_b_inter_tip(
         let mut chroma_bacp = false;
         for plane in (0..2usize).filter(|_| do_chroma_mc) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
-            let mut tmp = [vec![0i16; cw * ch], vec![0i16; cw * ch]];
+            let _len = crate::mc_neon::compound_tmp_len(cw, ch);
+            let mut tmp = [vec![0i16; _len], vec![0i16; _len]];
             let pl_bacp = rmv_uvpred(
                 recon,
                 b,
@@ -11870,9 +11906,9 @@ fn recon_b_inter_tip(
             };
             let (tmp0, tmp1) = tmp.split_at(1);
             if use_bacp {
-                crate::mc::mask_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask);
+                crate::mc_neon::mask_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask);
             } else {
-                crate::mc::avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
+                crate::mc_neon::avg_8bpc(dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
             }
         }
 
@@ -12127,7 +12163,7 @@ fn prep_opfl_prefetch_8bpc(
         (ref_data, off, ref_stride)
     };
     // 3-bit subpel → kernel expects 4-bit (mx << 1).
-    crate::mc::put_bilin_8bpc(
+    crate::mc_neon::put_bilin_8bpc(
         p,
         p_stride,
         &src[src_off..],
@@ -12356,9 +12392,18 @@ fn mc_prep_bounds_8bpc(
     };
 
     if is_bilin {
-        crate::mc::prep_bilin_8bpc(tmp, tmp_stride, &src[src_off..], src_stride, w, h, mxf, myf);
+        crate::mc_neon::prep_bilin_8bpc(
+            tmp,
+            tmp_stride,
+            &src[src_off..],
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+        );
     } else {
-        crate::mc::prep_8tap_8bpc(
+        crate::mc_neon::prep_8tap_8bpc(
             tmp,
             tmp_stride,
             src,
@@ -12451,7 +12496,7 @@ fn mc_opfl_8bpc(
     };
 
     if is_bilin {
-        crate::mc::prep_bilin_8bpc(
+        crate::mc_neon::prep_bilin_8bpc(
             &mut dst16[dst_off..],
             dst_stride,
             &src[src_off..],
@@ -12462,7 +12507,7 @@ fn mc_opfl_8bpc(
             my,
         );
     } else {
-        crate::mc::prep_8tap_8bpc(
+        crate::mc_neon::prep_8tap_8bpc(
             &mut dst16[dst_off..],
             dst_stride,
             src,
