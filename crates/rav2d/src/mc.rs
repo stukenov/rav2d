@@ -102,7 +102,7 @@ pub fn avg<BD: BitDepth>(
         for x in 0..w {
             let ti = y * w + x;
             let di = row + x;
-            if di >= dst.len() {
+            if di >= dst.len() || ti >= tmp1.len() || ti >= tmp2.len() {
                 break;
             }
             dst[di] = bd.pixel_clip((tmp1[ti] as i32 + tmp2[ti] as i32 + rnd) >> sh);
@@ -144,7 +144,7 @@ pub fn w_avg<BD: BitDepth>(
         for x in 0..w {
             let ti = y * w + x;
             let di = row + x;
-            if di >= dst.len() {
+            if di >= dst.len() || ti >= tmp1.len() || ti >= tmp2.len() {
                 break;
             }
             dst[di] = bd.pixel_clip(
@@ -188,7 +188,7 @@ pub fn mask_fn<BD: BitDepth>(
         for x in 0..w {
             let ti = y * w + x;
             let di = row + x;
-            if di >= dst.len() {
+            if di >= dst.len() || ti >= mask.len() || ti >= tmp1.len() || ti >= tmp2.len() {
                 break;
             }
             let m = mask[ti] as i32;
@@ -217,10 +217,10 @@ pub fn blend<P: Pixel>(
         }
         for x in 0..w {
             let di = row + x;
-            if di >= dst.len() {
+            let ti = y * w + x;
+            if di >= dst.len() || ti >= mask.len() || ti >= tmp.len() {
                 break;
             }
-            let ti = y * w + x;
             let m = mask[ti] as i32;
             let d: i32 = dst[di].into();
             let t: i32 = tmp[ti].into();
