@@ -15049,12 +15049,12 @@ fn dispatch_ipred(
         _ if m == DC_128_PRED => ipred_dc_128(d, stride, w, h),
         _ if m == TOP_DC_PRED => ipred_dc_top(d, stride, edge, edge_o, w, h, angle),
         _ if m == LEFT_DC_PRED => ipred_dc_left(d, stride, edge, edge_o, w, h, angle),
-        2 /* HorPred */ => ipred_h(d, stride, edge, edge_o, w, h, angle),
-        1 /* VertPred */ => ipred_v(d, stride, edge, edge_o, w, h, angle),
+        2 /* HorPred */ => crate::ipred_neon::ipred_h(d, stride, edge, edge_o, w, h, angle),
+        1 /* VertPred */ => crate::ipred_neon::ipred_v(d, stride, edge, edge_o, w, h, angle),
         12 /* PaethPred */ => ipred_paeth(d, stride, edge, edge_o, w, h),
         9 /* SmoothPred */ => ipred_smooth(d, stride, edge, edge_o, w, h),
-        10 /* SmoothVPred */ => ipred_smooth_v(d, stride, edge, edge_o, w, h),
-        11 /* SmoothHPred */ => ipred_smooth_h(d, stride, edge, edge_o, w, h),
+        10 /* SmoothVPred */ => crate::ipred_neon::ipred_smooth_v(d, stride, edge, edge_o, w, h),
+        11 /* SmoothHPred */ => crate::ipred_neon::ipred_smooth_h(d, stride, edge, edge_o, w, h),
         _ if m == Z1_PRED => {
             ipred_z1(d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights)
         }

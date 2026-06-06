@@ -1,23 +1,36 @@
 //! Build script for rav2d.
 //!
-//! On aarch64 it assembles dav2d's hand-written NEON motion-compensation
-//! kernels (`dav2d/src/arm/64/mc.S` + `mc_dotprod.S`) and the two read-only data
-//! tables they reference (`dav2d_mc_subpel_filters`, `dav2d_mc_warp_filter`),
-//! linking them into the rav2d staticlib so the decoder can dispatch the MC DSP
-//! family to NEON (see `src/mc_neon.rs`). The dav2d submodule is referenced
-//! read-only; nothing under `dav2d/src` or `dav2d/include` is modified.
+//! On aarch64 it assembles dav2d's hand-written NEON DSP kernels and the
+//! read-only data tables they reference, linking them into the rav2d staticlib
+//! so the decoder can dispatch the corresponding DSP families to NEON:
+//!
+//!   * motion compensation: `dav2d/src/arm/64/mc.S` + `mc_dotprod.S`
+//!     (tables `dav2d_mc_subpel_filters`, `dav2d_mc_warp_filter`) → `src/mc_neon.rs`.
+//!   * intra prediction: `dav2d/src/arm/64/ipred.S` (tables `dav2d_sm_weights`,
+//!     `dav2d_filter_intra_taps`) → `src/ipred_neon.rs`.
+//!
+//! The inverse-transform family (`itx.S`) is deliberately NOT assembled: dav2d's
+//! NEON `itx.S` still implements the AV1 DCT/ADST butterflies (constants 2896,
+//! 1567, 3784, …), whereas AV2 redefined the inverse transforms to a matrix form
+//! (constants 64, 83, 35, … — see `dav2d/src/itx_1d.c` and `src/itx_1d.rs`). The
+//! two are not bit-identical, so itx stays on the scalar Rust kernels.
+//!
+//! The dav2d submodule is referenced read-only; nothing under `dav2d/src` or
+//! `dav2d/include` is modified.
 //!
 //! On other architectures this is a no-op and the decoder uses the scalar Rust
-//! kernels in `src/mc.rs`.
+//! kernels in `src/mc.rs` / `src/itx.rs` / `src/ipred.rs`.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // Declare the cfg we may set so rustc's unexpected-cfg lint stays quiet.
+    // Declare the cfgs we may set so rustc's unexpected-cfg lint stays quiet.
     println!("cargo:rustc-check-cfg=cfg(rav2d_neon_mc)");
+    println!("cargo:rustc-check-cfg=cfg(rav2d_neon_ipred)");
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") {
         build_neon_mc();
+        build_neon_ipred();
     }
 }
 
@@ -88,6 +101,108 @@ fn build_neon_mc() {
 
     // Tell the linker NEON MC is available so src/mc_neon.rs enables dispatch.
     println!("cargo:rustc-cfg=rav2d_neon_mc");
+}
+
+/// Shared include dirs matching dav2d's own asm build (see build.ninja).
+fn dav2d_includes(
+    src: &Path,
+    dav2d: &Path,
+    include: &Path,
+    build: &Path,
+    build_src: &Path,
+) -> Vec<PathBuf> {
+    vec![
+        src.join("arm/64"), // util.S
+        src.to_path_buf(),  // src/arm/asm.S, src/*.h
+        dav2d.to_path_buf(),
+        include.to_path_buf(),
+        build.to_path_buf(),
+        build_src.to_path_buf(),
+    ]
+}
+
+/// Assemble dav2d's NEON intra-prediction kernels (`ipred.S`) plus the two
+/// read-only tables they reference (`dav2d_sm_weights`, `dav2d_filter_intra_taps`),
+/// copied verbatim from `dav2d/src/tables.c` into a generated C TU.
+fn build_neon_ipred() {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let dav2d = manifest.join("../../dav2d");
+    let dav2d = dav2d.canonicalize().unwrap_or(dav2d).to_path_buf();
+    let src = dav2d.join("src");
+    let include = dav2d.join("include");
+    let build = dav2d.join("build");
+    let build_src = build.join("src");
+
+    let ipred_s = src.join("arm/64/ipred.S");
+    let config_h = build.join("config.h");
+    if !ipred_s.exists() || !config_h.exists() {
+        println!(
+            "cargo:warning=dav2d ipred asm not found ({}); rav2d ipred will use scalar Rust",
+            ipred_s.display()
+        );
+        return;
+    }
+
+    println!("cargo:rerun-if-changed={}", ipred_s.display());
+    println!("cargo:rerun-if-changed={}", src.join("tables.c").display());
+    println!("cargo:rerun-if-changed=build.rs");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let tables_c = out_dir.join("ipred_tables.c");
+    generate_ipred_tables(&src.join("tables.c"), &tables_c);
+
+    let mut cc = cc::Build::new();
+    cc.file(&ipred_s).file(&tables_c);
+    for inc in dav2d_includes(&src, &dav2d, &include, &build, &build_src) {
+        cc.include(inc);
+    }
+    cc.define("NDEBUG", None);
+    cc.flag_if_supported("-std=c99");
+    cc.warnings(false);
+    cc.compile("rav2d_ipred_neon");
+
+    println!("cargo:rustc-cfg=rav2d_neon_ipred");
+}
+
+/// Copy the two intra-prediction data tables out of `dav2d/src/tables.c`
+/// verbatim into a small standalone C translation unit so the asm's
+/// `dav2d_sm_weights` / `dav2d_filter_intra_taps` references resolve.
+fn generate_ipred_tables(tables_c: &Path, out: &Path) {
+    let src = std::fs::read_to_string(tables_c).expect("read dav2d tables.c");
+    let lines: Vec<&str> = src.lines().collect();
+
+    let grab = |marker: &str| -> String {
+        let start = lines
+            .iter()
+            .position(|l| l.contains(marker))
+            .unwrap_or_else(|| panic!("table {marker} not found in tables.c"));
+        let mut out = Vec::new();
+        for l in &lines[start..] {
+            out.push(*l);
+            if l.trim() == "};" {
+                break;
+            }
+        }
+        out.join("\n")
+    };
+
+    let sm_weights = grab("dav2d_sm_weights[3 /* scale */][64]");
+    // `dav2d_filter_intra_taps` is built with a local `F(...)` initializer macro
+    // (and `ATTR_MCMODEL_SMALL`); grab from the `#if ARCH_X86` guard that defines
+    // it so the verbatim copy compiles standalone.
+    let filter_taps = grab("#if ARCH_X86");
+
+    let content = format!(
+        "/* Generated by rav2d build.rs from dav2d/src/tables.c (verbatim). Provides\n\
+         * the read-only data tables dav2d's NEON ipred kernels reference. Do not edit. */\n\
+         #include \"config.h\"\n\
+         #include <stdint.h>\n\
+         #include \"common/attributes.h\"\n\
+         #include \"dav2d/headers.h\"\n\n\
+         {sm_weights}\n\n\
+         {filter_taps}\n"
+    );
+    std::fs::write(out, content).expect("write generated ipred_tables.c");
 }
 
 /// Copy the two MC data tables out of `dav2d/src/tables.c` verbatim into a small

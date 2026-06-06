@@ -56,6 +56,7 @@ pub(crate) mod internal;
 pub(crate) mod intops;
 pub(crate) mod intra_edge;
 pub(crate) mod ipred;
+pub(crate) mod ipred_neon;
 pub(crate) mod ipred_prepare;
 pub(crate) mod itx;
 pub(crate) mod itx_1d;
