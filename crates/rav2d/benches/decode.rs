@@ -1,5 +1,5 @@
 //! Decode throughput benchmark: rav2d (pure Rust) vs dav2d (C reference, via the
-//! `rav2d::sys` FFI bindings).
+//! `rav2d_sys` FFI bindings).
 //!
 //! Run with the dav2d dylib on the loader path:
 //! ```text
@@ -116,7 +116,7 @@ fn rav2d_run(bytes: &[u8], filters: rav2d::InloopFilterType) -> (u32, u64) {
 
 /// Decode a clip with the dav2d C reference. Returns (frames, total samples).
 fn dav2d_run(bytes: &[u8], inloop_filters: u32) -> (u32, u64) {
-    use rav2d::sys;
+    use rav2d_sys as sys;
     let mut frames = 0u32;
     let mut samples = 0u64;
     unsafe {

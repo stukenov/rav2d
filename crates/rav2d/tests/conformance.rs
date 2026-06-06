@@ -56,7 +56,7 @@ const EAGAIN: i32 = -35;
 #[cfg(not(target_os = "macos"))]
 const EAGAIN: i32 = -11;
 
-unsafe fn extract_planes(pic: &rav2d::sys::Dav2dPicture) -> FramePlanes {
+unsafe fn extract_planes(pic: &rav2d_sys::Dav2dPicture) -> FramePlanes {
     let w = pic.p.w;
     let h = pic.p.h;
     let bpc = pic.p.bpc;
@@ -110,7 +110,7 @@ pub fn dav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
 /// frame list whose keyframe (a non-shown keyframe lands here too) can be
 /// matched 1:1 against rav2d for the all-intra sweep. Filters/grain off.
 pub fn dav2d_decode_invisible(path: &PathBuf) -> Vec<FramePlanes> {
-    use rav2d::sys;
+    use rav2d_sys as sys;
     let data = std::fs::read(path).expect("read clip");
     let mut frames = Vec::new();
 
@@ -170,7 +170,7 @@ pub fn dav2d_decode_invisible(path: &PathBuf) -> Vec<FramePlanes> {
 /// Decode a clip with the dav2d C reference library at the given in-loop-filter
 /// flag word (0 = none, 31 = all). Single-threaded, film grain off.
 pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePlanes> {
-    use rav2d::sys;
+    use rav2d_sys as sys;
     let data = std::fs::read(path).expect("read clip");
     let mut frames = Vec::new();
 
@@ -242,7 +242,7 @@ pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePla
 /// keyframe be matched 1:1 against rav2d's coding-order output even with filters
 /// on. Film grain off.
 pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Vec<FramePlanes> {
-    use rav2d::sys;
+    use rav2d_sys as sys;
     let data = std::fs::read(path).expect("read clip");
     let mut frames = Vec::new();
 
@@ -304,7 +304,7 @@ pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Ve
 /// (`output_invisible_frames`) so the frame list matches rav2d's coding-order
 /// output. Used by the grain-applied bit-exact oracle.
 pub fn dav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
-    use rav2d::sys;
+    use rav2d_sys as sys;
     let data = std::fs::read(path).expect("read clip");
     let mut frames = Vec::new();
 

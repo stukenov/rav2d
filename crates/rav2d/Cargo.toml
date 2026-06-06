@@ -10,12 +10,17 @@ keywords = ["av2", "video", "decoder", "codec"]
 categories = ["multimedia::video"]
 
 [dependencies]
-rav2d-sys = { workspace = true }
 
 [build-dependencies]
 cc = "1.0"
 
+# rav2d-sys is the conformance-test oracle (raw FFI to the dav2d C decoder); the
+# production decoder is pure Rust and never links it. It is a path-only
+# dev-dependency (no version requirement) so it is dropped from the published
+# manifest entirely — the crate publishes and builds without the (unpublished)
+# rav2d-sys crate or the dav2d submodule.
 [dev-dependencies]
+rav2d-sys = { path = "../rav2d-sys" }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

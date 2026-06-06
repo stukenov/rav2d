@@ -36,6 +36,14 @@
 #![allow(clippy::identity_op)]
 #![allow(dead_code)]
 #![allow(clippy::enum_variant_names)]
+// The DSP/ported-C kernels carry explicit casts and parenthesised arithmetic
+// that mirror the C source 1:1 for bit-exact auditability; these style lints
+// would force divergence from the reference without changing behaviour.
+#![allow(clippy::precedence)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::doc_lazy_continuation)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
 pub(crate) mod ccso;
@@ -98,5 +106,3 @@ pub use error::Rav2dError;
 pub use headers::{FrameHeader, PixelLayout, SequenceHeader};
 pub use log::Logger;
 pub use picture::{EventFlags, PicAllocator, Picture};
-
-pub use rav2d_sys as sys;
