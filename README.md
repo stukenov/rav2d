@@ -6,27 +6,44 @@
 [![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
-**rav2d** is a Rust port of [dav2d](https://code.videolan.org/videolan/dav2d), a cross-platform **AV2** video decoder focused on speed, correctness, and memory safety.
+**rav2d** is a memory-safe **AV2** video decoder in Rust, ported from [dav2d](https://code.videolan.org/videolan/dav2d) (the C reference decoder, an AV2 fork of dav1d).
 
-> All C decoder logic has been ported to Rust. Assembly-optimized DSP kernels remain via FFI. 790 tests pass across the workspace.
+> The entire C decode path has been ported to Rust and is **bit-exact** with dav2d: every coding-order frame of every shipped conformance clip matches byte-for-byte, with in-loop filters off **and** on, for both 8-bit and 10-bit streams. **818 library + 16 conformance tests pass.**
+
+## Status
+
+Bit-exact against the dav2d C reference (verified by an FFI oracle that decodes the same bitstream with both decoders and byte-compares every plane of every frame):
+
+| Capability | Status |
+|---|---|
+| Intra (DC/directional/smooth/paeth, CfL, MHCCP, MRL, DIP, palette, IntraBC) | ✅ bit-exact |
+| Inter (single-ref, compound, warp-affine, OBMC, interintra, BAWP) | ✅ bit-exact |
+| TIP (block-level + whole-frame), OPFL optical-flow refinement | ✅ bit-exact |
+| In-loop filters (deblock, CDEF, CCSO, Wiener / PC-Wiener / GDF) | ✅ bit-exact |
+| Segmentation, delta-Q, lossless (WHT) | ✅ bit-exact |
+| Film grain synthesis | ✅ bit-exact |
+| High bit depth — 10-bit | ✅ bit-exact |
+| High bit depth — 12-bit | ⚠️ code path present, not yet verified against a vector |
+| Assembly DSP dispatch (aarch64 NEON via FFI) | ✅ motion compensation + intra H/V/smooth |
+| Multithreading | ✅ disjoint display passes; recon core single-threaded |
+
+The full corpus (`bit_exact_full_clip_sweep`), the filtered corpus (`bit_exact_full_clip_filtered_sweep`), the 10-bit vectors (`bit_exact_hbd_sweep`), and film grain (`bit_exact_filmgrain_applied`) are all enforced as tests.
 
 ## Why Rust?
 
-Video decoders parse untrusted bitstreams from the internet — they are a prime target for memory corruption exploits. Historical CVEs in video decoders (libvpx, dav1d, ffmpeg) are overwhelmingly buffer overflows, use-after-free, and integer overflows in C parsing code.
+Video decoders parse untrusted bitstreams from the internet — a prime target for memory-corruption exploits. Historical CVEs in C decoders (libvpx, dav1d, ffmpeg) are overwhelmingly buffer overflows, use-after-free, and integer overflows in parsing code.
 
-**rav2d eliminates these classes of bugs at compile time** while keeping the same hand-optimized assembly for actual pixel processing:
+**rav2d eliminates these bug classes at compile time** while reusing dav2d's hand-written SIMD for the hottest pixel kernels:
 
 | | dav2d (C) | rav2d (Rust) |
 |---|---|---|
 | Bitstream parsing | C (unsafe) | Rust (bounds-checked) |
 | Decode orchestration | C (unsafe) | Rust (safe, typed) |
 | Filter pipeline | C (unsafe) | Rust (bounds-checked) |
-| DSP kernels | Assembly | Assembly (shared via FFI) |
+| DSP kernels | Assembly + C | Assembly via FFI (where AV2-valid) + Rust |
 | Type safety | Weak (enums as ints) | Strong (enum variants, pattern matching) |
 
 ## Quick Start
-
-Add the decoder library to your project:
 
 ```sh
 cargo add rav2d
@@ -37,14 +54,12 @@ use rav2d::{Decoder, Settings, Data, Rav2dError};
 
 let mut decoder = Decoder::open(&Settings::default()).unwrap();
 
-// Feed compressed data
 let obu_data: Vec<u8> = std::fs::read("input.obu").unwrap();
 decoder.send_data(Some(Data::wrap(obu_data))).unwrap();
 
-// Retrieve decoded pictures
 loop {
     match decoder.get_picture() {
-        Ok(pic) => { /* use pic.data, pic.p.w, pic.p.h */ }
+        Ok(pic) => { /* pic.data planes, pic.p.w, pic.p.h, pic.p.bpc */ }
         Err(Rav2dError::Again) => break, // need more data
         Err(e) => panic!("{e}"),
     }
@@ -55,17 +70,19 @@ loop {
 
 ```sh
 cargo install rav2d-cli
+rav2d input.ivf -o output.y4m      # decode IVF → Y4M
+rav2d input.ivf                    # decode-only benchmark
+rav2d input.ivf -o out.y4m --limit 100 --no-grain
 ```
 
+## Performance
+
+rav2d ports the C *logic* to Rust; hand-written assembly stays via FFI. On aarch64 the **motion-compensation** kernels and four intra-prediction modes dispatch to dav2d's NEON (run `RAV2D_NEON_OFF=all` to force the scalar Rust path). All other DSP families run scalar Rust — **not by choice**: dav2d's AV2 fork still ships AV1-era assembly for inverse transforms, the entropy decoder, loop filters, CDEF and film grain, which is not bit-exact for AV2, so those kernels cannot be reused and the correct scalar Rust is used instead.
+
+Consequently single-thread throughput today is roughly **0.03–0.25× dav2d** (scalar Rust vs C+SIMD), with NEON MC narrowing the gap on motion-heavy clips by ~1.4–1.6×. Closing the rest requires either AV2-updated assembly upstream or optimizing the scalar Rust kernels.
+
 ```sh
-# Decode IVF to Y4M
-rav2d input.ivf -o output.y4m
-
-# Decode-only benchmark (no output)
-rav2d input.ivf
-
-# Limit frames and skip film grain
-rav2d input.ivf -o out.y4m --limit 100 --no-grain
+DYLD_LIBRARY_PATH=dav2d/build/src cargo bench -p rav2d   # prints a rav2d-vs-dav2d table
 ```
 
 ## Crate Structure
@@ -73,113 +90,60 @@ rav2d input.ivf -o out.y4m --limit 100 --no-grain
 | Crate | Description |
 |-------|-------------|
 | [`rav2d`](crates/rav2d/) | Main decoder library — safe Rust API |
-| [`rav2d-sys`](crates/rav2d-sys/) | Raw FFI bindings to dav2d C/asm (bindgen) |
-| [`rav2d-cli`](crates/rav2d-cli/) | Command-line decoder tool (IVF → Y4M) |
+| [`rav2d-sys`](crates/rav2d-sys/) | Raw FFI bindings to dav2d (bindgen) + NEON asm dispatch |
+| [`rav2d-cli`](crates/rav2d-cli/) | Command-line decoder (IVF → Y4M) |
 
-## What's Ported
-
-| Module | Status |
-|--------|--------|
-| OBU parsing | Complete |
-| Entropy decoding (MSAC) | Complete |
-| Block decoding (intra/inter/compound) | Complete |
-| Deblocking filter | Complete |
-| CDEF | Complete |
-| Loop restoration (NS/PC Wiener, GDF) | Complete |
-| Film grain synthesis | Complete |
-| Motion compensation | Complete |
-| Inverse transforms | Complete |
-| Reference management | Complete |
-| Thread task scheduling | Complete |
-
-**47 Rust source files**, ~47,000 lines of ported decoder logic.
+> **Note:** `rav2d-sys` (and therefore `rav2d`) builds against the bundled `dav2d` C submodule — it binds `dav2d.h` and assembles dav2d's NEON `.S` files. Build the submodule first (see below). This is a workspace/source build; the crate is not a drop-in standalone crates.io dependency without the submodule present.
 
 ## Building
 
 ### Prerequisites
 
 - Rust 1.85+ (edition 2024)
-- meson + ninja (to build dav2d)
+- meson + ninja (to build the dav2d submodule)
 - LLVM/clang (for bindgen)
 
-### Build
+### Build & test
 
 ```sh
-# 1. Build the dav2d C library
-cd dav2d
-meson setup build
-ninja -C build
-cd ..
+git submodule update --init --recursive
 
-# 2. Build rav2d
-cargo build
+# 1. Build the dav2d C reference (used for linking + the conformance oracle)
+cd dav2d && meson setup build && ninja -C build && cd ..
 
-# 3. Run tests
-DYLD_LIBRARY_PATH=dav2d/build/src cargo test --workspace    # macOS
-LD_LIBRARY_PATH=dav2d/build/src cargo test --workspace       # Linux
+# 2. Build + test rav2d
+cargo build --workspace
+DYLD_LIBRARY_PATH=dav2d/build/src cargo test -p rav2d           # macOS
+LD_LIBRARY_PATH=dav2d/build/src  cargo test -p rav2d            # Linux
 
-# 4. Run clippy
-cargo clippy --workspace
-
-# 5. Build CLI
-cargo build -p rav2d-cli --release
+# Force the all-scalar path (no NEON):
+RAV2D_NEON_OFF=all DYLD_LIBRARY_PATH=dav2d/build/src cargo test -p rav2d
 ```
 
-### Benchmarks
+## Conformance
 
-```sh
-DYLD_LIBRARY_PATH=dav2d/build/src cargo bench -p rav2d
-```
-
-## Architecture
-
-```
-rav2d/
-├── crates/
-│   ├── rav2d/           # Decoder library
-│   │   ├── src/
-│   │   │   ├── lib.rs         # Public API re-exports
-│   │   │   ├── decoder.rs     # Decoder struct, Settings, open/send/get
-│   │   │   ├── obu.rs         # OBU parsing (sequence/frame/tile headers)
-│   │   │   ├── decode.rs      # Block-level decoding (5600 lines)
-│   │   │   ├── recon.rs       # Reconstruction (MC, prediction, ITX)
-│   │   │   ├── refmvs.rs      # Reference motion vectors
-│   │   │   ├── cdef.rs        # Constrained directional enhancement
-│   │   │   ├── looprestoration.rs  # Wiener/GDF loop restoration
-│   │   │   ├── filmgrain.rs   # Film grain synthesis
-│   │   │   └── ...            # 38 more modules
-│   │   └── benches/
-│   │       └── decode.rs      # Criterion benchmarks
-│   ├── rav2d-sys/       # FFI bindings (auto-generated via bindgen)
-│   └── rav2d-cli/       # CLI binary
-│       └── src/
-│           ├── main.rs        # Argument parsing, decode loop
-│           ├── ivf.rs         # IVF demuxer
-│           └── y4m.rs         # Y4M writer
-├── dav2d/               # C submodule (source of truth)
-└── .github/workflows/   # CI (ubuntu + macOS matrix)
-```
+`crates/rav2d/tests/conformance.rs` is an FFI oracle: it decodes each clip with **both** rav2d and the dav2d C library and asserts byte-equal output. Test clips live in `dav2d/media` (8-bit) and `crates/rav2d/tests/data` (10-bit). The dav2d submodule is kept pristine — it is the source of truth for the port.
 
 ## Approach
 
-Following the proven [rav1d](https://github.com/memorysafety/rav1d) strategy:
+Following the [rav1d](https://github.com/memorysafety/rav1d) strategy:
 
-1. FFI bindings to dav2d's hand-optimized assembly (shared, not rewritten)
-2. Progressive C-to-Rust port of the core decoder
-3. Conformance testing at every step against dav2d test data
+1. Assembly stays via FFI (reused, not rewritten) — where the AV2 fork's asm is actually AV2-valid.
+2. All C decoder logic is ported to Rust, validated bit-exact against dav2d at every step.
+3. Data tables are extracted from C and validated via FFI comparison.
 
 ## Safety
 
-- All `unsafe impl Send/Sync` blocks are documented with SAFETY comments
-- Enum transmutes replaced with validated `from_raw()` helpers with debug assertions
-- `#![warn(unsafe_op_in_unsafe_fn)]` enabled crate-wide
-- Remaining `unsafe` blocks are concentrated in FFI calls and performance-critical inner loops
+- All `unsafe impl Send/Sync` documented with SAFETY comments.
+- Enum transmutes replaced with validated `from_raw()` helpers + debug assertions.
+- `#![warn(unsafe_op_in_unsafe_fn)]` crate-wide.
+- Remaining `unsafe` is concentrated in FFI calls, the NEON dispatch, and performance-critical inner loops.
 
 ## Related Projects
 
-- [rav1d](https://github.com/memorysafety/rav1d) — Rust port of dav1d (AV1), funded by Prossimo/ISRG
-- [dav2d](https://code.videolan.org/videolan/dav2d) — The C original (AV2)
-- [dav1d](https://code.videolan.org/videolan/dav1d) — The AV1 predecessor
+- [rav1d](https://github.com/memorysafety/rav1d) — Rust port of dav1d (AV1)
+- [dav2d](https://code.videolan.org/videolan/dav2d) — the C original (AV2)
+- [dav1d](https://code.videolan.org/videolan/dav1d) — the AV1 predecessor
 
 ## License
 
