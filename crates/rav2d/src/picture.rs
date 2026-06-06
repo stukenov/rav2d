@@ -200,6 +200,33 @@ impl Picture {
         self.data[0].is_some()
     }
 
+    /// True when this picture stores samples as 16-bit (`bpc > 8`). The plane
+    /// allocation already reserves `width << hbd` bytes per row (see
+    /// `DefaultPicAllocator::alloc_picture`), so high-bit-depth planes hold two
+    /// bytes per sample.
+    #[inline]
+    pub fn is_hbd(&self) -> bool {
+        self.p.bpc > 8
+    }
+
+    /// Number of storage bytes per sample (1 for 8bpc, 2 for HBD).
+    #[inline]
+    pub fn bytes_per_sample(&self) -> usize {
+        if self.is_hbd() {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Row stride for plane `pl` expressed in **samples** (not bytes). Plane 0
+    /// is luma; planes 1/2 are chroma. The byte stride lives in `self.stride`.
+    #[inline]
+    pub fn stride_px(&self, pl: usize) -> usize {
+        let s = self.stride[if pl == 0 { 0 } else { 1 }].unsigned_abs();
+        s / self.bytes_per_sample()
+    }
+
     pub fn unref(&mut self) {
         if let (Some(alloc), Some(allocator)) = (self.allocation.take(), self.allocator.take()) {
             allocator.release_picture(alloc);

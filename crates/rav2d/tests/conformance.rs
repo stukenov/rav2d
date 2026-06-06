@@ -29,6 +29,12 @@ fn media(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media")).join(name)
 }
 
+/// Locally-staged test vectors (NOT in the pristine dav2d submodule). Holds the
+/// high-bit-depth `.obu` streams generated with the avm reference encoder.
+fn data(name: &str) -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data")).join(name)
+}
+
 /// Chroma subsampling (ss_hor, ss_ver) for a dav2d pixel layout.
 /// I400=0, I420=1, I422=2, I444=3.
 fn ss(layout: i32) -> (i32, i32) {
@@ -2028,5 +2034,120 @@ fn bit_exact_full_clip_filtered_sweep() {
             "full-clip filtered sweep not bit-exact:\n  {}",
             all.join("\n  ")
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-bit-depth (10-bit, 16bpc storage) oracle.
+// ---------------------------------------------------------------------------
+
+/// Locate the first differing sample between two byte-packed (`bpc>8` → 2 bytes/
+/// sample) plane sets, returning `(plane, sample_index, dav2d_val, rav2d_val)`.
+fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usize, u16, u16)> {
+    let bytes = if r.bpc > 8 { 2usize } else { 1 };
+    for pl in 0..3 {
+        let rp = &r.planes[pl];
+        let gp = &g.planes[pl];
+        let n = rp.len().min(gp.len());
+        let mut i = 0;
+        while i + bytes <= n {
+            if rp[i..i + bytes] != gp[i..i + bytes] {
+                let rv = if bytes == 2 {
+                    u16::from_le_bytes([rp[i], rp[i + 1]])
+                } else {
+                    rp[i] as u16
+                };
+                let gv = if bytes == 2 {
+                    u16::from_le_bytes([gp[i], gp[i + 1]])
+                } else {
+                    gp[i] as u16
+                };
+                return Some((pl, i / bytes, rv, gv));
+            }
+            i += bytes;
+        }
+        if rp.len() != gp.len() {
+            return Some((pl, n / bytes, 0, 0));
+        }
+    }
+    None
+}
+
+/// Bit-exact reconstruction for 10-bit (HBD) streams. Decodes the locally-staged
+/// 10-bit vectors with both dav2d and rav2d (in-loop filters and film grain off,
+/// invisible frames emitted in coding order) and asserts every plane of every
+/// frame is byte-identical — the 16bpc analogue of the 8bpc full-clip sweep.
+#[test]
+#[ignore = "HBD recon WIP: enable once the 16bpc pixel path is bit-exact"]
+fn bit_exact_hbd_sweep() {
+    let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
+    let mut all = Vec::new();
+    for clip in clips {
+        let path = data(clip);
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            continue;
+        }
+        let reference = dav2d_decode_invisible(&path);
+        let got = rav2d_decode(&path);
+        assert!(!reference.is_empty(), "{clip}: dav2d produced no frames");
+        assert_eq!(reference[0].bpc, 10, "{clip}: expected 10-bit dav2d output");
+
+        if got.len() != reference.len() {
+            all.push(format!(
+                "{clip}: frame count mismatch (dav2d={}, rav2d={})",
+                reference.len(),
+                got.len()
+            ));
+            continue;
+        }
+        let mut clip_ok = true;
+        for (fi, (r, g)) in reference.iter().zip(got.iter()).enumerate() {
+            if (r.w, r.h, r.bpc, r.layout) != (g.w, g.h, g.bpc, g.layout) {
+                all.push(format!("{clip} frame {fi}: dims/bpc mismatch"));
+                clip_ok = false;
+                continue;
+            }
+            if let Some((pl, idx, rv, gv)) = first_hbd_divergence(r, g) {
+                all.push(format!(
+                    "{clip} frame {fi}: first diff plane {pl} sample {idx} dav2d={rv} rav2d={gv}"
+                ));
+                clip_ok = false;
+            }
+        }
+        if clip_ok {
+            eprintln!("{clip}: HBD bit-exact ({} frames)", got.len());
+        }
+    }
+    if !all.is_empty() {
+        panic!("HBD sweep not bit-exact:\n  {}", all.join("\n  "));
+    }
+}
+
+/// Smoke test: rav2d must *decode* the 10-bit vectors (produce 10-bit output of
+/// the right geometry) without panicking, even before the pixels are bit-exact.
+/// Unlike the bit-exact oracle this is not `#[ignore]`d, so it guards the HBD
+/// plumbing (header parse, allocation, decode loop) against regressions.
+#[test]
+fn hbd_decode_smoke() {
+    for clip in ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"] {
+        let path = data(clip);
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            continue;
+        }
+        let got = rav2d_decode(&path);
+        assert!(!got.is_empty(), "{clip}: rav2d produced no frames");
+        for (fi, g) in got.iter().enumerate() {
+            assert_eq!(g.bpc, 10, "{clip} frame {fi}: expected 10-bit output");
+            assert_eq!(g.w, 128, "{clip} frame {fi}: width");
+            assert_eq!(g.h, 128, "{clip} frame {fi}: height");
+            // 10-bit Y plane is 128*128 samples * 2 bytes.
+            assert_eq!(
+                g.planes[0].len(),
+                128 * 128 * 2,
+                "{clip} frame {fi}: Y plane size"
+            );
+        }
     }
 }
