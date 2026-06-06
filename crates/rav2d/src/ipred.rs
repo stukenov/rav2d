@@ -1,12 +1,12 @@
 use crate::dip_tables::DIP_WEIGHTS;
 use crate::intops::{apply_sign, clz, ctz, iclip, imax, imin, ulog2};
 use crate::levels::CflMhDir;
-use crate::pixel::{BitDepth, BitDepth8, Pixel};
 use crate::levels::{
     ANGLE_HAS_LEFT_FLAG, ANGLE_HAS_TOP_FLAG, ANGLE_IBP_FLAG, ANGLE_IS_LUMA, ANGLE_MRL_IDX_MASK,
     ANGLE_MRL_IDX_SHIFT, ANGLE_MULTI_MRL_FLAG, ANGLE_SMOOTH_LEFT_EDGE_FLAG,
     ANGLE_SMOOTH_TOP_EDGE_FLAG, ANGLE_USE_EDGE_FILTER_FLAG,
 };
+use crate::pixel::{BitDepth, BitDepth8, Pixel};
 use crate::recon::derive_alpha;
 use crate::tables::{
     DC_IBP_WEIGHTS, DIV_RECIP, DIV_SCALE_SH_BIAS, DIV_SCALE_SH_COEFW, DIV_SCALE_SH_OFFSET,
@@ -308,7 +308,14 @@ pub fn filter_edge<P: Pixel>(
     }
 }
 
-fn splat_dc<P: Pixel>(dst: &mut [P], stride: usize, off: usize, width: usize, mut height: usize, dc: P) {
+fn splat_dc<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    off: usize,
+    width: usize,
+    mut height: usize,
+    dc: P,
+) {
     let mut p = off;
     while height > 0 {
         for x in 0..width {
@@ -407,15 +414,23 @@ pub fn ipred_dc_top<BD: BitDepth>(
             let wy = 128 - w_y[y] as u32;
             let dc_wy = dc * w_y[y] as u32;
             for x in 0..width {
-                dst[off + x] =
-                    BD::Pixel::from_i32(((tl[o + 1 + x].as_u16() as u32 * wy + dc_wy + 64) >> 7) as i32);
+                dst[off + x] = BD::Pixel::from_i32(
+                    ((tl[o + 1 + x].as_u16() as u32 * wy + dc_wy + 64) >> 7) as i32,
+                );
             }
             off += stride;
         }
         height -= h;
     }
 
-    splat_dc(dst, stride, off, width, height, BD::Pixel::from_i32(dc as i32));
+    splat_dc(
+        dst,
+        stride,
+        off,
+        width,
+        height,
+        BD::Pixel::from_i32(dc as i32),
+    );
 }
 
 pub fn ipred_dc_left_8bpc(
@@ -506,8 +521,9 @@ pub fn ipred_dc<BD: BitDepth>(
             let wy = 128 - w_y[y] as u32;
             let dc_wy = dc * w_y[y] as u32;
             for x in x_start..width {
-                dst[off + x] =
-                    BD::Pixel::from_i32(((tl[o + 1 + x].as_u16() as u32 * wy + dc_wy + 64) >> 7) as i32);
+                dst[off + x] = BD::Pixel::from_i32(
+                    ((tl[o + 1 + x].as_u16() as u32 * wy + dc_wy + 64) >> 7) as i32,
+                );
             }
             off += stride;
         }
@@ -770,7 +786,8 @@ pub fn ipred_smooth_h<BD: BitDepth>(
         for x in 0..w {
             let mul = diff * (w as i32 - 1 - x as i32);
             let pred = right_val + ((mul + rnd) >> bwl2);
-            dst[off + x] = BD::Pixel::from_i32(pred + (((left - pred) * weights[x] as i32 + 32) >> 6));
+            dst[off + x] =
+                BD::Pixel::from_i32(pred + (((left - pred) * weights[x] as i32 + 32) >> 6));
         }
         off += stride;
     }
@@ -790,7 +807,17 @@ pub fn ipred_z1_8bpc(
     ibp_weights: &[[[u8; 16]; 16]; 7],
 ) {
     ipred_z1(
-        BitDepth8, dst, stride, tl, o, width, height, angle, max_width, max_height, ibp_weights,
+        BitDepth8,
+        dst,
+        stride,
+        tl,
+        o,
+        width,
+        height,
+        angle,
+        max_width,
+        max_height,
+        ibp_weights,
     );
 }
 
@@ -971,7 +998,17 @@ pub fn ipred_z3_8bpc(
     ibp_weights: &[[[u8; 16]; 16]; 7],
 ) {
     ipred_z3(
-        BitDepth8, dst, stride, tl, o, width, height, angle, max_width, max_height, ibp_weights,
+        BitDepth8,
+        dst,
+        stride,
+        tl,
+        o,
+        width,
+        height,
+        angle,
+        max_width,
+        max_height,
+        ibp_weights,
     );
 }
 
@@ -1350,8 +1387,7 @@ pub fn ibp_blend<BD: BitDepth>(
             } as i32;
             let t: i32 = tmp[y * 64 + x].into();
             let d: i32 = dst[y * stride + x].into();
-            dst[y * stride + x] =
-                BD::Pixel::from_i32((t * (128 - weight) + d * weight + 64) >> 7);
+            dst[y * stride + x] = BD::Pixel::from_i32((t * (128 - weight) + d * weight + 64) >> 7);
         }
     }
 }
@@ -1593,9 +1629,9 @@ fn cfl_filter<P: Pixel>(
     let t = |i: usize| -> i32 { top[i].into() };
     match filter_type {
         CFL_FLT_TYPE_UNIFORM => P::from_i32((s(c) + s(r) + s(b + c) + s(b + r)) >> 2),
-        CFL_FLT_TYPE_VSTRIP => P::from_i32(
-            (s(l) + 2 * s(c) + s(r) + s(b + l) + 2 * s(b + c) + s(b + r)) >> 3,
-        ),
+        CFL_FLT_TYPE_VSTRIP => {
+            P::from_i32((s(l) + 2 * s(c) + s(r) + s(b + l) + 2 * s(b + c) + s(b + r)) >> 3)
+        }
         _ => P::from_i32((s(l) + 4 * s(c) + s(r) + t(tc) + s(b + c)) >> 3),
     }
 }
@@ -1864,7 +1900,16 @@ pub fn cfl_gen_mat_8bpc(
     dir: CflMhDir,
 ) {
     cfl_gen_mat(
-        BitDepth8, mat, imat, y, y_off, y_top_stride, refw, refh, edge_flags, dir,
+        BitDepth8,
+        mat,
+        imat,
+        y,
+        y_off,
+        y_top_stride,
+        refw,
+        refh,
+        edge_flags,
+        dir,
     );
 }
 
@@ -1998,7 +2043,17 @@ pub fn cfl_calc_alphas_8bpc(
     edge_flags: i32,
 ) {
     cfl_calc_alphas(
-        BitDepth8, alpha, c, c_off, top_sb_edge, stride, refw, refh, mat, imat, edge_flags,
+        BitDepth8,
+        alpha,
+        c,
+        c_off,
+        top_sb_edge,
+        stride,
+        refw,
+        refh,
+        mat,
+        imat,
+        edge_flags,
     );
 }
 
@@ -2102,7 +2157,17 @@ pub fn cfl_mhccp_pred_8bpc(
     dir: CflMhDir,
 ) {
     cfl_mhccp_pred(
-        BitDepth8, dst, dst_stride, src, src_off, src_top_stride, w, h, alpha, edge_flags, dir,
+        BitDepth8,
+        dst,
+        dst_stride,
+        src,
+        src_off,
+        src_top_stride,
+        w,
+        h,
+        alpha,
+        edge_flags,
+        dir,
     );
 }
 
@@ -2138,8 +2203,7 @@ pub fn cfl_mhccp_pred<BD: BitDepth>(
         for x in 0..w {
             let v0: i32 = src[sp + x - src_top_stride].into();
             let v1 = sqrnd(bd, src[sp + x].into());
-            dst[dp + x] =
-                bd.pixel_clip(mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2);
+            dst[dp + x] = bd.pixel_clip(mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2);
         }
         sp += w;
         dp += dst_stride;
@@ -2164,8 +2228,7 @@ pub fn cfl_mhccp_pred<BD: BitDepth>(
             };
             let v0: i32 = src[v0_idx].into();
             let v1 = sqrnd(bd, src[sp + x].into());
-            dst[dp + x] =
-                bd.pixel_clip(mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2);
+            dst[dp + x] = bd.pixel_clip(mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v2);
             x += 1;
         }
         sp += w;
@@ -2204,11 +2267,7 @@ fn cfl_luma_left<P: Pixel>(
         } else {
             yleft
         };
-        p(yleft - 1)
-            + 4 * p(yleft)
-            + p(yleft + 1)
-            + p(top)
-            + p((yleft as isize + ystride) as usize)
+        p(yleft - 1) + 4 * p(yleft) + p(yleft + 1) + p(top) + p((yleft as isize + ystride) as usize)
     } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
         p(yleft - 1)
             + 2 * p(yleft)
@@ -2314,11 +2373,7 @@ fn cfl_luma_block<P: Pixel>(
         } else {
             (px as isize + xl as isize - ystride) as usize
         };
-        p(px + left)
-            + 4 * p(px + xl)
-            + p(px + xl + 1)
-            + p(top)
-            + p(bot as usize)
+        p(px + left) + 4 * p(px + xl) + p(px + xl + 1) + p(top) + p(bot as usize)
     } else if flt == CFL_FLT_TYPE_VSTRIP as u32 {
         p(px + left)
             + 2 * p(px + xl)
@@ -2327,11 +2382,7 @@ fn cfl_luma_block<P: Pixel>(
             + 2 * p(bot as usize)
             + p(bot as usize + 1)
     } else {
-        (p(px + xl)
-            + p(px + xl + 1)
-            + p(bot as usize)
-            + p(bot as usize + 1))
-            << 1
+        (p(px + xl) + p(px + xl + 1) + p(bot as usize) + p(bot as usize + 1)) << 1
     }
 }
 

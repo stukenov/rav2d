@@ -265,11 +265,19 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
                 }
             }
         } else {
-            let fill_val = if have_top { top_buf[dst_top_off] } else { fill_left };
+            let fill_val = if have_top {
+                top_buf[dst_top_off]
+            } else {
+                fill_left
+            };
             let start = (left_base + 1 - sz as isize) as usize;
             tl[start..start + sz].fill(fill_val);
             if mrl_mul {
-                let fill_val2 = if have_top { top_buf[dst_top2_off] } else { fill_left };
+                let fill_val2 = if have_top {
+                    top_buf[dst_top2_off]
+                } else {
+                    fill_left
+                };
                 let start2 = (left2_base + 1 - sz2 as isize) as usize;
                 tl[start2..start2 + sz2].fill(fill_val2);
             }
@@ -278,7 +286,11 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
         debug_assert!(mode == IntraPredMode::SmoothVPred as u8);
         let bl_idx = (o - 1 - th as isize) as usize;
         if !have_left {
-            tl[bl_idx] = if have_top { top_buf[dst_top_off] } else { fill_left };
+            tl[bl_idx] = if have_top {
+                top_buf[dst_top_off]
+            } else {
+                fill_left
+            };
         } else if n_bl <= 0 {
             let row = imin(th as i32, (h - y) << 2) as usize - 1;
             tl[bl_idx] = dst[dst_off + stride * row - 1];
@@ -338,7 +350,11 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
             };
             tl[top_base..top_base + sz].fill(fill_val);
             if mrl_mul {
-                let fill_val2 = if have_left { dst[dst_off - 1] } else { fill_top };
+                let fill_val2 = if have_left {
+                    dst[dst_off - 1]
+                } else {
+                    fill_top
+                };
                 tl[top2_base..top2_base + sz2].fill(fill_val2);
             }
         }
@@ -346,7 +362,11 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
         debug_assert!(mode == IntraPredMode::SmoothHPred as u8);
         let tr_idx = (o + 1) as usize + tw;
         if !have_top {
-            tl[tr_idx] = if have_left { dst[dst_off - 1] } else { fill_top };
+            tl[tr_idx] = if have_left {
+                dst[dst_off - 1]
+            } else {
+                fill_top
+            };
         } else if n_tr <= 0 {
             let col = imin(tw as i32, (w - x) << 2) as usize - 1;
             tl[tr_idx] = top_buf[dst_top_off + col];

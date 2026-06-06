@@ -136,10 +136,8 @@ fn filter_choice_bd<P: Pixel>(
         }
     }
 
-    let ds =
-        (at(s) - at(s + 3 * stride) - 3 * (at(s) - at(s + stride))).unsigned_abs();
-    let dt =
-        (at(t) - at(t + 3 * stride) - 3 * (at(t) - at(t + stride))).unsigned_abs();
+    let ds = (at(s) - at(s + 3 * stride) - 3 * (at(s) - at(s + stride))).unsigned_abs();
+    let dt = (at(t) - at(t + 3 * stride) - 3 * (at(t) - at(t + stride))).unsigned_abs();
     if ((ds + dt + 1) >> 1) > end_thr {
         return 2;
     }
@@ -162,11 +160,11 @@ fn filter_choice_bd<P: Pixel>(
             let ds = (at(s - stride)
                 - at(s + (-dist2 as isize - 1) * stride)
                 - dist2 * (at(s - stride) - at(s - 2 * stride)))
-                .unsigned_abs();
+            .unsigned_abs();
             let dt = (at(t - stride)
                 - at(t + (-dist2 as isize - 1) * stride)
                 - dist2 * (at(t - stride) - at(t - 2 * stride)))
-                .unsigned_abs();
+            .unsigned_abs();
             if ((ds + dt + 1) >> 1) > end_thr4 {
                 return prev_dist;
             }
@@ -295,15 +293,7 @@ pub fn deblock_h_sb64y_8bpc(
     edge: bool,
 ) {
     deblock_h_sb64y_bd(
-        BitDepth8,
-        dst,
-        dst_off,
-        stride,
-        vmask,
-        ll_mask,
-        q_thr,
-        side_thr,
-        edge,
+        BitDepth8, dst, dst_off, stride, vmask, ll_mask, q_thr, side_thr, edge,
     );
 }
 
@@ -369,15 +359,7 @@ pub fn deblock_v_sb64y_8bpc(
     edge: bool,
 ) {
     deblock_v_sb64y_bd(
-        BitDepth8,
-        dst,
-        dst_off,
-        stride,
-        vmask,
-        ll_mask,
-        q_thr,
-        side_thr,
-        edge,
+        BitDepth8, dst, dst_off, stride, vmask, ll_mask, q_thr, side_thr, edge,
     );
 }
 
@@ -443,15 +425,7 @@ pub fn deblock_h_sb64uv_8bpc(
     edge: bool,
 ) {
     deblock_h_sb64uv_bd(
-        BitDepth8,
-        dst,
-        dst_off,
-        stride,
-        vmask,
-        ll_mask,
-        q_thr,
-        side_thr,
-        edge,
+        BitDepth8, dst, dst_off, stride, vmask, ll_mask, q_thr, side_thr, edge,
     );
 }
 
@@ -515,15 +489,7 @@ pub fn deblock_v_sb64uv_8bpc(
     edge: bool,
 ) {
     deblock_v_sb64uv_bd(
-        BitDepth8,
-        dst,
-        dst_off,
-        stride,
-        vmask,
-        ll_mask,
-        q_thr,
-        side_thr,
-        edge,
+        BitDepth8, dst, dst_off, stride, vmask, ll_mask, q_thr, side_thr, edge,
     );
 }
 

@@ -20,11 +20,7 @@ pub(crate) fn intermediate_bits<BD: BitDepth>(bd: BD) -> i32 {
 /// stays `int16_t` for both; the bias keeps HBD prepped values in i16 range.
 #[inline(always)]
 fn prep_bias<BD: BitDepth>(_bd: BD) -> i32 {
-    if BD::BPC == 8 {
-        0
-    } else {
-        8192
-    }
+    if BD::BPC == 8 { 0 } else { 8192 }
 }
 
 pub fn put_8bpc(
@@ -38,7 +34,14 @@ pub fn put_8bpc(
     put(dst, dst_stride, src, src_stride, w, h);
 }
 
-pub fn put<P: Pixel>(dst: &mut [P], dst_stride: usize, src: &[P], src_stride: usize, w: usize, h: usize) {
+pub fn put<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
     for y in 0..h {
         dst[y * dst_stride..y * dst_stride + w]
             .copy_from_slice(&src[y * src_stride..y * src_stride + w]);
@@ -176,7 +179,14 @@ pub fn blend_8bpc(dst: &mut [u8], dst_stride: usize, tmp: &[u8], w: usize, h: us
     blend(dst, dst_stride, tmp, w, h, mask);
 }
 
-pub fn blend<P: Pixel>(dst: &mut [P], dst_stride: usize, tmp: &[P], w: usize, h: usize, mask: &[u8]) {
+pub fn blend<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    tmp: &[P],
+    w: usize,
+    h: usize,
+    mask: &[u8],
+) {
     for y in 0..h {
         for x in 0..w {
             let di = y * dst_stride + x;
@@ -391,7 +401,17 @@ pub fn put_8tap_8bpc(
     filter_type: i32,
 ) {
     put_8tap(
-        BitDepth8, dst, dst_stride, src, src_off, src_stride, w, h, mx, my, filter_type,
+        BitDepth8,
+        dst,
+        dst_stride,
+        src,
+        src_off,
+        src_stride,
+        w,
+        h,
+        mx,
+        my,
+        filter_type,
     );
 }
 
@@ -454,8 +474,9 @@ pub fn put_8tap<BD: BitDepth>(
             for y in 0..h {
                 for x in 0..w {
                     let si = src_off + y * src_stride + x;
-                    dst[y * dst_stride + x] =
-                        bd.pixel_clip((filter_8tap_px(src, si, &fv, ss) + ((1 << bits) >> 1)) >> bits);
+                    dst[y * dst_stride + x] = bd.pixel_clip(
+                        (filter_8tap_px(src, si, &fv, ss) + ((1 << bits) >> 1)) >> bits,
+                    );
                 }
             }
         }
@@ -479,7 +500,17 @@ pub fn prep_8tap_8bpc(
     filter_type: i32,
 ) {
     prep_8tap(
-        BitDepth8, tmp, tmp_stride, src, src_off, src_stride, w, h, mx, my, filter_type,
+        BitDepth8,
+        tmp,
+        tmp_stride,
+        src,
+        src_off,
+        src_stride,
+        w,
+        h,
+        mx,
+        my,
+        filter_type,
     );
 }
 
@@ -572,7 +603,18 @@ pub fn w_mask_8bpc(
     ss_ver: bool,
 ) {
     w_mask(
-        BitDepth8, dst, dst_stride, tmp1, tmp2, w, h, mask, mask_stride, sign, ss_hor, ss_ver,
+        BitDepth8,
+        dst,
+        dst_stride,
+        tmp1,
+        tmp2,
+        w,
+        h,
+        mask,
+        mask_stride,
+        sign,
+        ss_hor,
+        ss_ver,
     );
 }
 
@@ -947,8 +989,7 @@ pub fn opfl_derive_mv<BD: BitDepth>(
                 tmp1[y * 64 + x] = (p0p - p1p) as i16;
             } else {
                 tmp0[y * 64 + x] = ((v + rnd - (v < 0) as i32) >> bd_min8) as i16;
-                tmp1[y * 64 + x] =
-                    ((p0p - p1p + rnd - (p1p > p0p) as i32) >> bd_min8) as i16;
+                tmp1[y * 64 + x] = ((p0p - p1p + rnd - (p1p > p0p) as i32) >> bd_min8) as i16;
             }
         }
     }
@@ -1187,7 +1228,19 @@ pub fn put_8tap_scaled_8bpc(
     filter_type: i32,
 ) {
     put_8tap_scaled(
-        BitDepth8, dst, dst_stride, src, src_off, src_stride, w, h, mx, my, dx, dy, filter_type,
+        BitDepth8,
+        dst,
+        dst_stride,
+        src,
+        src_off,
+        src_stride,
+        w,
+        h,
+        mx,
+        my,
+        dx,
+        dy,
+        filter_type,
     );
 }
 
@@ -1281,7 +1334,19 @@ pub fn prep_8tap_scaled_8bpc(
     filter_type: i32,
 ) {
     prep_8tap_scaled(
-        BitDepth8, tmp, tmp_stride, src, src_off, src_stride, w, h, mx, my, dx, dy, filter_type,
+        BitDepth8,
+        tmp,
+        tmp_stride,
+        src,
+        src_off,
+        src_stride,
+        w,
+        h,
+        mx,
+        my,
+        dx,
+        dy,
+        filter_type,
     );
 }
 
@@ -1501,9 +1566,13 @@ pub fn prep_bilin_scaled<BD: BitDepth>(
         }
 
         for x in 0..w {
-            tmp[tmp_p + x] =
-                bilin_rnd(mid[mid1_idx][x] as i32, mid[mid2_idx][x] as i32, dmy >> 6, 4) as i16
-                    - bias;
+            tmp[tmp_p + x] = bilin_rnd(
+                mid[mid1_idx][x] as i32,
+                mid[mid2_idx][x] as i32,
+                dmy >> 6,
+                4,
+            ) as i16
+                - bias;
         }
 
         my += dy;

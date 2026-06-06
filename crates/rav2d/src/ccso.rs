@@ -140,8 +140,7 @@ pub fn ccso_prep<BD: BitDepth>(
     let dx = CCSO_POS[ext_filter][1] as isize;
     let tmp_stride: usize = 68;
     let luma_offset = dx + dy * tmp_stride as isize;
-    let mut tmp_buf =
-        vec![BD::Pixel::default(); tmp_stride * (h.max(8) * (1 << ss_ver) + 4 + 4)];
+    let mut tmp_buf = vec![BD::Pixel::default(); tmp_stride * (h.max(8) * (1 << ss_ver) + 4 + 4)];
     let o = 2 * tmp_stride + 2;
 
     ccso_padding(

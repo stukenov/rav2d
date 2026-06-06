@@ -212,11 +212,7 @@ impl Picture {
     /// Number of storage bytes per sample (1 for 8bpc, 2 for HBD).
     #[inline]
     pub fn bytes_per_sample(&self) -> usize {
-        if self.is_hbd() {
-            2
-        } else {
-            1
-        }
+        if self.is_hbd() { 2 } else { 1 }
     }
 
     /// Row stride for plane `pl` expressed in **samples** (not bytes). Plane 0

@@ -1985,8 +1985,7 @@ pub fn intrabc_pred<BD: crate::pixel::BitDepth>(
         // integer copy
         for ry in 0..h {
             for x in 0..w {
-                plane[dst_off + ry * stride + x] =
-                    BD::Pixel::from_i32(srcbuf[ry * src_stride + x]);
+                plane[dst_off + ry * stride + x] = BD::Pixel::from_i32(srcbuf[ry * src_stride + x]);
             }
         }
     }

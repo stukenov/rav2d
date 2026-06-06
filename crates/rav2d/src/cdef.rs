@@ -28,20 +28,8 @@ pub fn cdef_padding_8bpc(
     edges: u8,
 ) {
     cdef_padding(
-        BitDepth8,
-        tmp,
-        tmp_stride,
-        src,
-        src_stride,
-        src_off,
-        left,
-        top,
-        top_off,
-        bottom,
-        bottom_off,
-        w,
-        h,
-        edges,
+        BitDepth8, tmp, tmp_stride, src, src_stride, src_off, left, top, top_off, bottom,
+        bottom_off, w, h, edges,
     );
 }
 
@@ -769,8 +757,7 @@ pub fn cdef_brow<BD: BitDepth>(
         }
 
         // Left 2x8 backups (toggled `bit`), one per plane, pre-CDEF.
-        let mut lr_bak: [[[[BD::Pixel; 2]; 8]; 3]; 2] =
-            [[[[BD::Pixel::default(); 2]; 8]; 3]; 2];
+        let mut lr_bak: [[[[BD::Pixel; 2]; 8]; 3]; 2] = [[[[BD::Pixel::default(); 2]; 8]; 3]; 2];
         let mut bit = 0usize;
         edges &= !CDEF_HAVE_LEFT;
         edges |= CDEF_HAVE_RIGHT;
