@@ -110,6 +110,19 @@ Phase-2 itx done (bit-exact, helps transform-heavy/intra). Next: SIMD the LR FIR
 (pc_wiener, ns_wiener single/multi, gdf compute_gradient/add), then inter MC helpers
 (opfl_derive_mv, sad_refine_mv), then deblock.
 
+## Filtered-decode throughput (after itx + LR SIMD, 2026-06-06) — the real metric
+With ALL in-loop filters on (deblock+cdef+ccso+wiener+gdf = real playback), dav/rav:
+| clip | rav MP/s | dav MP/s | dav/rav (ON) | (was OFF) |
+|---|---|---|---|---|
+| bus.352x288.l5.seg1 | 39.3 | 111.9 | **0.35x** | 0.11x |
+| bus.352x288.l10.deltaq1 | 11.7 | 31.7 | **0.37x** | 0.10x |
+| bus.352x288.l1.partial_lossless | 8.8 | 19.9 | **0.44x** | 0.24x |
+| bus.64x64.l5 | 3.7 | 26.9 | 0.14x | 0.06x |
+Filtered path is where decoding actually happens; rav2d is ~0.35–0.44x of C+NEON
+dav2d there on representative clips. LR SIMD gave ~7.5% end-to-end filtered (more in
+real streams). Remaining filtered hot spots to profile next: inter MC helpers
+(opfl_derive_mv, sad_refine_mv, mc_opfl), deblock, recon_b_inter_tip orchestration.
+
 ## Quick wins outside SIMD (do alongside)
 - Reuse scratch buffers instead of per-block `Vec::new()` allocations in the recon
   path (decode.rs allocates i16 tmp per block — a known cost).
