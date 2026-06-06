@@ -6,9 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  ci:
+  test:
+    name: test (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -35,7 +41,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install meson ninja nasm
 
-      - name: Build dav2d
+      - name: Build dav2d (conformance oracle)
         run: |
           cd dav2d
           meson setup build --default-library=both
@@ -50,9 +56,26 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
 
-      - name: cargo test
-        run: cargo test --workspace
+      - name: cargo test (lib)
+        run: cargo test -p rav2d --lib -- --test-threads=1
         env:
+          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
+      - name: cargo test (conformance, NEON/native)
+        run: cargo test -p rav2d --test conformance
+        env:
+          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
+      # On aarch64 the decoder dispatches MC/ipred to the NEON kernels; rerun the
+      # conformance corpus with the scalar Rust path forced on so both stay
+      # bit-exact. The macOS runner is aarch64.
+      - name: cargo test (conformance, scalar fallback)
+        if: runner.os == 'macOS'
+        run: cargo test -p rav2d --test conformance
+        env:
+          RAV2D_NEON_OFF: all
           DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
 
@@ -61,3 +84,20 @@ jobs:
         env:
           DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
+  # The production rav2d crate must package and build standalone — without the
+  # dav2d submodule — so it can be published to crates.io. This job removes the
+  # submodule before running the publish verification to prove the vendored NEON
+  # asm path (crates/rav2d/vendor/dav2d-asm) is self-contained.
+  publish-dry-run:
+    name: publish dry-run (rav2d standalone)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (no submodules)
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo publish --dry-run (rav2d)
+        run: cargo publish -p rav2d --dry-run
