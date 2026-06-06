@@ -15142,12 +15142,17 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                 if tu_eob[i][pl] != -1 {
                     let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
                     let mut txtp = tu_txtp[i][pl] as u32;
-                    // recon_tmpl.c:3916-3920: dpcm is intra-only; IntraBC takes
-                    // the inter_ddt branch instead.
+                    // recon_tmpl.c:3916-3921: the DPCM branch is
+                    // `lossless && b->intra && (sdp_active || !b->intrabc) && dpcm[1]`;
+                    // the inter-DDT branch is `seq_hdr->inter_ddt && !b->intra`.
+                    // The DDT branch keys off `!b->intra` — an IntraBC block has
+                    // `b->intra == 1`, so it takes NEITHER branch. This chroma tx
+                    // path only runs for intra/IntraBC blocks, so the DDT branch
+                    // never fires; applying it for IntraBC corrupts the transform.
                     if lossless && is_intra && unsafe { b.data.intra }.dpcm[1] != 0 {
                         txtp +=
                             ((1 + (uv_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
-                    } else if recon.frame.seq_inter_ddt && is_intrabc {
+                    } else if recon.frame.seq_inter_ddt && b.is_intra == 0 {
                         txtp += txtp & crate::tables::TX_DDT_MASK[uvtx] as u32;
                     }
                     let dst_plane: &mut [BD::Pixel] =
@@ -15838,12 +15843,17 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
             }
         }
 
-        // lossless dpcm txtp adjust (recon_tmpl.c:2655-2660). The dpcm branch is
-        // intra-only (`b->intra && !b->intrabc`); IntraBC takes the inter_ddt
-        // branch ((flip)adst -> (f)ddt) when `seq_hdr->inter_ddt`.
+        // lossless dpcm txtp adjust (recon_tmpl.c:2660-2665). dav2d gates the
+        // DPCM branch on `b->intra && !b->intrabc && b->dpcm[0]` and the inter-DDT
+        // ((flip)adst -> (f)ddt) branch on `seq_hdr->inter_ddt && !b->intra`.
+        // Crucially the DDT branch keys off `!b->intra`, NOT IntraBC: an IntraBC
+        // block has `b->intra == 1`, so it takes NEITHER branch. This luma tx
+        // walk only ever runs for intra/IntraBC blocks (`b.is_intra == 1`), so
+        // the DDT branch never fires here — applying it for IntraBC corrupts the
+        // residual transform type.
         if lossless && is_intra && unsafe { b.data.intra }.dpcm[0] != 0 {
             txtp += ((1 + (y_mode == IntraPredMode::VertPred as u8) as u32) as u32) << 8;
-        } else if recon.frame.seq_inter_ddt && is_intrabc {
+        } else if recon.frame.seq_inter_ddt && b.is_intra == 0 {
             txtp += txtp & crate::tables::TX_DDT_MASK[tx] as u32;
         }
 

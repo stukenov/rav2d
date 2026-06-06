@@ -341,16 +341,6 @@ pub fn residual_add<BD: crate::pixel::BitDepth>(
     dpcm_flag: u8,
 ) {
     match dpcm_flag {
-        0 => {
-            let mut ci = 0;
-            for y in 0..h {
-                for x in 0..w {
-                    let p = dst[y * stride + x].into();
-                    dst[y * stride + x] = bd.pixel_clip(p + ((c[ci] + rnd) >> shift));
-                    ci += 1;
-                }
-            }
-        }
         1 => {
             let mut ci = 0;
             for y in 0..h {
@@ -373,7 +363,20 @@ pub fn residual_add<BD: crate::pixel::BitDepth>(
                 }
             }
         }
-        _ => unreachable!(),
+        // dpcm_flag 0 — and any non-1/2 value, which is an invalid combination
+        // the C reference reaches only with asserts disabled: itx_tmpl.c's
+        // `switch (dpcm_flag) { default: assert(0); case 0: ... }` falls through
+        // from `default` into `case 0`, i.e. the plain non-DPCM residual add.
+        _ => {
+            let mut ci = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let p = dst[y * stride + x].into();
+                    dst[y * stride + x] = bd.pixel_clip(p + ((c[ci] + rnd) >> shift));
+                    ci += 1;
+                }
+            }
+        }
     }
 }
 

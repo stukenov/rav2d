@@ -1958,6 +1958,128 @@ fn bit_exact_full_clip_sweep() {
     }
 }
 
+/// Coverage gate for a decode path the shipped corpus never exercises. The whole
+/// conformance corpus is 4:2:0; monochrome (4:0:0) reconstruction was previously
+/// unverified end to end. `cov-monochrome-128x128.obu` (luma-only, no chroma
+/// planes, generated with the avm encoder, dav2d as reference) closes that gap:
+/// EVERY coding-order frame must reconstruct bit-exact vs dav2d, in-loop filters
+/// off on both decoders. Reuses the `full_clip_failures` best-match harness,
+/// whose plane extraction is layout-aware (I400 → Y only, no chroma).
+///
+/// This caught a real reconstruction bug: IntraBC luma/chroma residual incorrectly
+/// applied the inter-DDT transform mask. dav2d gates that mask on `!b->intra`, but
+/// an IntraBC block has `b->intra == 1`, so it must NOT take the DDT branch. The
+/// 4:2:0 corpus happened to mask the bug (its IntraBC blocks paired with CfL/cctx
+/// that overwrote the affected transform type); the monochrome vector exposes it.
+///
+/// The 4:2:0 (`cov-420-128x128.obu`) and multi-tile (`cov-multitile-416x240.obu`)
+/// vectors are covered by `coverage_decode_no_panic` and documented in
+/// `coverage_known_limitations` — see there for why they are not bit-exact gates.
+#[test]
+fn bit_exact_coverage_sweep() {
+    let clip = "cov-monochrome-128x128.obu";
+    let path = data(clip);
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let failures = full_clip_failures(&path);
+    if !failures.is_empty() {
+        panic!(
+            "monochrome (4:0:0) coverage clip not bit-exact:\n  {}",
+            failures
+                .iter()
+                .map(|f| format!("{clip}: {f}"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+    }
+    eprintln!("{clip}: full clip bit-exact (4:0:0 monochrome)");
+}
+
+/// Smoke gate for the coverage vectors: rav2d must DECODE them without panicking.
+/// For the two vectors that fully reconstruct (monochrome 4:0:0 and the 4:2:0
+/// keyframe) the first (intra) frame must have the right geometry/layout — I400
+/// must carry no chroma planes. The multi-tile vector is `require_frames=false`:
+/// both rav2d and dav2d's single-pass decoders desync on its keyframe entropy
+/// stream (see `coverage_known_limitations`), so we only require that rav2d fails
+/// GRACEFULLY (no panic) rather than that it produces a frame.
+#[test]
+fn coverage_decode_no_panic() {
+    // (clip, expected width, height, dav2d pixel layout: 0=I400, 1=I420, require_frames)
+    let cases = [
+        ("cov-420-128x128.obu", 128, 128, 1, true),
+        ("cov-monochrome-128x128.obu", 128, 128, 0, true),
+        ("cov-multitile-416x240.obu", 416, 240, 1, false),
+    ];
+    let mut checked = 0usize;
+    for (clip, w, h, layout, require_frames) in cases {
+        let path = data(clip);
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            continue;
+        }
+        checked += 1;
+        // rav2d_decode must return (no panic) for every vector.
+        let got = rav2d_decode(&path);
+        if !require_frames {
+            eprintln!(
+                "{clip}: decoded gracefully ({} frame(s), no panic)",
+                got.len()
+            );
+            continue;
+        }
+        assert!(!got.is_empty(), "{clip}: rav2d produced no frames");
+        let f0 = &got[0];
+        assert_eq!(
+            (f0.w, f0.h, f0.layout),
+            (w, h, layout),
+            "{clip}: frame 0 geometry/layout"
+        );
+        if layout == 0 {
+            assert!(
+                f0.planes[1].is_empty() && f0.planes[2].is_empty(),
+                "{clip}: I400 must have no chroma planes"
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "coverage_decode_no_panic: no vectors available"
+    );
+}
+
+/// Documents (and pins, via `#[ignore]`) the two coverage vectors that are NOT
+/// bit-exact gates, with the precise first divergence so the state is recorded:
+///
+/// * `cov-420-128x128.obu` — the keyframe (intra) is bit-exact, but the inter
+///   frames use compound / TIP prediction features that rav2d does not yet fully
+///   reconstruct (the entropy desyncs at the first such block, e.g. luma tx
+///   bx=16 by=12 on the first inter frame). rav2d emits the keyframe + 3 frames,
+///   dav2d emits 7 (with `output_invisible_frames`). The 4:2:0 path itself is
+///   already comprehensively gated by `bit_exact_full_clip_sweep`.
+///
+/// * `cov-multitile-416x240.obu` — the keyframe entropy stream desyncs at luma tx
+///   bx=64 by=4 (an out-of-range eob, `INT_MIN`) under single-pass decode. dav2d
+///   hits the identical desync at the identical block/MSAC state; its 2-pass task
+///   decoder merely swallows the error (the PASS_ENTROPY return is ignored in
+///   `decode.c`), so dav2d emits a partial keyframe whose pixels are not even
+///   stable across its own thread configs (MT vs `--threads 1` MD5s differ). The
+///   vector is therefore not bit-exact-matchable; it remains for the no-panic
+///   smoke gate above.
+#[test]
+#[ignore = "cov-420 inter (compound/TIP deferred) + cov-multitile (encoder-side single-pass desync); see doc comment"]
+fn coverage_known_limitations() {
+    for clip in ["cov-420-128x128.obu", "cov-multitile-416x240.obu"] {
+        let path = data(clip);
+        if !path.exists() {
+            continue;
+        }
+        let failures = full_clip_failures(&path);
+        assert!(failures.is_empty(), "{clip}: {}", failures.join("; "));
+    }
+}
+
 /// Reconstruct-and-compare a full clip with the FULL in-loop filter pipeline on
 /// both decoders (deblock + CDEF + CCSO + loop-restoration); returns one failure
 /// string per non-bit-exact plane. Same coding-order best-match harness as
