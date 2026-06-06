@@ -2531,6 +2531,12 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
                 if rtype_u8 == RestorationType::None as u8 {
                     continue;
                 }
+                // Restoration is active for this plane, so the LR mask is
+                // allocated for valid streams. Guard against an empty mask (a
+                // degenerate frame from a malformed header) before indexing it.
+                if lr_mask.is_empty() || lr_mask[0].lr[p].is_empty() {
+                    continue;
+                }
                 let tx = (4 * (bx - col_start)) >> ss_hor;
                 let ty = (4 * (by - row_start)) >> ss_ver;
                 let unit_sz_log2 = frame_hdr.restoration.unit_size[(p != 0) as usize] as i32;
@@ -2561,13 +2567,24 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
                 let lruh = imax(1, imin(th - fy + half_unit, sbh) >> unit_sz_log2);
                 let vsh = unit_sz_log2 - 7 + ss_ver;
                 let hsh = unit_sz_log2 - 7 + ss_hor;
+                // dav2d asserts vsh >= 0 && hsh >= 0 here but notes (FIXME) that
+                // unit_sz_log2 can be 6, giving a negative shift. The shift is a
+                // no-op when the corresponding loop count is 1 (x/_y == 0). Guard
+                // against the negative-shift overflow a malformed unit size can
+                // trigger; non-negative shifts keep dav2d's exact indexing.
+                let shl = |v: i32, s: i32| if s >= 0 { v << s } else { v >> (-s) };
                 let mut sb_idx = (by >> 6) * sb256w + (bx >> 6);
                 let start_unit_idx = (((by & 0x30) >> 2) + ((bx & 0x30) >> 4)) as usize;
 
                 for _y in 0..lruh {
                     for x in 0..lruw {
-                        let unit_idx = start_unit_idx;
-                        let lr_slot = (sb_idx + (x << hsh)) as usize;
+                        // For valid streams these indices are always in range;
+                        // clamp so a malformed unit-size/geometry can't index the
+                        // LR mask out of bounds (the entropy read still happens, so
+                        // MSAC stays in sync). No-op for valid input.
+                        let unit_idx = start_unit_idx.min(lr_mask[0].lr[p].len() - 1);
+                        let lr_slot =
+                            ((sb_idx + shl(x, hsh)).max(0) as usize).min(lr_mask.len() - 1);
                         let ns_plane = &frame_hdr.restoration.p[p].ns;
                         read_restoration_info(
                             msac,
@@ -2579,7 +2596,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
                             ns_plane,
                         );
                     }
-                    sb_idx += sb256w << vsh;
+                    sb_idx += shl(sb256w, vsh);
                 }
             }
         } // end if !is_tip_frame (loop-restoration info read)
