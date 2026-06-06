@@ -55,6 +55,7 @@ pub fn intra_prediction_edge(mode: u8) -> EdgeMask {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_intra_edges_8bpc(
     x: i32,
     y: i32,
@@ -73,7 +74,54 @@ pub fn prepare_intra_edges_8bpc(
     tl: &mut [u8],
     tl_o: usize,
 ) -> u8 {
+    prepare_intra_edges(
+        crate::pixel::BitDepth8,
+        x,
+        y,
+        w,
+        h,
+        n_tr,
+        n_bl,
+        dst,
+        dst_off,
+        stride,
+        prefilter_toplevel_sb_edge,
+        mode,
+        tw4,
+        th4,
+        intra_flags,
+        tl,
+        tl_o,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
+    bd: BD,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    n_tr: i32,
+    n_bl: i32,
+    dst: &[BD::Pixel],
+    dst_off: usize,
+    stride: usize,
+    prefilter_toplevel_sb_edge: Option<&[BD::Pixel]>,
+    mode: u8,
+    tw4: i32,
+    th4: i32,
+    intra_flags: i32,
+    tl: &mut [BD::Pixel],
+    tl_o: usize,
+) -> u8 {
+    use crate::pixel::Pixel;
     debug_assert!(y < h && x < w);
+    // dav2d ipred_prepare_tmpl.c: edge fills use ((1 << bd) >> 1) {+1,-1,+0}.
+    let mid = (bd.bitdepth_max() + 1) >> 1;
+    let fill_left = BD::Pixel::from_i32(mid + 1); // 129 @ 8bpc
+    let fill_top = BD::Pixel::from_i32(mid - 1); // 127 @ 8bpc
+    let fill_tl = BD::Pixel::from_i32(mid); // 128 @ 8bpc
 
     let mut is_dir = false;
     let enable_edge_filter = (intra_flags & ANGLE_USE_EDGE_FILTER_FLAG) != 0;
@@ -133,7 +181,7 @@ pub fn prepare_intra_edges_8bpc(
         e = intra_prediction_edge(DIP_PRED);
     }
 
-    let mut top_buf: &[u8] = dst;
+    let mut top_buf: &[BD::Pixel] = dst;
     let mut dst_top_off: usize = 0;
     let mut dst_top2_off: usize = 0;
     let mut top_stride_val: usize = stride;
@@ -217,11 +265,11 @@ pub fn prepare_intra_edges_8bpc(
                 }
             }
         } else {
-            let fill_val = if have_top { top_buf[dst_top_off] } else { 129 };
+            let fill_val = if have_top { top_buf[dst_top_off] } else { fill_left };
             let start = (left_base + 1 - sz as isize) as usize;
             tl[start..start + sz].fill(fill_val);
             if mrl_mul {
-                let fill_val2 = if have_top { top_buf[dst_top2_off] } else { 129 };
+                let fill_val2 = if have_top { top_buf[dst_top2_off] } else { fill_left };
                 let start2 = (left2_base + 1 - sz2 as isize) as usize;
                 tl[start2..start2 + sz2].fill(fill_val2);
             }
@@ -230,7 +278,7 @@ pub fn prepare_intra_edges_8bpc(
         debug_assert!(mode == IntraPredMode::SmoothVPred as u8);
         let bl_idx = (o - 1 - th as isize) as usize;
         if !have_left {
-            tl[bl_idx] = if have_top { top_buf[dst_top_off] } else { 129 };
+            tl[bl_idx] = if have_top { top_buf[dst_top_off] } else { fill_left };
         } else if n_bl <= 0 {
             let row = imin(th as i32, (h - y) << 2) as usize - 1;
             tl[bl_idx] = dst[dst_off + stride * row - 1];
@@ -286,11 +334,11 @@ pub fn prepare_intra_edges_8bpc(
             let fill_val = if have_left {
                 dst[dst_off - 1 - mrl_idx]
             } else {
-                127
+                fill_top
             };
             tl[top_base..top_base + sz].fill(fill_val);
             if mrl_mul {
-                let fill_val2 = if have_left { dst[dst_off - 1] } else { 127 };
+                let fill_val2 = if have_left { dst[dst_off - 1] } else { fill_top };
                 tl[top2_base..top2_base + sz2].fill(fill_val2);
             }
         }
@@ -298,7 +346,7 @@ pub fn prepare_intra_edges_8bpc(
         debug_assert!(mode == IntraPredMode::SmoothHPred as u8);
         let tr_idx = (o + 1) as usize + tw;
         if !have_top {
-            tl[tr_idx] = if have_left { dst[dst_off - 1] } else { 127 };
+            tl[tr_idx] = if have_left { dst[dst_off - 1] } else { fill_top };
         } else if n_tr <= 0 {
             let col = imin(tw as i32, (w - x) << 2) as usize - 1;
             tl[tr_idx] = top_buf[dst_top_off + col];
@@ -326,7 +374,7 @@ pub fn prepare_intra_edges_8bpc(
             } else if have_top {
                 top_buf[dst_top_off]
             } else {
-                128
+                fill_tl
             };
             let start = (o - mrl_idx as isize) as usize;
             tl[start..start + 2 * mrl_idx + 1].fill(v);
@@ -340,13 +388,15 @@ pub fn prepare_intra_edges_8bpc(
         } else if have_top {
             top_buf[dst_top2_off]
         } else {
-            128
+            fill_tl
         };
 
         if tl_filter {
-            let c =
-                tl[tl_o] as i32 + (tl[tl_o - 1] as i32 + tl[tl_o] as i32 + tl[tl_o + 1] as i32) * 5;
-            tl[tl_o] = ((c + 8) >> 4) as u8;
+            let c0: i32 = tl[tl_o].into();
+            let cm: i32 = tl[tl_o - 1].into();
+            let cp: i32 = tl[tl_o + 1].into();
+            let c = c0 + (cm + c0 + cp) * 5;
+            tl[tl_o] = BD::Pixel::from_i32((c + 8) >> 4);
         }
     }
 
