@@ -15,6 +15,52 @@
 //! (constants 64, 83, 35, … — see `dav2d/src/itx_1d.c` and `src/itx_1d.rs`). The
 //! two are not bit-identical, so itx stays on the scalar Rust kernels.
 //!
+//! The remaining dav2d NEON DSP families were surveyed for AV2-bit-exact wiring
+//! and all left on the scalar Rust kernels. Each diverges from AV2 in a way that
+//! makes the dav2d NEON unsafe to call (it would either compute the wrong result
+//! for AV2, or require an invasive struct-layout / decomposition rewrite that
+//! the bit-exact corpus cannot risk). The scalar Rust kernels ARE the correct
+//! AV2 implementation; matching dav2d's MC/ipred wins came precisely because
+//! those leaf kernels are pure pixel math AV2 never touched.
+//!
+//!   * msac (`arm/64/msac.S`): the AV2 fork DROPPED the multi-symbol decoder
+//!     (`decode_symbol_adapt4/8/16`) — the dominant entropy primitive — because
+//!     AV2 changed the symbol decoder to the `dav2d_msac_min_prob` form
+//!     (`v = (r*p>>10)<<3`); no `*symbol_adapt*_neon` symbol exists. Only the 4
+//!     bool/bypass primitives remain, and they read `MsacContext` by fixed byte
+//!     offset (BUF_POS=0, BUF_END=8, DIF=16, RNG=24, CNT=28, ALLOW_UPDATE_CDF=32)
+//!     — rav2d's `MsacContext` holds a borrow-checked `&[u8]` (fat ptr+len) with
+//!     no raw `buf_end`, so the layout cannot be matched without a pervasive,
+//!     load-bearing `#[repr(C)]` rewrite for only the minority bool paths.
+//!   * filmgrain (`arm/64/filmgrain.S`): the asm-offsets (`arm/asm-offsets.h`:
+//!     `FGD_SEED=0, FGD_SCALING_SHIFT=88, FGD_AR_COEFFS_Y=96, FGD_AR_COEFFS_UV=120`)
+//!     describe the AV1 `Dav2dFilmGrainData` (leading `seed`, split 24-entry
+//!     `ar_coeffs_y`/`ar_coeffs_uv`). AV2's `Dav2dFilmGrainData` was reorganized
+//!     (leading `chroma_scaling_from_luma`, unified `ar_coeffs[3][28]`, `seed`
+//!     moved into `Dav2dFrameHeader.film_grain`), so the offsets are STALE — the
+//!     NEON would read the wrong fields. Grain synthesis stays scalar.
+//!   * loopfilter/deblock (`arm/64/loopfilter.S`): dav2d DID port deblock to AV2
+//!     (the `lpf_*_sb_*` ABI takes a packed `vmask` + `l[4]` level grid + an
+//!     `Av2FilterLUT` with separate q/side thresholds), but rav2d's scalar
+//!     deblock uses a different decomposition (`deblock_sbrow_cols/rows` with
+//!     per-edge q_thr/side_thr LUTs, no `vmask` bitmask). Wiring would require
+//!     restructuring the most complex filter module to emit that exact mask/lut
+//!     layout — too high a bit-exact risk for the win.
+//!   * cdef (`arm/64/cdef.S`): dav2d splits CDEF into `cdef_padding{4,8}` (writes
+//!     a `uint16_t` tmp buffer) + `cdef_filter{4,8}`; rav2d uses a fused
+//!     `cdef_filter_block_8bpc` and folds CCSO into the CDEF superblock-row loop.
+//!     The decompositions don't line up at a kernel boundary that can be guard-
+//!     tested cheaply; left scalar.
+//!   * refmvs (`arm/64/refmvs.S`): `splat_mv` loads a 16-byte `refmvs_block`
+//!     template and writes 48-byte rows assuming the AV1 packing, but rav2d's
+//!     `Block` is the 64-byte AV2-extended struct (adds `subpel_filter`,
+//!     `warp_type`, `lmv[2]`, `m[6]`), and rav2d's `splat_mv` also splats the
+//!     temporal MV grid in the same pass. Incompatible; left scalar. (`load_tmvs`
+//!     is `#if ARCH_AARCH64 && 0`-disabled in dav2d itself.)
+//!
+//! There is no `looprestoration.S`: AV2's Wiener/PC-Wiener/GDF loop restoration
+//! has no NEON in dav2d, so LR is scalar by construction.
+//!
 //! The dav2d submodule is referenced read-only; nothing under `dav2d/src` or
 //! `dav2d/include` is modified.
 //!
