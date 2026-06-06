@@ -95,6 +95,21 @@ first avg test MUST confirm `wide::i32x8 >>` is arithmetic (sign-propagating).
 (serial state machine), grain generate (serial LFSR/AR), `generate_scaling` (one-time LUT),
 `filter_choice` deblock (control-flow-bound), `cfl_mhccp`/`ipred_dip` dot (per-lane dyn shift).
 
+## PROFILING PIVOT (2026-06-06, `sample` on deltaq1, filters ON)
+Real (filtered) decode self-time leaders — loop restoration dominates, itx is noise:
+- `looprestoration::lr_stripe_8bpc` — **1765** (the Wiener/PC-Wiener/GDF FIR) ← #1 BY FAR
+- `looprestoration::compute_gradient_row_8bpc` — 94 (GDF gradient)
+- `decode::recon_b_inter_tip` 159, `mc::opfl_derive_mv` 121, `refmvs::load_tmvs` 121
+- `deblock::deblock_bd` 29; `mc::mask_fn` 13; `mc::avg` 6
+- `itx_1d::inv_dct_1d` 7, `inv_dct_1d_x8` 5  ← itx now negligible in filtered decode ✓
+(madvise/init_wedge_masks/subsample_420 noise = profile harness re-opens Decoder each
+iter; amortized in real streams — discount.)
+
+=> **Reprioritize: loop restoration (#7) is actually the #1 lever for filtered playback.**
+Phase-2 itx done (bit-exact, helps transform-heavy/intra). Next: SIMD the LR FIRs
+(pc_wiener, ns_wiener single/multi, gdf compute_gradient/add), then inter MC helpers
+(opfl_derive_mv, sad_refine_mv), then deblock.
+
 ## Quick wins outside SIMD (do alongside)
 - Reuse scratch buffers instead of per-block `Vec::new()` allocations in the recon
   path (decode.rs allocates i16 tmp per block — a known cost).
