@@ -766,9 +766,14 @@ pub fn parse_frame_hdr(
             return Err(Rav2dError::InvalidData);
         }
         if gb.get_bit() != 0 {
-            // STUB: parse picture_order_count for show_existing_frame (AV2 §5.9.2)
+            // picture_order_count (AV2 §5.9.2): the reference decoder dav2d reads
+            // this flag bit but does not consume the POC payload (obu.c:1054-1056
+            // `// FIXME poc`). Match the reference exactly — reading more bits here
+            // would desync from dav2d. Left intentionally empty.
         }
-        // STUB: parse/copy film grain params for show_existing_frame (AV2 §5.9.31)
+        // film_grain_params copy for show_existing_frame (AV2 §5.9.31): dav2d also
+        // leaves this unimplemented (obu.c:1057 `// FIXME filmgrain`). No bits are
+        // consumed by the reference at this point; match it.
         return Ok(hdr);
     }
 
@@ -900,7 +905,9 @@ pub fn parse_frame_hdr(
             hdr.n_ref_frames = get_ref_frames(&mut hdr, seqhdr, refs, true) as u8;
         }
 
-        // STUB: parse base_resolution_update syntax for inter frames (AV2 §5.9.6)
+        // base_resolution_update (AV2 §5.9.6): not parsed by the reference decoder
+        // dav2d either (obu.c:1219 `// FIXME bru`). No bits are consumed here in the
+        // reference, so none are consumed here. Match dav2d exactly.
 
         if seqhdr.ref_frame_mvs {
             hdr.use_ref_frame_mvs = gb.get_bit() as u8;
@@ -981,7 +988,12 @@ pub fn parse_frame_hdr(
                 }
             }
             if seqhdr.tip_explicit_qp {
-                // STUB: parse yac_delta and conditional u/v ac delta for TIP explicit QP (AV2 §5.9.17)
+                // TIP explicit QP: yac_delta and (sometimes) u/v ac delta (AV2
+                // §5.9.17). The reference decoder dav2d does not parse these yet
+                // (obu.c:1302-1303 `// FIXME yac and (sometimes) u/v ac delta`).
+                // No bits are consumed by the reference here; match it. When
+                // tip_explicit_qp is unset, quant.yac is derived from the two TIP
+                // reference frames (the branch below), as in dav2d.
             } else {
                 let ref1hdr = refs[hdr.refidx[hdr.tip.r#ref[0] as usize] as usize]
                     .p
