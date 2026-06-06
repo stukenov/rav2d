@@ -1,3 +1,5 @@
+use wide::i32x8;
+
 use crate::levels::{N_TX_1D_TYPES, N_TX_SIZES};
 
 pub type Itx1dFn = fn(c: &mut [i32], stride: usize);
@@ -236,6 +238,213 @@ fn inv_identity32_1d(c: &mut [i32], stride: usize) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SoA-batched (`x8`) inverse transforms — used by `inv_txfm_add`'s second pass
+// (the stride-`sw` column transform). Eight adjacent columns are processed per
+// call as an `i32x8` lane vector: column `x..x+8` at transform position `p` is
+// the contiguous slice `c[base + p*stride .. +8]`, so every butterfly operand
+// is one contiguous load. The math mirrors the scalar transforms above exactly
+// (pure i32 arithmetic, no rounding), so the result is bit-identical; the unit
+// tests assert this against the scalar fns column-by-column.
+
+/// `(&mut [i32], base, stride)` — vectorized 1-D transform over 8 columns.
+pub type Itx1dFnX8 = fn(&mut [i32], usize, usize);
+
+#[inline(always)]
+fn ldx8(c: &[i32], off: usize) -> i32x8 {
+    i32x8::from([
+        c[off],
+        c[off + 1],
+        c[off + 2],
+        c[off + 3],
+        c[off + 4],
+        c[off + 5],
+        c[off + 6],
+        c[off + 7],
+    ])
+}
+
+#[inline(always)]
+fn stx8(c: &mut [i32], off: usize, v: i32x8) {
+    c[off..off + 8].copy_from_slice(&v.to_array());
+}
+
+#[inline(always)]
+fn mulc(v: i32x8, k: i32) -> i32x8 {
+    v * i32x8::splat(k)
+}
+
+fn inv_dct_1d_x8(c: &mut [i32], base: usize, stride: usize, mat: &[i8], n: usize) {
+    let zero = i32x8::splat(0);
+    let mut a = [zero; 16];
+    let mut b = [zero; 16];
+    let k = n * 2 - 1;
+    let mut mi = 0;
+    for i in 0..n {
+        let mut sum = zero;
+        let mut j = 1;
+        while j <= k {
+            sum += mulc(ldx8(c, base + j * stride), mat[mi] as i32);
+            mi += 1;
+            j += 2;
+        }
+        a[i] = ldx8(c, base + i * 2 * stride);
+        b[i] = sum;
+    }
+    for i in 0..n {
+        stx8(c, base + i * stride, a[i] + b[i]);
+        stx8(c, base + (k - i) * stride, a[i] - b[i]);
+    }
+}
+
+fn inv_dct4_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    let c0 = ldx8(c, base);
+    let c1 = ldx8(c, base + stride);
+    let c2 = ldx8(c, base + 2 * stride);
+    let c3 = ldx8(c, base + 3 * stride);
+    let a0 = mulc(c0, 64) + mulc(c2, 64);
+    let a1 = mulc(c0, 64) - mulc(c2, 64);
+    let b0 = mulc(c1, 83) + mulc(c3, 35);
+    let b1 = mulc(c1, 35) - mulc(c3, 83);
+    stx8(c, base, a0 + b0);
+    stx8(c, base + stride, a1 + b1);
+    stx8(c, base + 2 * stride, a1 - b1);
+    stx8(c, base + 3 * stride, a0 - b0);
+}
+
+fn inv_dct8_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dct4_1d_x8(c, base, 2 * stride);
+    inv_dct_1d_x8(c, base, stride, &DCT8_KERNEL, 4);
+}
+
+fn inv_dct16_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dct8_1d_x8(c, base, 2 * stride);
+    inv_dct_1d_x8(c, base, stride, &DCT16_KERNEL, 8);
+}
+
+fn inv_dct32_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dct16_1d_x8(c, base, 2 * stride);
+    inv_dct_1d_x8(c, base, stride, &DCT32_KERNEL, 16);
+}
+
+fn inv_dst_1d_x8(c: &mut [i32], base: usize, stride: usize, mat: &[i8], n: usize, flip: bool) {
+    let zero = i32x8::splat(0);
+    let mut sums = [zero; 16];
+    let mut mi = 0;
+    for sum in sums.iter_mut().take(n) {
+        let mut acc = zero;
+        for j in 0..n {
+            acc += mulc(ldx8(c, base + j * stride), mat[mi] as i32);
+            mi += 1;
+        }
+        *sum = acc;
+    }
+    if flip {
+        for i in 0..n {
+            stx8(c, base + (n - 1 - i) * stride, sums[i]);
+        }
+    } else {
+        for i in 0..n {
+            stx8(c, base + i * stride, sums[i]);
+        }
+    }
+}
+
+fn inv_adst4_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &ADST4_KERNEL, 4, false);
+}
+fn inv_adst8_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &ADST8_KERNEL, 8, false);
+}
+fn inv_adst16_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &ADST16_KERNEL, 16, false);
+}
+fn inv_flipadst4_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &FLIPADST4_KERNEL, 4, false);
+}
+fn inv_flipadst8_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &ADST8_KERNEL, 8, true);
+}
+fn inv_flipadst16_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &FLIPADST16_KERNEL, 16, false);
+}
+fn inv_ddt8_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &DDT8_KERNEL, 8, false);
+}
+fn inv_ddt16_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &DDT16_KERNEL, 16, false);
+}
+fn inv_flipddt8_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &DDT8_KERNEL, 8, true);
+}
+fn inv_flipddt16_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    inv_dst_1d_x8(c, base, stride, &DDT16_KERNEL, 16, true);
+}
+
+fn inv_identity4_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    for i in 0..4 {
+        let off = base + stride * i;
+        stx8(c, off, mulc(ldx8(c, off), 128));
+    }
+}
+fn inv_identity8_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    for i in 0..8 {
+        let off = base + stride * i;
+        stx8(c, off, mulc(ldx8(c, off), 181));
+    }
+}
+fn inv_identity16_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    for i in 0..16 {
+        let off = base + stride * i;
+        stx8(c, off, mulc(ldx8(c, off), 256));
+    }
+}
+fn inv_identity32_1d_x8(c: &mut [i32], base: usize, stride: usize) {
+    for i in 0..32 {
+        let off = base + stride * i;
+        stx8(c, off, mulc(ldx8(c, off), 362));
+    }
+}
+
+/// SoA-batched counterpart of [`TX1D_FNS`] (same `[tx_size][tx_1d_type]` layout).
+pub static TX1D_FNS_X8: [[Option<Itx1dFnX8>; N_TX_1D_TYPES - 1]; N_TX_SIZES] = {
+    const DCT: usize = 0;
+    const IDENTITY: usize = 1;
+    const ADST: usize = 2;
+    const FLIPADST: usize = 3;
+    const DDT: usize = 4;
+    const FLIPDDT: usize = 5;
+    const NONE: Option<Itx1dFnX8> = None;
+
+    let mut t = [[NONE; N_TX_1D_TYPES - 1]; N_TX_SIZES];
+
+    t[0][DCT] = Some(inv_dct4_1d_x8 as Itx1dFnX8);
+    t[0][IDENTITY] = Some(inv_identity4_1d_x8);
+    t[0][ADST] = Some(inv_adst4_1d_x8);
+    t[0][FLIPADST] = Some(inv_flipadst4_1d_x8);
+
+    t[1][DCT] = Some(inv_dct8_1d_x8);
+    t[1][IDENTITY] = Some(inv_identity8_1d_x8);
+    t[1][ADST] = Some(inv_adst8_1d_x8);
+    t[1][FLIPADST] = Some(inv_flipadst8_1d_x8);
+    t[1][DDT] = Some(inv_ddt8_1d_x8);
+    t[1][FLIPDDT] = Some(inv_flipddt8_1d_x8);
+
+    t[2][DCT] = Some(inv_dct16_1d_x8);
+    t[2][IDENTITY] = Some(inv_identity16_1d_x8);
+    t[2][ADST] = Some(inv_adst16_1d_x8);
+    t[2][FLIPADST] = Some(inv_flipadst16_1d_x8);
+    t[2][DDT] = Some(inv_ddt16_1d_x8);
+    t[2][FLIPDDT] = Some(inv_flipddt16_1d_x8);
+
+    t[3][DCT] = Some(inv_dct32_1d_x8);
+    t[3][IDENTITY] = Some(inv_identity32_1d_x8);
+
+    t[4][DCT] = Some(inv_dct32_1d_x8);
+
+    t
+};
+
 pub fn inv_wht4_1d(c: &mut [i32], stride: usize) {
     let in0 = c[0 * stride];
     let in1 = c[stride];
@@ -418,6 +627,53 @@ mod tests {
         assert!(TX1D_FNS[4][0].is_some()); // TX_64X64 DCT
         assert!(TX1D_FNS[3][2].is_none()); // TX_32X32 ADST = None
         assert!(TX1D_FNS[4][1].is_none()); // TX_64X64 Identity = None
+    }
+
+    #[test]
+    fn x8_transforms_match_scalar() {
+        // Each SoA `x8` transform must equal the scalar transform applied to
+        // each of its 8 columns independently (this is exactly how the second
+        // pass of `inv_txfm_add` invokes them).
+        let pairs: &[(&str, Itx1dFn, Itx1dFnX8)] = &[
+            ("dct4", inv_dct4_1d, inv_dct4_1d_x8),
+            ("dct8", inv_dct8_1d, inv_dct8_1d_x8),
+            ("dct16", inv_dct16_1d, inv_dct16_1d_x8),
+            ("dct32", inv_dct32_1d, inv_dct32_1d_x8),
+            ("id4", inv_identity4_1d, inv_identity4_1d_x8),
+            ("id8", inv_identity8_1d, inv_identity8_1d_x8),
+            ("id16", inv_identity16_1d, inv_identity16_1d_x8),
+            ("id32", inv_identity32_1d, inv_identity32_1d_x8),
+            ("adst4", inv_adst4_1d, inv_adst4_1d_x8),
+            ("adst8", inv_adst8_1d, inv_adst8_1d_x8),
+            ("adst16", inv_adst16_1d, inv_adst16_1d_x8),
+            ("flipadst4", inv_flipadst4_1d, inv_flipadst4_1d_x8),
+            ("flipadst8", inv_flipadst8_1d, inv_flipadst8_1d_x8),
+            ("flipadst16", inv_flipadst16_1d, inv_flipadst16_1d_x8),
+            ("ddt8", inv_ddt8_1d, inv_ddt8_1d_x8),
+            ("ddt16", inv_ddt16_1d, inv_ddt16_1d_x8),
+            ("flipddt8", inv_flipddt8_1d, inv_flipddt8_1d_x8),
+            ("flipddt16", inv_flipddt16_1d, inv_flipddt16_1d_x8),
+        ];
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut rng = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // ±~2^19, matching the post-row-clip intermediate range.
+            (state as i32) >> 12
+        };
+        let stride = 8usize;
+        let len = 64 * stride;
+        for (name, scalar, x8) in pairs {
+            let base: Vec<i32> = (0..len).map(|_| rng()).collect();
+            let mut a = base.clone();
+            x8(&mut a, 0, stride);
+            let mut b = base.clone();
+            for col in 0..8 {
+                scalar(&mut b[col..], stride);
+            }
+            assert_eq!(a, b, "x8 mismatch in {name}");
+        }
     }
 
     #[test]

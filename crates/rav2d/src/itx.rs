@@ -1,5 +1,5 @@
 use crate::intops::{iclip, imin};
-use crate::itx_1d::{TX1D_FNS, inv_wht_wht_4x4, residual_add};
+use crate::itx_1d::{TX1D_FNS, TX1D_FNS_X8, inv_wht_wht_4x4, residual_add};
 use crate::pixel::BitDepth;
 use crate::scan::LAST_EOB_PER_COL;
 use crate::tables::{TX_SHIFT, TXFM_DIMENSIONS};
@@ -156,8 +156,17 @@ pub fn inv_txfm_add<BD: BitDepth>(
         tmp[i] = iclip((tmp[i] + rnd0) >> shift0, row_clip_min, row_clip_max);
     }
 
-    for x in 0..sw {
+    let second_1d_fn_x8 = TX1D_FNS_X8[t_dim.lh as usize][((txtp >> 5) & 7) as usize];
+    let mut x = 0;
+    if let Some(f8) = second_1d_fn_x8 {
+        while x + 8 <= sw {
+            f8(&mut tmp, x, sw);
+            x += 8;
+        }
+    }
+    while x < sw {
         second_1d_fn(&mut tmp[x..], sw);
+        x += 1;
     }
 
     if std::env::var("RAV2D_ITXTMP").is_ok() && tx == 1 && txtp == 165 {
