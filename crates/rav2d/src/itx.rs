@@ -1,12 +1,40 @@
 use crate::intops::{iclip, imin};
-use crate::itx_1d::{TX1D_FNS, inv_wht_wht_4x4, residual_add_8bpc};
+use crate::itx_1d::{TX1D_FNS, inv_wht_wht_4x4, residual_add};
+use crate::pixel::BitDepth;
 use crate::scan::LAST_EOB_PER_COL;
 use crate::tables::{TX_SHIFT, TXFM_DIMENSIONS};
 
 const WHT_WHT: u32 = 6 | (6 << 5);
 
+/// 8bpc inverse transform + add — byte-identical to the prior kernel.
+#[inline]
 pub fn inv_txfm_add_8bpc(
     dst: &mut [u8],
+    dst_off: usize,
+    stride: usize,
+    coeff: &mut [i32],
+    txtp: u32,
+    eob: i32,
+    tx: usize,
+) {
+    inv_txfm_add(
+        crate::pixel::BitDepth8,
+        dst,
+        dst_off,
+        stride,
+        coeff,
+        txtp,
+        eob,
+        tx,
+    );
+}
+
+/// Inverse transform of `coeff` followed by clipped add into `dst`
+/// (`inv_txfm_add_c` in `itx_tmpl.c`). Generic over bit depth: the row-clip
+/// intermediate range and the final pixel clip both scale with `bd`.
+pub fn inv_txfm_add<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
     dst_off: usize,
     stride: usize,
     coeff: &mut [i32],
@@ -20,7 +48,7 @@ pub fn inv_txfm_add_8bpc(
         inv_wht_wht_4x4(&coeff[..16].try_into().unwrap(), &mut tmp);
         coeff[..16].fill(0);
         let dpcm_flag = (txtp >> 8) as u8;
-        residual_add_8bpc(&mut dst[dst_off..], stride, &tmp, 4, 4, 0, 0, dpcm_flag);
+        residual_add(bd, &mut dst[dst_off..], stride, &tmp, 4, 4, 0, 0, dpcm_flag);
         return;
     }
 
@@ -42,8 +70,8 @@ pub fn inv_txfm_add_8bpc(
         dc = (dc + rnd) >> shift;
         for y in 0..h {
             for x in 0..w {
-                dst[dst_off + y * stride + x] =
-                    iclip(dst[dst_off + y * stride + x] as i32 + dc, 0, 255) as u8;
+                let p = dst[dst_off + y * stride + x].into();
+                dst[dst_off + y * stride + x] = bd.pixel_clip(p + dc);
             }
         }
         return;
@@ -53,8 +81,14 @@ pub fn inv_txfm_add_8bpc(
     let second_1d_fn = TX1D_FNS[t_dim.lh as usize][((txtp >> 5) & 7) as usize].unwrap();
     let sh = imin(h as i32, 32) as usize;
     let sw = imin(w as i32, 32) as usize;
-    let row_clip_min = i16::MIN as i32;
-    let row_clip_max = i16::MAX as i32;
+    // itx_tmpl.c:149-154 — 8bpc uses the INT16 range; HBD widens it with the
+    // coded depth: row_clip_min = (~bitdepth_max) << 7, row_clip_max = ~min.
+    let (row_clip_min, row_clip_max) = if BD::BPC == 8 {
+        (i16::MIN as i32, i16::MAX as i32)
+    } else {
+        let min = ((!bd.bitdepth_max() as u32) << 7) as i32;
+        (min, !min)
+    };
 
     let mut tmp = [0i32; 32 * 32];
     let mut col = 0usize;
@@ -143,10 +177,10 @@ pub fn inv_txfm_add_8bpc(
                     ci += 1;
                     let d0 = dst_off + y * stride + x;
                     let d1 = dst_off + (y + 1) * stride + x;
-                    dst[d0] = iclip(dst[d0] as i32 + cf, 0, 255) as u8;
-                    dst[d0 + 1] = iclip(dst[d0 + 1] as i32 + cf, 0, 255) as u8;
-                    dst[d1] = iclip(dst[d1] as i32 + cf, 0, 255) as u8;
-                    dst[d1 + 1] = iclip(dst[d1 + 1] as i32 + cf, 0, 255) as u8;
+                    dst[d0] = bd.pixel_clip(dst[d0].into() + cf);
+                    dst[d0 + 1] = bd.pixel_clip(dst[d0 + 1].into() + cf);
+                    dst[d1] = bd.pixel_clip(dst[d1].into() + cf);
+                    dst[d1 + 1] = bd.pixel_clip(dst[d1 + 1].into() + cf);
                 }
             }
         } else {
@@ -156,8 +190,8 @@ pub fn inv_txfm_add_8bpc(
                     let cf = (tmp[ci] + rnd1) >> shift1;
                     ci += 1;
                     let d = dst_off + y * stride + x;
-                    dst[d] = iclip(dst[d] as i32 + cf, 0, 255) as u8;
-                    dst[d + 1] = iclip(dst[d + 1] as i32 + cf, 0, 255) as u8;
+                    dst[d] = bd.pixel_clip(dst[d].into() + cf);
+                    dst[d + 1] = bd.pixel_clip(dst[d + 1].into() + cf);
                 }
             }
         }
@@ -169,13 +203,14 @@ pub fn inv_txfm_add_8bpc(
                 ci += 1;
                 let d0 = dst_off + y * stride + x;
                 let d1 = dst_off + (y + 1) * stride + x;
-                dst[d0] = iclip(dst[d0] as i32 + cf, 0, 255) as u8;
-                dst[d1] = iclip(dst[d1] as i32 + cf, 0, 255) as u8;
+                dst[d0] = bd.pixel_clip(dst[d0].into() + cf);
+                dst[d1] = bd.pixel_clip(dst[d1].into() + cf);
             }
         }
     } else {
         let dpcm_flag = (txtp >> 8) as u8;
-        residual_add_8bpc(
+        residual_add(
+            bd,
             &mut dst[dst_off..],
             stride,
             &tmp,
@@ -191,6 +226,13 @@ pub fn inv_txfm_add_8bpc(
 pub fn cctx_8bpc(u: &mut [i32], v: &mut [i32], angle: &[i16; 3], sz: usize) {
     use crate::itx_1d::cctx;
     cctx(u, v, angle, sz, 8);
+}
+
+/// Cross-component transform clip at the coded bit depth (`cctx_c` in
+/// `itx_tmpl.c`; the clip window is `±(1 << (bd + 7))`).
+pub fn cctx_bd<BD: BitDepth>(bd: BD, u: &mut [i32], v: &mut [i32], angle: &[i16; 3], sz: usize) {
+    use crate::itx_1d::cctx;
+    cctx(u, v, angle, sz, bd.bitdepth() as i32);
 }
 
 #[cfg(test)]
@@ -242,5 +284,43 @@ mod tests {
         coeff[0] = 10000;
         inv_txfm_add_8bpc(&mut dst, 0, 16, &mut coeff, 0, 0, 0);
         assert_eq!(dst[0], 255);
+    }
+
+    #[test]
+    fn test_inv_txfm_add_8bpc_matches_generic() {
+        // The 8bpc wrapper must be byte-identical to inv_txfm_add::<BitDepth8>.
+        let mut a = vec![100u8; 16 * 8];
+        let mut b = a.clone();
+        let mut ca = vec![0i32; 64];
+        ca[0] = 137;
+        ca[5] = -42;
+        let mut cb = ca.clone();
+        inv_txfm_add_8bpc(&mut a, 0, 16, &mut ca, 0, 5, 1);
+        inv_txfm_add(crate::pixel::BitDepth8, &mut b, 0, 16, &mut cb, 0, 5, 1);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_inv_txfm_add_hbd_clamp_10bit() {
+        // 10-bit pixels clip to [0, 1023], not [0, 255].
+        let bd = crate::pixel::BitDepth16::new(10);
+        let mut dst = vec![1000u16; 16 * 4];
+        let mut coeff = vec![0i32; 16];
+        coeff[0] = 1_000_000;
+        inv_txfm_add(bd, &mut dst, 0, 16, &mut coeff, 0, 0, 0);
+        assert_eq!(dst[0], 1023);
+        assert_eq!(coeff[0], 0);
+    }
+
+    #[test]
+    fn test_inv_txfm_add_hbd_dc_value_10bit() {
+        // A small positive DC must lift a mid-grey 10-bit pixel without
+        // clamping (value stays well below 1023).
+        let bd = crate::pixel::BitDepth16::new(10);
+        let mut dst = vec![512u16; 16 * 4];
+        let mut coeff = vec![0i32; 16];
+        coeff[0] = 64;
+        inv_txfm_add(bd, &mut dst, 0, 16, &mut coeff, 0, 0, 0);
+        assert!(dst[0] > 512 && dst[0] < 1023, "dst[0]={}", dst[0]);
     }
 }

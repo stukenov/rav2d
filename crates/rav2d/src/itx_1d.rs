@@ -327,8 +327,11 @@ pub static TX1D_FNS: [[Option<Itx1dFn>; N_TX_1D_TYPES - 1]; N_TX_SIZES] = {
     t
 };
 
-pub fn residual_add_8bpc(
-    dst: &mut [u8],
+/// Generic residual add (`residual_add` in `itx_tmpl.c`). `dst` holds samples of
+/// type `BD::Pixel`; the reconstructed value is clipped into `[0, bitdepth_max]`.
+pub fn residual_add<BD: crate::pixel::BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
     stride: usize,
     c: &[i32],
     w: usize,
@@ -342,11 +345,8 @@ pub fn residual_add_8bpc(
             let mut ci = 0;
             for y in 0..h {
                 for x in 0..w {
-                    dst[y * stride + x] = iclip(
-                        dst[y * stride + x] as i32 + ((c[ci] + rnd) >> shift),
-                        0,
-                        255,
-                    ) as u8;
+                    let p = dst[y * stride + x].into();
+                    dst[y * stride + x] = bd.pixel_clip(p + ((c[ci] + rnd) >> shift));
                     ci += 1;
                 }
             }
@@ -357,7 +357,8 @@ pub fn residual_add_8bpc(
                 let mut acc = 0i32;
                 for x in 0..w {
                     acc += (c[ci] + rnd) >> shift;
-                    dst[y * stride + x] = iclip(dst[y * stride + x] as i32 + acc, 0, 255) as u8;
+                    let p = dst[y * stride + x].into();
+                    dst[y * stride + x] = bd.pixel_clip(p + acc);
                     ci += 1;
                 }
             }
@@ -367,12 +368,38 @@ pub fn residual_add_8bpc(
                 let mut acc = 0i32;
                 for y in 0..h {
                     acc += (c[y * w + x] + rnd) >> shift;
-                    dst[y * stride + x] = iclip(dst[y * stride + x] as i32 + acc, 0, 255) as u8;
+                    let p = dst[y * stride + x].into();
+                    dst[y * stride + x] = bd.pixel_clip(p + acc);
                 }
             }
         }
         _ => unreachable!(),
     }
+}
+
+/// 8bpc residual add — byte-identical to the prior hand-written kernel.
+#[inline]
+pub fn residual_add_8bpc(
+    dst: &mut [u8],
+    stride: usize,
+    c: &[i32],
+    w: usize,
+    h: usize,
+    rnd: i32,
+    shift: i32,
+    dpcm_flag: u8,
+) {
+    residual_add(
+        crate::pixel::BitDepth8,
+        dst,
+        stride,
+        c,
+        w,
+        h,
+        rnd,
+        shift,
+        dpcm_flag,
+    );
 }
 
 #[cfg(test)]
