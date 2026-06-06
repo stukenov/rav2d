@@ -1589,6 +1589,16 @@ pub fn read_tx_part(
             }
         }
     }
+
+    // For valid streams the CDF only ever selects a tx partition that is legal
+    // for this block size; dav2d's recon (`tp[b->tx_part] == -1`) bails on the
+    // invalid combinations a corrupted stream can produce. Guard here so every
+    // downstream `TX_PART_TBL[bs][tx_part]` (an i8 with a -1 sentinel) lookup is
+    // safe: fall back to the always-valid TX_PARTITION_NONE. No-op for valid
+    // input, where the selected partition is never -1.
+    if crate::tables::TX_PART_TBL[bs_idx][b.tx_part as usize] < 0 {
+        b.tx_part = TxPartition::None as u8;
+    }
 }
 
 pub fn read_restoration_info(
@@ -3598,8 +3608,14 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
         let pc_subclass_lut: &[u8] = &crate::tables::PC_WIENER_SUB_CLASSIFY[widx];
         let pc_filters: &[[i16; 13]] = &crate::tables::PC_WIENER_FILTERS[widx];
         let ns_subclass_lut: &[u8] = match lf.ns_subclass_class_idx {
-            Some(ci) => &crate::tables::PC_WIENER_SUB_CLASSIFY_NS[widx][ci],
-            None => &[],
+            // `ci` is derived from num_classes_idx (parsed get_bits(3) → 0..7), so
+            // ci = num_classes_idx - 1 ∈ 0..6; clamp defensively to the table bound.
+            Some(ci) => &crate::tables::PC_WIENER_SUB_CLASSIFY_NS[widx][ci.min(6)],
+            // For valid streams the multi-class NS path only runs when this is Some
+            // (plane 0 num_classes_idx > 0). A malformed stream can still select the
+            // NsMulti per-unit path; fall back to a valid (non-empty) LUT bucket so
+            // classification never indexes an empty slice. No-op for valid input.
+            None => &crate::tables::PC_WIENER_SUB_CLASSIFY_NS[widx][0],
         };
         let ctx = crate::looprestoration::LrContext {
             dsp_lr: &dsp_lr,
@@ -8861,7 +8877,7 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     let v_mul = 4 >> plss_ver;
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
-    let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
+    let ref_data: (&[BD::Pixel], i32, i32) = match ref_pic.data[pl] {
         Some(p) => {
             let pw = if pl == 0 {
                 ref_pic.p.w
@@ -8873,14 +8889,21 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
             } else {
                 (ref_pic.p.h + ss_ver) >> ss_ver
             };
-            let _ = pw;
             // SAFETY: ref_pic owns a stride*height allocation for this plane.
-            unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
-            }
+            (
+                unsafe {
+                    std::slice::from_raw_parts(
+                        p.as_ptr() as *const BD::Pixel,
+                        ref_stride * ph as usize,
+                    )
+                },
+                pw,
+                ph,
+            )
         }
         None => return,
     };
+    let (ref_data, ref_pw, ref_ph) = ref_data;
 
     let left = 0i32;
     let top = 0i32;
@@ -8892,10 +8915,24 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     let dx = bx * h_mul + (mvx >> (3 + plss_hor));
     let dy = by * v_mul + (mvy >> (3 + plss_ver));
 
+    // dav2d only takes the unscaled direct path when the reference and current
+    // frame have identical dimensions (recon_tmpl.c:1569); the emu clamp bounds
+    // then equal the reference plane size. Use the reference's own dimensions as
+    // the clamp bounds so a malformed stream that points into a smaller/larger
+    // reference can never read past its buffer. For valid streams cur == ref, so
+    // these equal `right`/`bottom` and the result is unchanged.
+    let iw = imin(right, ref_pw);
+    let ih = imin(bottom, ref_ph);
+
     let need_emu = dx - (mx != 0) as i32 * 3 < left
         || dy - (my != 0) as i32 * 3 < top
         || dx + bw4 * h_mul + (mx != 0) as i32 * 4 > right
-        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom;
+        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom
+        // Force emulation if the reference dimensions differ from the current
+        // frame (scaled refs are otherwise unhandled) so the direct read below
+        // cannot overflow a smaller reference buffer.
+        || ref_pw != right
+        || ref_ph != bottom;
 
     let w = (bw4 * h_mul) as usize;
     let h = (bh4 * v_mul) as usize;
@@ -8920,8 +8957,8 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
             ref_stride,
             emu_w,
             emu_h,
-            (right - left) as usize,
-            (bottom - top) as usize,
+            (iw - left) as usize,
+            (ih - top) as usize,
             dx - (mx != 0) as i32 * 3 - left,
             dy - (my != 0) as i32 * 3 - top,
         );
@@ -9022,20 +9059,33 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     let v_mul = 4 >> plss_ver;
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
-    let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
+    let ref_data: (&[BD::Pixel], i32, i32) = match ref_pic.data[pl] {
         Some(p) => {
+            let pw = if pl == 0 {
+                ref_pic.p.w
+            } else {
+                (ref_pic.p.w + ss_hor) >> ss_hor
+            };
             let ph = if pl == 0 {
                 ref_pic.p.h
             } else {
                 (ref_pic.p.h + ss_ver) >> ss_ver
             };
             // SAFETY: ref_pic owns a stride*height allocation for this plane.
-            unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
-            }
+            (
+                unsafe {
+                    std::slice::from_raw_parts(
+                        p.as_ptr() as *const BD::Pixel,
+                        ref_stride * ph as usize,
+                    )
+                },
+                pw,
+                ph,
+            )
         }
         None => return,
     };
+    let (ref_data, ref_pw, ref_ph) = ref_data;
 
     let left = 0i32;
     let top = 0i32;
@@ -9047,10 +9097,19 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     let dx = bx * h_mul + (mvx >> (3 + plss_hor));
     let dy = by * v_mul + (mvy >> (3 + plss_ver));
 
+    // See inter_mc_plane_8bpc: clamp the emu bounds to the reference plane size
+    // and force emulation when the reference dimensions differ from the current
+    // frame, so a malformed reference cannot be read out of bounds. No-op for
+    // valid streams where the reference and current frame match.
+    let iw = imin(right, ref_pw);
+    let ih = imin(bottom, ref_ph);
+
     let need_emu = dx - (mx != 0) as i32 * 3 < left
         || dy - (my != 0) as i32 * 3 < top
         || dx + bw4 * h_mul + (mx != 0) as i32 * 4 > right
-        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom;
+        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom
+        || ref_pw != right
+        || ref_ph != bottom;
 
     let w = (bw4 * h_mul) as usize;
     let h = (bh4 * v_mul) as usize;
@@ -9075,8 +9134,8 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
             ref_stride,
             emu_w,
             emu_h,
-            (right - left) as usize,
-            (bottom - top) as usize,
+            (iw - left) as usize,
+            (ih - top) as usize,
             dx - (mx != 0) as i32 * 3 - left,
             dy - (my != 0) as i32 * 3 - top,
         );
@@ -11425,15 +11484,16 @@ fn prep_opfl_prefetch_rect_8bpc<BD: crate::pixel::BitDepth>(
         let emu_w = dwu + (mx != 0) as usize * 7;
         let emu_h = dhu + (my != 0) as usize * 7;
         let emu_stride = 192usize;
+        let src_base = ((left + top * ref_stride as i32).max(0) as usize).min(ref_data.len());
         inter_emu_edge_8bpc::<BD>(
             buf,
             emu_stride,
-            &ref_data[(left + top * ref_stride as i32) as usize..],
+            &ref_data[src_base..],
             ref_stride,
             emu_w,
             emu_h,
-            (right - left) as usize,
-            (bottom - top) as usize,
+            (right - left).max(0) as usize,
+            (bottom - top).max(0) as usize,
             dx - (mx != 0) as i32 * 3 - left,
             dy - (my != 0) as i32 * 3 - top,
         );
@@ -12866,15 +12926,16 @@ fn prep_opfl_prefetch_8bpc<BD: crate::pixel::BitDepth>(
         let emu_w = dimu + (mx != 0) as usize * 7;
         let emu_h = dimu + (my != 0) as usize * 7;
         let emu_stride = 192usize;
+        let src_base = ((left + top * ref_stride as i32).max(0) as usize).min(ref_data.len());
         inter_emu_edge_8bpc::<BD>(
             buf,
             emu_stride,
-            &ref_data[(left + top * ref_stride as i32) as usize..],
+            &ref_data[src_base..],
             ref_stride,
             emu_w,
             emu_h,
-            (right - left) as usize,
-            (bottom - top) as usize,
+            (right - left).max(0) as usize,
+            (bottom - top).max(0) as usize,
             dx - (mx != 0) as i32 * 3 - left,
             dy - (my != 0) as i32 * 3 - top,
         );
@@ -13119,15 +13180,16 @@ fn mc_prep_bounds_8bpc<BD: crate::pixel::BitDepth>(
         let emu_w = w + (mx != 0) as usize * 7;
         let emu_h = h + (my != 0) as usize * 7;
         let emu_stride = 192usize;
+        let src_base = ((left + top * ref_stride as i32).max(0) as usize).min(ref_data.len());
         inter_emu_edge_8bpc::<BD>(
             buf,
             emu_stride,
-            &ref_data[(left + top * ref_stride as i32) as usize..],
+            &ref_data[src_base..],
             ref_stride,
             emu_w,
             emu_h,
-            (right - left) as usize,
-            (bottom - top) as usize,
+            (right - left).max(0) as usize,
+            (bottom - top).max(0) as usize,
             dx - (mx != 0) as i32 * 3 - left,
             dy - (my != 0) as i32 * 3 - top,
         );
@@ -13256,15 +13318,16 @@ fn mc_opfl_8bpc<BD: crate::pixel::BitDepth>(
         let emu_w = w + (mx != 0) as usize * 7;
         let emu_h = h + (my != 0) as usize * 7;
         let emu_stride = 192usize;
+        let src_base = ((left + top * ref_stride as i32).max(0) as usize).min(ref_data.len());
         inter_emu_edge_8bpc::<BD>(
             buf,
             emu_stride,
-            &ref_data[(left + top * ref_stride as i32) as usize..],
+            &ref_data[src_base..],
             ref_stride,
             emu_w,
             emu_h,
-            (right - left) as usize,
-            (bottom - top) as usize,
+            (right - left).max(0) as usize,
+            (bottom - top).max(0) as usize,
             dx - (mx != 0) as i32 * 3 - left,
             dy - (my != 0) as i32 * 3 - top,
         );

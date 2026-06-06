@@ -29,6 +29,10 @@ use crate::levels::{RectTxfmSize, TxfmSize};
 ///
 /// Maps a quantizer index to a dequantization value.
 pub fn dq_lookup(qidx: i32) -> i32 {
+    // Valid AV2 quantizer indices are in [0, 255] (dav2d clamps qindex to u8).
+    // Clamp defensively so malformed streams can't index out of range; this is
+    // a no-op for valid input.
+    let qidx = qidx.clamp(0, 255);
     if qidx == 0 {
         return 64;
     }
