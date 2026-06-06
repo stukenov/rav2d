@@ -1339,6 +1339,200 @@ pub fn read_pal_indices(
     0
 }
 
+/// Read a luma palette colour list from the bitstream (8bpc).
+///
+/// Port of `dav2d_read_pal_plane` (recon_tmpl.c:4099-4277). Reads `pal_sz`, the
+/// reused-cache mask over the above/left neighbour palettes, then any new entries,
+/// and merges them into a sorted palette in `pal` (8 entries). Returns `pal_sz`.
+///
+/// - `a_pal`/`l_pal`: the above / left palette caches (`t->al_pal[0][bx4]` /
+///   `[1][by4]`), 8 entries each.
+/// - `a_cache`/`l_cache`: number of valid cache entries above / left
+///   (`t->a->pal_sz[bx4]` gated by `by4 & 15`, and `t->l.pal_sz[by4]`).
+#[allow(clippy::too_many_arguments)]
+pub fn read_pal_plane(
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    pal: &mut [u8; 8],
+    a_pal: &[u8; 8],
+    l_pal: &[u8; 8],
+    a_cache: i32,
+    l_cache: i32,
+) -> u8 {
+    let pal_sz = msac.decode_symbol_adapt(cdf_m.pal_sz(), 6) as i32 + 2;
+
+    // find cached entries (but don't load them yet)
+    let n_cache = l_cache + a_cache;
+    let mut n_used_cache = 0i32;
+    let mut cache_reuse_mask: u32 = 0;
+    let mut off = 0i32;
+    {
+        let mut n = imin(n_cache, pal_sz);
+        while n != 0 {
+            let m = msac.decode_bools_bypass(n as u32);
+            cache_reuse_mask <<= n;
+            cache_reuse_mask |= m;
+            n_used_cache += m.count_ones() as i32;
+            off += n;
+            n = imin(n_cache - off, pal_sz - n_used_cache);
+        }
+    }
+
+    let mut cache = [0u8; 8];
+    if n_used_cache != 0 {
+        // `select`: directly copy the selected cache entries from `dir` into cache[].
+        let select = |dir: &[u8; 8], cache: &mut [u8; 8]| {
+            let mut mask = cache_reuse_mask << (32 - off);
+            let mut i = 0usize;
+            let mut n = 0u32;
+            loop {
+                let n_zero = mask.leading_zeros();
+                cache[i] = dir[(n + n_zero) as usize];
+                i += 1;
+                n += n_zero + 1;
+                mask <<= n_zero + 1;
+                if mask == 0 {
+                    break;
+                }
+            }
+        };
+        if l_cache == 0 {
+            select(a_pal, &mut cache);
+        } else if a_cache == 0 {
+            select(l_pal, &mut cache);
+        } else {
+            // sort selected cache entries from a & l into cache[]
+            let min_n = imin(a_cache, l_cache);
+            let mask0 = cache_reuse_mask << (32 - off);
+            let rem_mask = (mask0 << (min_n * 2)) >> min_n;
+            let mut shared_mask = mask0.wrapping_sub(rem_mask >> min_n);
+            shared_mask = (shared_mask & 0xaaaa_0000) | ((shared_mask & 0x5555_0000) >> 15);
+            shared_mask |= shared_mask << 1;
+            shared_mask &= 0xcccc_cccc;
+            shared_mask |= shared_mask << 2;
+            shared_mask &= 0xf0f0_f0f0;
+            shared_mask |= shared_mask << 4;
+            let a_gt_l = (a_cache > l_cache) as u32;
+            let mut a_mask =
+                (shared_mask & 0xff00_0000).wrapping_add(a_gt_l.wrapping_mul(rem_mask));
+            let mut l_mask =
+                ((shared_mask & 0xff00) << 16).wrapping_add((1 - a_gt_l).wrapping_mul(rem_mask));
+
+            let mut i = 0usize;
+            let mut a_n = 0u32;
+            let mut l_n = 0u32;
+            if a_mask != 0 && l_mask != 0 {
+                a_n += a_mask.leading_zeros();
+                a_mask <<= a_mask.leading_zeros();
+                l_n += l_mask.leading_zeros();
+                l_mask <<= l_mask.leading_zeros();
+                loop {
+                    if a_pal[a_n as usize] < l_pal[l_n as usize] {
+                        cache[i] = a_pal[a_n as usize];
+                        i += 1;
+                        a_mask <<= 1;
+                        if a_mask == 0 {
+                            break;
+                        }
+                        let nz = a_mask.leading_zeros();
+                        a_n += 1 + nz;
+                        a_mask <<= nz;
+                    } else {
+                        cache[i] = l_pal[l_n as usize];
+                        i += 1;
+                        l_mask <<= 1;
+                        if l_mask == 0 {
+                            break;
+                        }
+                        let nz = l_mask.leading_zeros();
+                        l_n += 1 + nz;
+                        l_mask <<= nz;
+                    }
+                }
+            }
+            if a_mask != 0 {
+                a_n += a_mask.leading_zeros();
+                a_mask <<= a_mask.leading_zeros();
+                loop {
+                    cache[i] = a_pal[a_n as usize];
+                    i += 1;
+                    a_mask <<= 1;
+                    if a_mask == 0 {
+                        break;
+                    }
+                    let nz = a_mask.leading_zeros();
+                    a_n += 1 + nz;
+                    a_mask <<= nz;
+                }
+            } else {
+                l_n += l_mask.leading_zeros();
+                l_mask <<= l_mask.leading_zeros();
+                loop {
+                    cache[i] = l_pal[l_n as usize];
+                    i += 1;
+                    l_mask <<= 1;
+                    if l_mask == 0 {
+                        break;
+                    }
+                    let nz = l_mask.leading_zeros();
+                    l_n += 1 + nz;
+                    l_mask <<= nz;
+                }
+            }
+        }
+    }
+
+    // parse new entries
+    if n_used_cache < pal_sz {
+        let mut i = n_used_cache as usize;
+        let bpc = 8u32; // 8bpc path
+        let mut prev = msac.decode_bools_bypass(bpc) as i32;
+        pal[i] = prev as u8;
+        i += 1;
+
+        if (i as i32) < pal_sz {
+            let mut bits = bpc as i32 - 3 + msac.decode_bools_bypass(2) as i32;
+            let max = (1i32 << bpc) - 1;
+            loop {
+                let delta = msac.decode_bools_bypass(bits as u32) as i32;
+                prev = imin(prev + delta + 1, max);
+                pal[i] = prev as u8;
+                i += 1;
+                if prev + 1 >= max {
+                    while (i as i32) < pal_sz {
+                        pal[i] = max as u8;
+                        i += 1;
+                    }
+                    break;
+                }
+                bits = imin(bits, 1 + crate::intops::ulog2((max - prev - 1) as u32));
+                if (i as i32) >= pal_sz {
+                    break;
+                }
+            }
+        }
+
+        // merge selected cache & new entries into pal while sorting cache
+        if n_used_cache != 0 {
+            let mut n = 0i32;
+            let mut m = n_used_cache;
+            for k in 0..pal_sz as usize {
+                if n < n_used_cache && (m >= pal_sz || cache[n as usize] <= pal[m as usize]) {
+                    pal[k] = cache[n as usize];
+                    n += 1;
+                } else {
+                    pal[k] = pal[m as usize];
+                    m += 1;
+                }
+            }
+        }
+    } else {
+        pal[..pal_sz as usize].copy_from_slice(&cache[..pal_sz as usize]);
+    }
+
+    pal_sz as u8
+}
+
 pub fn read_tx_part(
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
@@ -2044,6 +2238,18 @@ pub struct ReconScratch {
     /// chroma-scaled MV) and read back by the chroma `rmv_uvpred`. Indexed
     /// `((by & 31) >> 1) * 16 + ((bx & 31) >> 1)`.
     pub rmv: [[[crate::levels::Mv; 2]; 2]; 256],
+    /// Above/left palette-colour cache (`t->al_pal`): `[a/l][bx4|by4][8 colours]`,
+    /// indexed by `bx & 63` (above) / `by & 63` (left). Written by the palette
+    /// recon (`copy_pal_block_y`) and read by `read_pal_plane` to build the
+    /// per-block palette colour cache. Never explicitly reset — gating is via the
+    /// `pal_sz` block context, mirroring dav2d (recon_tmpl.c al_pal handling).
+    pub al_pal: [[[u8; 8]; 64]; 2],
+    /// Current palette block's colour list (`t->scratch.pal`, 8 entries). Filled
+    /// by `read_pal_plane` during parse and consumed by the palette recon fill.
+    pub pal: [u8; 8],
+    /// Current palette block's packed index map (`t->scratch.pal_idx_y`). `pack`
+    /// stores two indices per byte; sized for the largest palette block (64x64).
+    pub pal_idx_y: Box<[u8; 64 * 64]>,
 }
 
 impl Default for ReconScratch {
@@ -2058,6 +2264,9 @@ impl Default for ReconScratch {
             chroma_u_has_cf: 0,
             txtp_map: [0u16; 256],
             rmv: [[[crate::levels::Mv::default(); 2]; 2]; 256],
+            al_pal: [[[0u8; 8]; 64]; 2],
+            pal: [0u8; 8],
+            pal_idx_y: Box::new([0u8; 64 * 64]),
         }
     }
 }
@@ -5134,8 +5343,20 @@ fn decode_b(
         {
             let use_y_pal = msac.decode_bool_adapt(cdf_m.pal_y()) != 0;
             if use_y_pal {
-                // STUB: read palette colors from bitstream (AV2 §5.11.15)
-                let pal_sz = msac.decode_symbol_adapt(cdf_m.pal_sz(), 6) as u8 + 2;
+                // Read the palette colour list (recon_tmpl.c:4099 read_pal_plane).
+                // Above palette is only reused inside SB64 boundaries (`by4 & 15`).
+                let a_cache = if by4 & 15 != 0 {
+                    a.pal_sz[bx4] as i32
+                } else {
+                    0
+                };
+                let l_cache = l.pal_sz[by4] as i32;
+                let a_pal = recon.scratch.al_pal[0][bx4];
+                let l_pal = recon.scratch.al_pal[1][by4];
+                let mut pal = [0u8; 8];
+                let pal_sz =
+                    read_pal_plane(msac, cdf_m, &mut pal, &a_pal, &l_pal, a_cache, l_cache);
+                recon.scratch.pal = pal;
                 unsafe {
                     b.data.intra.pal_sz = pal_sz;
                 }
@@ -5174,6 +5395,28 @@ fn decode_b(
             unsafe { b.data.intra.pal_sz },
             msac.dbg_rng()
         );
+    }
+
+    // Palette index map (decode.c:2286-2299). Read after dip, before tx_part.
+    if b.is_intra != 0 && !intrabc && has_luma {
+        let pal_sz = unsafe { b.data.intra.pal_sz } as i32;
+        if pal_sz != 0 {
+            let sz = [w4 * 4, h4 * 4, bw4 * 4, bh4 * 4];
+            // pal_idx_finish needs distinct dst (packed) / src (unpacked) buffers;
+            // dav2d packs in-place, but here we keep a small per-block scratch.
+            let mut idx_scratch = vec![0u8; (bw4 * 4 * bh4 * 4) as usize];
+            if read_pal_indices(
+                msac,
+                cdf_m,
+                &mut recon.scratch.pal_idx_y[..],
+                &mut idx_scratch[..],
+                pal_sz,
+                &sz,
+            ) < 0
+            {
+                return Err(());
+            }
+        }
     }
 
     // TX partition (intra path)
@@ -7992,6 +8235,21 @@ fn decode_b(
             let row = off + y * 16;
             recon.scratch.luma_intra_dir_mode_map[row..row + aw].fill(luma_midx);
             recon.scratch.luma_fsc_map[row..row + aw].fill(b.fsc);
+        }
+    }
+
+    // copy_pal_block_y (decode.c:2349-2350 / recon_tmpl.c:4086-4097). Store this
+    // block's palette into the above/left caches so the next blocks can reuse it.
+    if has_luma && b.is_intra != 0 && !intrabc {
+        let pal_sz = unsafe { b.data.intra.pal_sz };
+        if pal_sz != 0 {
+            let pal = recon.scratch.pal;
+            for x in 0..bw4 as usize {
+                recon.scratch.al_pal[0][bx4 + x] = pal;
+            }
+            for y in 0..bh4 as usize {
+                recon.scratch.al_pal[1][by4 + y] = pal;
+            }
         }
     }
 
@@ -13328,6 +13586,26 @@ fn recon_b_intra_luma_geom(
     let pb_col_start = bx;
     let pb_row_start = by;
 
+    // Palette pixel fill (recon_tmpl.c:3272-3290). For palette blocks the whole
+    // block's pixels are written from the palette colour list + index map before
+    // the residual transform walk; the per-tx intra prediction is skipped (gated
+    // by `pal_sz == 0` inside recon_b_luma_tx). Palette blocks are <=16 4x4 units
+    // so they are never split, hence `geom_bs == b.bs`.
+    if b.is_intra != 0 && b.intrabc == 0 && unsafe { b.data.intra.pal_sz } != 0 {
+        let bw = BLOCK_DIMENSIONS[bs][0] as usize * 4;
+        let bh = BLOCK_DIMENSIONS[bs][1] as usize * 4;
+        let stride = recon.frame.y_stride_px;
+        let dst_off = 4 * (by as usize * stride + bx as usize);
+        crate::ipred::pal_pred_8bpc(
+            &mut recon.dst_y[dst_off..],
+            stride,
+            &recon.scratch.pal,
+            &recon.scratch.pal_idx_y[..],
+            bw,
+            bh,
+        );
+    }
+
     if lossless {
         // recon_tmpl.c:3296-3308: single tx size, raster walk over the block.
         let tx = if b.tx_size_ll != 0 {
@@ -16742,6 +17020,64 @@ mod tests {
         let mut b = make_default_block();
         read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs4x4, false, true);
         assert_eq!(b.tx_part, TxPartition::None as u8);
+    }
+
+    // read_pal_plane: with no neighbour cache the palette is built entirely from
+    // new entries, which (per dav2d recon_tmpl.c:4205-4224) are strictly
+    // increasing until clamped at max, then constant. Verify this invariant over
+    // several pseudo-random bitstreams; the size is `pal_sz` in 2..=8.
+    #[test]
+    fn test_read_pal_plane_no_cache_monotone() {
+        let empty = [0u8; 8];
+        for seed in 0..16u8 {
+            let data: Vec<u8> = (0..64u8)
+                .map(|i| i.wrapping_mul(31).wrapping_add(seed))
+                .collect();
+            let mut msac = make_msac(&data);
+            let mut cdf_m = make_default_cdf_mode();
+            let mut pal = [0u8; 8];
+            let pal_sz = read_pal_plane(&mut msac, &mut cdf_m, &mut pal, &empty, &empty, 0, 0);
+            assert!((2..=8).contains(&pal_sz), "pal_sz={pal_sz}");
+            // entries are non-decreasing and strictly increasing until the 255 cap
+            for w in pal[..pal_sz as usize].windows(2) {
+                if w[0] != 255 {
+                    assert!(
+                        w[1] > w[0],
+                        "not strictly increasing: {:?}",
+                        &pal[..pal_sz as usize]
+                    );
+                } else {
+                    assert_eq!(w[1], 255);
+                }
+            }
+        }
+    }
+
+    // read_pal_plane: the final palette is always sorted (non-decreasing) and all
+    // entries are valid 8bpc values, whether built from the neighbour cache, new
+    // entries, or a merge of both (recon_tmpl.c:4226-4239 merge sorts cache into
+    // pal). Exercise the with-cache merge path over several bitstreams.
+    #[test]
+    fn test_read_pal_plane_with_cache_sorted() {
+        let a_pal = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let l_pal = [5u8, 25, 45, 65, 85, 105, 125, 145];
+        for seed in 0..16u8 {
+            let data: Vec<u8> = (0..64u8)
+                .map(|i| i.wrapping_mul(17).wrapping_add(seed))
+                .collect();
+            let mut msac = make_msac(&data);
+            let mut cdf_m = make_default_cdf_mode();
+            let mut pal = [0u8; 8];
+            let pal_sz = read_pal_plane(&mut msac, &mut cdf_m, &mut pal, &a_pal, &l_pal, 8, 8);
+            assert!((2..=8).contains(&pal_sz), "pal_sz={pal_sz}");
+            for k in 1..pal_sz as usize {
+                assert!(
+                    pal[k] >= pal[k - 1],
+                    "merge not sorted: {:?}",
+                    &pal[..pal_sz as usize]
+                );
+            }
+        }
     }
 
     #[test]
