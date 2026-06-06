@@ -2141,7 +2141,14 @@ fn lr_sbrow(
 
 pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
     let dst_stride = ctx.cur_stride;
-    let restore_planes = ctx.restore_planes;
+    // For monochrome frames the chroma destination planes are empty; a malformed
+    // stream can still signal chroma restoration, so mask off the U/V restore
+    // bits when those planes are absent to avoid reading/writing empty buffers.
+    // No-op when chroma planes are present.
+    let mut restore_planes = ctx.restore_planes;
+    if dst[1].is_empty() || dst[2].is_empty() {
+        restore_planes &= LR_RESTORE_Y;
+    }
     let not_last = (sby + 1 < ctx.sbh) as i32;
     let start_tile_val = if (sby as usize) < ctx.start_of_tile_row.len() {
         ctx.start_of_tile_row[sby as usize]
