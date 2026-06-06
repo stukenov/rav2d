@@ -192,64 +192,78 @@ fn median_decode(
     (times[times.len() / 2], frames, samples)
 }
 
-/// Print a once-only rav2d-vs-dav2d comparison table to stderr.
+/// Print one rav2d-vs-dav2d comparison table for a given in-loop-filter setting.
+fn print_table(title: &str, rav_filters: rav2d::InloopFilterType, dav_filters: u32) {
+    eprintln!();
+    eprintln!("=== rav2d vs dav2d decode throughput (single-thread, {title}) ===");
+    eprintln!(
+        "{:<46} {:>6} {:>10} {:>10} {:>9} {:>9} {:>8}",
+        "clip", "frames", "rav2d ms", "dav2d ms", "rav MP/s", "dav MP/s", "dav/rav"
+    );
+    for name in CLIPS {
+        let path = media(name);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("{name:<46} (missing)");
+                continue;
+            }
+        };
+        let iters = 15;
+        let (r_ms, r_frames, r_samples) =
+            median_decode(&bytes, iters, |b| rav2d_run(b, rav_filters));
+        let (d_ms, d_frames, d_samples) =
+            median_decode(&bytes, iters, |b| dav2d_run(b, dav_filters));
+
+        let r_s = r_ms.as_secs_f64();
+        let d_s = d_ms.as_secs_f64();
+        let r_mps = if r_s > 0.0 {
+            r_samples as f64 / 1e6 / r_s
+        } else {
+            0.0
+        };
+        let d_mps = if d_s > 0.0 {
+            d_samples as f64 / 1e6 / d_s
+        } else {
+            0.0
+        };
+        let ratio = if r_s > 0.0 { d_s / r_s } else { 0.0 };
+        let frames = if r_frames == d_frames {
+            format!("{r_frames}")
+        } else {
+            format!("{r_frames}/{d_frames}")
+        };
+        eprintln!(
+            "{:<46} {:>6} {:>10.3} {:>10.3} {:>9.1} {:>9.1} {:>7.2}x",
+            name,
+            frames,
+            r_s * 1e3,
+            d_s * 1e3,
+            r_mps,
+            d_mps,
+            ratio
+        );
+    }
+}
+
+/// Print once-only rav2d-vs-dav2d comparison tables (filters off, then all on).
 fn print_comparison_table() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        eprintln!();
-        eprintln!("=== rav2d vs dav2d decode throughput (single-thread, filters off) ===");
-        eprintln!(
-            "{:<46} {:>6} {:>10} {:>10} {:>9} {:>9} {:>8}",
-            "clip", "frames", "rav2d ms", "dav2d ms", "rav MP/s", "dav MP/s", "dav/rav"
+        // dav2d DAV2D_INLOOPFILTER_ALL = deblock|cdef|ccso|wiener|gdf = 0x1F.
+        const DAV2D_INLOOPFILTER_ALL: u32 = 0x1F;
+        print_table("filters off", rav2d::InloopFilterType::None, 0);
+        print_table(
+            "all filters on",
+            rav2d::InloopFilterType::All,
+            DAV2D_INLOOPFILTER_ALL,
         );
-        for name in CLIPS {
-            let path = media(name);
-            let bytes = match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(_) => {
-                    eprintln!("{name:<46} (missing)");
-                    continue;
-                }
-            };
-            let iters = 15;
-            let (r_ms, r_frames, r_samples) = median_decode(&bytes, iters, |b| {
-                rav2d_run(b, rav2d::InloopFilterType::None)
-            });
-            let (d_ms, d_frames, d_samples) = median_decode(&bytes, iters, |b| dav2d_run(b, 0));
-
-            let r_s = r_ms.as_secs_f64();
-            let d_s = d_ms.as_secs_f64();
-            let r_mps = if r_s > 0.0 {
-                r_samples as f64 / 1e6 / r_s
-            } else {
-                0.0
-            };
-            let d_mps = if d_s > 0.0 {
-                d_samples as f64 / 1e6 / d_s
-            } else {
-                0.0
-            };
-            let ratio = if r_s > 0.0 { d_s / r_s } else { 0.0 };
-            let frames = if r_frames == d_frames {
-                format!("{r_frames}")
-            } else {
-                format!("{r_frames}/{d_frames}")
-            };
-            eprintln!(
-                "{:<46} {:>6} {:>10.3} {:>10.3} {:>9.1} {:>9.1} {:>7.2}x",
-                name,
-                frames,
-                r_s * 1e3,
-                d_s * 1e3,
-                r_mps,
-                d_mps,
-                ratio
-            );
-        }
         eprintln!(
             "(frames shown as rav2d/dav2d when they differ — rav2d still gaining inter coverage)"
         );
-        eprintln!("(dav2d uses SIMD; rav2d uses NEON for MC on aarch64, scalar elsewhere)");
+        eprintln!(
+            "(dav2d uses SIMD; rav2d uses NEON for MC on aarch64, wide-SIMD + scalar elsewhere)"
+        );
         eprintln!();
     });
 }
