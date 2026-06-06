@@ -12,8 +12,13 @@ static DIV_MULT: [u16; 32] = [
 ];
 
 pub fn mv_projection(mv: Mv, num: i32, den: i32, min: i32, max: i32) -> Mv {
-    debug_assert!(den > 0 && den < 32);
-    debug_assert!(num > -32 && num < 32);
+    // For valid streams num (a clamped POC delta) is in [-31, 31] and den (an
+    // abs POC delta / reference index) is in [1, 31]; the temporal-MV grid only
+    // ever stores values in range. A malformed stream can leave out-of-range
+    // values in that grid, so clamp here to keep the DIV_MULT index valid and
+    // avoid overflow. No-op for valid input.
+    let num = num.clamp(-31, 31);
+    let den = den.clamp(1, 31);
     let (y, x) = unsafe { (mv.c.y, mv.c.x) };
     let frac = num as i64 * DIV_MULT[den as usize] as i64;
     let py = y as i64 * frac;
