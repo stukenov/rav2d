@@ -266,8 +266,26 @@ pub fn emu_edge<P: Pixel>(
     for cy in 0..center_h {
         let blk_y = top_ext + cy;
         let blk_off = blk_y * dst_stride;
-        dst[blk_off + left_ext..blk_off + left_ext + center_w]
-            .copy_from_slice(&r[roff..roff + center_w]);
+        // The clamped source offset/width stay within the reference plane for
+        // valid streams (iw/ih == the reference buffer size). Clamp both the row
+        // offset and the read width against the actual buffer length so a
+        // malformed reference whose declared dimensions (iw/ih) exceed its real
+        // allocation extends the last available pixel instead of reading out of
+        // bounds. No-op for valid input.
+        let rstart = roff.min(r.len());
+        let avail = r.len().saturating_sub(rstart).min(center_w);
+        dst[blk_off + left_ext..blk_off + left_ext + avail]
+            .copy_from_slice(&r[rstart..rstart + avail]);
+        if avail < center_w {
+            let fill = if avail > 0 {
+                dst[blk_off + left_ext + avail - 1]
+            } else if blk_off + left_ext > 0 {
+                dst[blk_off + left_ext - 1]
+            } else {
+                P::default()
+            };
+            dst[blk_off + left_ext + avail..blk_off + left_ext + center_w].fill(fill);
+        }
         if left_ext > 0 {
             let fill = dst[blk_off + left_ext];
             dst[blk_off..blk_off + left_ext].fill(fill);
@@ -361,7 +379,13 @@ fn get_v_filter(my: i32, filter_type: i32, h: usize) -> Option<[i8; 8]> {
 #[inline(always)]
 fn filter_8tap_px<P: Pixel>(src: &[P], center: usize, f: &[i8; 8], stride: isize) -> i32 {
     let c = center as isize;
-    let s = |i: isize| -> i32 { src[i as usize].into() };
+    // For valid streams every tap index lies inside `src` (the MC path either
+    // reads inside the padded reference or an emu-edge scratch buffer). Clamp
+    // the index defensively so a malformed stream whose reference is smaller
+    // than its declared dimensions can never read out of bounds; this is a
+    // no-op for valid input where the index is already in range.
+    let last = src.len().saturating_sub(1) as isize;
+    let s = |i: isize| -> i32 { src[i.clamp(0, last) as usize].into() };
     f[0] as i32 * s(c - 3 * stride)
         + f[1] as i32 * s(c - 2 * stride)
         + f[2] as i32 * s(c - stride)

@@ -522,6 +522,13 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
         } else {
             8
         };
+        // The reference-frame bank has DAV2D_NUM_REF_FRAMES (8) slots; reference
+        // indices are later validated only against `ref_frames`, so a value above
+        // 8 would let a malformed stream index the 8-slot `refs` array out of
+        // bounds. Valid streams never signal more than 8 reference frames.
+        if hdr.ref_frames > 8 {
+            return Err(Rav2dError::InvalidData);
+        }
         hdr.ref_frames_log2 = if hdr.ref_frames <= 2 {
             hdr.ref_frames - 1
         } else {
