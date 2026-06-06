@@ -745,6 +745,7 @@ fn scaling_for_uv<'a>(scaling: &'a [Vec<u8>; 3], fgd: &FilmGrainData, uv: usize)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_grain_8bpc(
     dst_y: &mut [u8],
     dst_u: &mut [u8],
@@ -761,6 +762,42 @@ pub fn apply_grain_8bpc(
     ss_x: bool,
     ss_y: bool,
 ) {
+    apply_grain_8bpc_mt(
+        dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, w, h, seed, ss_x, ss_y,
+        1,
+    );
+}
+
+/// Film grain synthesis with optional row-band parallelism.
+///
+/// The output is partitioned into independent `bs`-tall row bands
+/// (`dav2d_apply_grain`'s tiling). Each band writes only rows `[row*bs, …)` of
+/// the destination planes and reads only the (read-only) ungrained `src` planes
+/// plus the precomputed `grain_lut`/`scaling`; the per-pixel grain RNG is
+/// re-derived from absolute position inside the kernels. The bands therefore
+/// touch disjoint output memory and share no mutable state, so distributing them
+/// across threads yields output byte-identical to the sequential loop.
+///
+/// `n_threads <= 1` runs the exact sequential loop (single-thread path
+/// unchanged).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_grain_8bpc_mt(
+    dst_y: &mut [u8],
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    src_y: &[u8],
+    src_u: &[u8],
+    src_v: &[u8],
+    y_stride: isize,
+    uv_stride: isize,
+    fgd: &FilmGrainData,
+    w: usize,
+    h: usize,
+    seed: u32,
+    ss_x: bool,
+    ss_y: bool,
+    n_threads: u32,
+) {
     let mut grain_lut = GrainLut::new();
     let mut scaling = [Vec::new(), Vec::new(), Vec::new()];
 
@@ -771,12 +808,64 @@ pub fn apply_grain_8bpc(
     let bs = (16usize) << fgd.block_size;
     let rows = h.div_ceil(bs);
 
-    for row in 0..rows {
-        apply_grain_row_8bpc(
-            dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, &grain_lut,
-            &scaling, w, h, row, seed, ss_x, ss_y,
-        );
+    if n_threads <= 1 || rows <= 1 {
+        for row in 0..rows {
+            apply_grain_row_8bpc(
+                dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, &grain_lut,
+                &scaling, w, h, row, seed, ss_x, ss_y,
+            );
+        }
+        return;
     }
+
+    // Parallel path: one job per row band. Each band writes disjoint output rows
+    // (verified above), so the raw destination pointers are split across jobs
+    // without aliasing. Pointers are wrapped in a Send marker because each band's
+    // writes stay within its own row range.
+    struct DstPtrs {
+        y: *mut u8,
+        y_len: usize,
+        u: *mut u8,
+        u_len: usize,
+        v: *mut u8,
+        v_len: usize,
+    }
+    // SAFETY: each row band writes only its disjoint output rows; the pointers
+    // are never used to access another band's memory, so sharing them across
+    // threads introduces no data race.
+    unsafe impl Send for DstPtrs {}
+    unsafe impl Sync for DstPtrs {}
+    let dst = DstPtrs {
+        y: dst_y.as_mut_ptr(),
+        y_len: dst_y.len(),
+        u: dst_u.as_mut_ptr(),
+        u_len: dst_u.len(),
+        v: dst_v.as_mut_ptr(),
+        v_len: dst_v.len(),
+    };
+    let dst = &dst;
+    let grain_lut = &grain_lut;
+    let scaling = &scaling;
+
+    let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..rows)
+        .map(|row| {
+            Box::new(move || {
+                // SAFETY: reconstruct each plane slice from its base pointer for
+                // the full plane length; the row function only writes within
+                // `[row*bs*stride, …)` for this band's `bh` rows, which is
+                // disjoint from every other band.
+                let dst_y = unsafe { std::slice::from_raw_parts_mut(dst.y, dst.y_len) };
+                let dst_u = unsafe { std::slice::from_raw_parts_mut(dst.u, dst.u_len) };
+                let dst_v = unsafe { std::slice::from_raw_parts_mut(dst.v, dst.v_len) };
+                apply_grain_row_8bpc(
+                    dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, grain_lut,
+                    scaling, w, h, row, seed, ss_x, ss_y,
+                );
+            }) as Box<dyn FnOnce() + Send + '_>
+        })
+        .collect();
+
+    crate::thread_task::run_disjoint_jobs(n_threads, jobs);
 }
 
 #[cfg(test)]

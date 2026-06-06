@@ -369,6 +369,11 @@ pub struct DecoderContext {
     /// frames decoded within a single `parse_obus` call are not lost. (Minimal
     /// output path; visibility/POC display reordering lands with full queueing.)
     pub frame_out: Vec<crate::picture::Picture>,
+
+    /// Worker-thread budget (`Settings.n_threads` resolved to `n_tc`). Used to
+    /// parallelise the disjoint-output display passes (output-frame copy / film
+    /// grain). `1` keeps every such pass on the byte-identical sequential path.
+    pub n_tc: u32,
 }
 
 #[derive(Default)]

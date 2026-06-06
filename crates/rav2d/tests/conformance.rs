@@ -411,6 +411,47 @@ pub fn rav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
     frames
 }
 
+/// Decode a clip with rav2d using an explicit thread count and the full
+/// in-loop filter pipeline + film grain. Used by `mt_matches_single_thread` to
+/// prove that multi-threaded decode is byte-identical to single-threaded.
+pub fn rav2d_decode_threads(path: &PathBuf, n_threads: u32, apply_grain: bool) -> Vec<FramePlanes> {
+    use rav2d::{Data, Decoder, Settings};
+    let bytes = std::fs::read(path).expect("read clip");
+    let mut s = Settings::default();
+    s.n_threads = n_threads;
+    s.apply_grain = apply_grain;
+    s.run_decode = true;
+    s.inloop_filters = rav2d::InloopFilterType::All;
+    let mut dec = Decoder::open(&s).expect("open");
+
+    let mut frames = Vec::new();
+    let mut sent = false;
+    loop {
+        if !sent {
+            match dec.send_data(Some(Data::wrap(bytes.clone()))) {
+                Ok(()) => sent = true,
+                Err(rav2d::Rav2dError::Again) => {}
+                Err(_) => break,
+            }
+        }
+        match dec.get_picture() {
+            Ok(pic) => frames.push(rav2d_picture_planes(&pic)),
+            Err(rav2d::Rav2dError::Again) => {
+                if sent {
+                    let _ = dec.send_data(None);
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+        if frames.len() > 4096 {
+            break; // safety
+        }
+    }
+    frames
+}
+
 /// Decode a clip with rav2d at the given in-loop filter setting.
 pub fn rav2d_decode_filters(
     path: &PathBuf,
@@ -2149,4 +2190,97 @@ fn hbd_decode_smoke() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multithreading determinism gate.
+// ---------------------------------------------------------------------------
+
+/// Assert byte-identical multi-threaded vs single-threaded decode.
+///
+/// rav2d's single-thread path is the bit-exact reference (validated against
+/// dav2d by every `bit_exact_*` oracle). This gate proves the threaded path
+/// (`n_threads = 4`) produces output byte-for-byte identical to `n_threads = 1`
+/// for every shipped clip — the parallel display passes (output-frame copy,
+/// film-grain synthesis over disjoint row bands) must not perturb a single byte.
+///
+/// Run with full in-loop filters and film grain APPLIED so the parallelised
+/// grain path is exercised on the grain clip. Also covers the 10-bit vectors so
+/// the HBD output copy threads correctly. Needs no dav2d, so it stands alone as
+/// a determinism guard.
+#[test]
+fn mt_matches_single_thread() {
+    let media_clips = [
+        "avm-v14.1.0-bus.64x64.l5.obu",
+        "avm-v14.1.0-bus.64x64.l5.lossless.obu",
+        "avm-v14.1.0-bus.64x64.l5.opfl0-refinemv0.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp0.obu",
+        "avm-v14.1.0-bus.64x64.l1.sdp1.obu",
+        "avm-v14.1.0-bus.352x288.l5.seg1.obu",
+        "avm-v14.1.0-bus.352x288.l10.deltaq1.obu",
+        "avm-v14.1.0-bus.352x288.l1.partial_lossless.obu",
+        "avm-v14.1.0-hm.64x64.l5.filmgrain.obu",
+    ];
+    let data_clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
+
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+
+    let mut check = |name: &str, path: &PathBuf| {
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            return;
+        }
+        // Film grain applied so the parallel grain kernel is exercised; it is a
+        // no-op on non-grain clips (byte-identical copy either way).
+        for &apply_grain in &[false, true] {
+            let st = rav2d_decode_threads(path, 1, apply_grain);
+            let mt = rav2d_decode_threads(path, 4, apply_grain);
+            if st.len() != mt.len() {
+                failures.push(format!(
+                    "{name} (grain={apply_grain}): frame count st={} mt={}",
+                    st.len(),
+                    mt.len()
+                ));
+                continue;
+            }
+            for (i, (s, m)) in st.iter().zip(mt.iter()).enumerate() {
+                if (s.w, s.h, s.bpc, s.layout) != (m.w, m.h, m.bpc, m.layout) {
+                    failures.push(format!(
+                        "{name} (grain={apply_grain}): frame {i} params differ"
+                    ));
+                    continue;
+                }
+                for pl in 0..3 {
+                    if s.planes[pl] != m.planes[pl] {
+                        failures.push(format!(
+                            "{name} (grain={apply_grain}): frame {i} plane {pl} bytes differ (mt != st)"
+                        ));
+                    }
+                }
+            }
+            checked += 1;
+        }
+    };
+
+    for clip in media_clips {
+        check(clip, &media(clip));
+    }
+    for clip in data_clips {
+        check(clip, &data(clip));
+    }
+
+    assert!(
+        checked > 0,
+        "mt_matches_single_thread: no clips available to check"
+    );
+    if !failures.is_empty() {
+        panic!(
+            "multi-threaded decode is NOT byte-identical to single-thread:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+    eprintln!(
+        "mt_matches_single_thread: {checked} decode configs byte-identical (n_threads 1 vs 4)"
+    );
 }

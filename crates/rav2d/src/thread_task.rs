@@ -5,6 +5,65 @@ use std::thread;
 pub const FRAME_ERROR: u32 = u32::MAX - 1;
 pub const TILE_ERROR: i32 = i32::MAX - 1;
 
+/// Run a set of independent, disjoint-output jobs, optionally in parallel.
+///
+/// Each job is a `FnOnce` operating on its own non-overlapping output region
+/// (e.g. one colour plane). The jobs are deterministic and do not communicate,
+/// so running them on separate threads produces output byte-identical to
+/// running them sequentially — only the order of side-effect-free writes to
+/// disjoint memory changes.
+///
+/// `n_threads <= 1` (or a single job) runs everything inline on the caller,
+/// keeping the single-thread path literally unchanged (no thread spawn, no
+/// scope). With `n_threads > 1` the jobs are dispatched across a scoped thread
+/// pool of at most `n_threads` workers; the scope joins all workers before
+/// returning, so all writes are visible on return.
+pub fn run_disjoint_jobs<'env, F>(n_threads: u32, jobs: Vec<F>)
+where
+    F: FnOnce() + Send + 'env,
+{
+    if n_threads <= 1 || jobs.len() <= 1 {
+        for job in jobs {
+            job();
+        }
+        return;
+    }
+
+    // Cap the worker count at the number of jobs; the caller controls the upper
+    // bound via `n_threads`.
+    let max_workers = (n_threads as usize).min(jobs.len());
+    // Keep one job to run on the calling thread so we use `max_workers` threads
+    // total (max_workers-1 spawned + the caller), avoiding an idle main thread.
+    let mut jobs = jobs;
+    let inline_job = jobs.pop();
+    thread::scope(|scope| {
+        // Distribute the remaining jobs round-robin onto spawned workers. Each
+        // spawned worker owns a disjoint subset of the jobs.
+        let n_spawn = (max_workers - 1).min(jobs.len());
+        if n_spawn == 0 {
+            for job in jobs.drain(..) {
+                job();
+            }
+        } else {
+            // Bucket the jobs so each spawned worker gets a contiguous chunk.
+            let mut buckets: Vec<Vec<F>> = (0..n_spawn).map(|_| Vec::new()).collect();
+            for (i, job) in jobs.drain(..).enumerate() {
+                buckets[i % n_spawn].push(job);
+            }
+            for bucket in buckets {
+                scope.spawn(move || {
+                    for job in bucket {
+                        job();
+                    }
+                });
+            }
+        }
+        if let Some(job) = inline_job {
+            job();
+        }
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TaskType {
@@ -365,6 +424,59 @@ mod tests {
         let progress = [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
         set_frame_progress(&progress, 1, 42);
         assert_eq!(get_frame_progress(&progress, 1), 42);
+    }
+
+    #[test]
+    fn test_run_disjoint_jobs_inline() {
+        use std::sync::{Arc, Mutex};
+        // n_threads == 1 runs inline, in order.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut jobs: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+        for i in 0..3 {
+            let log = log.clone();
+            jobs.push(Box::new(move || log.lock().unwrap().push(i)));
+        }
+        run_disjoint_jobs(1, jobs);
+        assert_eq!(*log.lock().unwrap(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_run_disjoint_jobs_parallel() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        // Each job writes to its own disjoint slot; result is deterministic
+        // regardless of execution order or thread count.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut jobs: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+        for _ in 0..8 {
+            let counter = counter.clone();
+            jobs.push(Box::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+        run_disjoint_jobs(4, jobs);
+        assert_eq!(counter.load(Ordering::Relaxed), 8);
+    }
+
+    #[test]
+    fn test_run_disjoint_jobs_disjoint_writes() {
+        // Three disjoint output buffers written by three jobs; parallel result
+        // must equal the sequential result byte-for-byte.
+        let mut a = [0u8; 4];
+        let mut b = [0u8; 4];
+        let mut c = [0u8; 4];
+        {
+            let (ra, rb, rc) = (&mut a, &mut b, &mut c);
+            let jobs: Vec<Box<dyn FnOnce() + Send>> = vec![
+                Box::new(move || ra.iter_mut().for_each(|x| *x = 1)),
+                Box::new(move || rb.iter_mut().for_each(|x| *x = 2)),
+                Box::new(move || rc.iter_mut().for_each(|x| *x = 3)),
+            ];
+            run_disjoint_jobs(4, jobs);
+        }
+        assert_eq!(a, [1; 4]);
+        assert_eq!(b, [2; 4]);
+        assert_eq!(c, [3; 4]);
     }
 
     #[test]

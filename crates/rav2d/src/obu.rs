@@ -2694,7 +2694,8 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             // referenced stored picture. With output_invisible_frames this is a
             // plain append; rav2d emits in decode order, so push an independently
             // owned clone of the referenced reconstruction onto the output queue.
-            c.frame_out.push(crate::decode::clone_picture(&ref_pic));
+            c.frame_out
+                .push(crate::decode::clone_picture_mt(&ref_pic, c.n_tc));
             // dav2d obu.c: a key-frame show_existing_frame copies the referenced
             // slot into every other ref slot and clears its showable flag.
             if c.refs[idx]
@@ -3454,6 +3455,7 @@ mod tests {
             inloop_filters: 0,
             run_decode: false,
             frame_out: Vec::new(),
+            n_tc: 1,
         }
     }
 

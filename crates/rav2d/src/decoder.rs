@@ -264,6 +264,7 @@ impl Decoder {
             inloop_filters: s.inloop_filters.to_flags(),
             run_decode: s.run_decode,
             frame_out: Vec::new(),
+            n_tc,
         };
 
         Ok(Self {
@@ -414,8 +415,10 @@ impl Decoder {
         // Film grain is display-only: it must not feed inter prediction, so it is
         // applied to a fresh output copy here (the DPB/reference copy stays
         // ungrained). Mirrors dav2d's `dav2d_apply_grain` in `output_image`.
+        // The grain synthesis + base copy are parallelised across `n_tc` threads
+        // (`n_tc == 1` keeps the byte-identical sequential path).
         if self.ctx.apply_grain && crate::decode::picture_has_grain(&pic) {
-            let grained = crate::decode::apply_grain_to_picture(&pic);
+            let grained = crate::decode::apply_grain_to_picture_mt(&pic, self.n_tc);
             pic.unref();
             return Ok(grained);
         }
@@ -471,7 +474,7 @@ impl Decoder {
             };
             // Append a fresh, independently-owned copy of the stored picture.
             let pic = self.ctx.refs[slot].p.pic.as_ref().unwrap().clone();
-            self.dpb[self.dpb_in].pic.p = crate::decode::clone_picture(&pic);
+            self.dpb[self.dpb_in].pic.p = crate::decode::clone_picture_mt(&pic, self.n_tc);
             self.dpb_in += 1;
             if self.dpb_in == self.dpb_sz {
                 self.dpb_in = 0;

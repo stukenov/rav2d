@@ -3064,161 +3064,161 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                 None => &mut [],
             };
             for tr in 0..rows {
-        // Collect per-tile-col MSAC state that must stay live across the sby
-        // loop (each tile-col's symbol decoder advances one sbrow at a time but
-        // we now interleave tile-cols within a sbrow).
-        let ts_base = (tr * cols) as usize;
-        let mut bufs: Vec<Vec<u8>> = Vec::with_capacity(cols as usize);
-        let mut fis: Vec<SbFrameInfo> = Vec::with_capacity(cols as usize);
-        let mut ranges: Vec<(i32, i32)> = Vec::with_capacity(cols as usize); // (rs, re)
-        for tc in 0..cols {
-            let ts_idx = ts_base + tc as usize;
-            let (cs, ce, rs, re) = {
-                let t = &ts[ts_idx].tiling;
-                (t.col_start, t.col_end, t.row_start, t.row_end)
-            };
-            fis.push(SbFrameInfo::from_frame(
-                seq_hdr,
-                frame_hdr,
-                bw,
-                bh,
-                root_bs,
-                sb_step,
-                n_passes,
-                refdir,
-                refdist,
-                absrefdist,
-                skip_mode_refs,
-                cs,
-                ce,
-                rs,
-                re,
-                ffr_idx,
-                tip_ref,
-            ));
-            ranges.push((rs, re));
-            bufs.push(std::mem::take(&mut ts[ts_idx].msac_buf));
-        }
-        // The buffers Vec now owns the tile data; build the symbol decoders
-        // borrowing from it (read-only) so they persist across the sby loop.
-        let mut msacs: Vec<MsacContext> = bufs
-            .iter()
-            .map(|b| MsacContext::new(b, disable_cdf))
-            .collect();
-        let mut part_ws: Vec<Vec<u8>> = (0..cols).map(|_| Vec::new()).collect();
-        let part_r: Vec<u8> = Vec::new();
-
-        // The tile row spans the same block-row range for every tile-col (only
-        // the column range differs), so derive the sbrow loop from tile-col 0.
-        let (row_rs, row_re) = ranges[0];
-
-        // PHASE A: decode every superblock-row across all tile-cols.
-        let mut by = row_rs;
-        while by < row_re {
-            // Project reference temporal MVs into the rolling-window `rf.rp_proj`
-            // for this superblock row (dav2d_refmvs_load_tmvs, decode.c:5151).
-            // Run once per sbrow over the full block-row width, before any
-            // tile-col reads it, so the inter tmvp candidates and frame_mode=2
-            // whole-frame TIP recon see this row's projection.
-            if need_load_tmvs {
-                let by_end = (by + sb_step) >> 1;
-                refmvs::load_tmvs(
-                    rf,
-                    tr,
-                    0,
-                    bw >> 1,
-                    by >> 1,
-                    by_end,
-                    seq_hdr.mv_traj,
-                    frame_hdr.tip.frame_mode,
-                    seq_hdr.tip_hole_fill,
-                    frame_hdr.tmvp_sample_step as i32,
-                    frame_hdr.n_ref_frames as i32,
-                );
-            }
-            let rf_ref: &refmvs::Frame = &*rf;
-            for tc in 0..cols as usize {
-                let ts_idx = ts_base + tc;
-                let (rs, re) = ranges[tc];
-                if by < rs || by >= re {
-                    continue;
+                // Collect per-tile-col MSAC state that must stay live across the sby
+                // loop (each tile-col's symbol decoder advances one sbrow at a time but
+                // we now interleave tile-cols within a sbrow).
+                let ts_base = (tr * cols) as usize;
+                let mut bufs: Vec<Vec<u8>> = Vec::with_capacity(cols as usize);
+                let mut fis: Vec<SbFrameInfo> = Vec::with_capacity(cols as usize);
+                let mut ranges: Vec<(i32, i32)> = Vec::with_capacity(cols as usize); // (rs, re)
+                for tc in 0..cols {
+                    let ts_idx = ts_base + tc as usize;
+                    let (cs, ce, rs, re) = {
+                        let t = &ts[ts_idx].tiling;
+                        (t.col_start, t.col_end, t.row_start, t.row_end)
+                    };
+                    fis.push(SbFrameInfo::from_frame(
+                        seq_hdr,
+                        frame_hdr,
+                        bw,
+                        bh,
+                        root_bs,
+                        sb_step,
+                        n_passes,
+                        refdir,
+                        refdist,
+                        absrefdist,
+                        skip_mode_refs,
+                        cs,
+                        ce,
+                        rs,
+                        re,
+                        ffr_idx,
+                        tip_ref,
+                    ));
+                    ranges.push((rs, re));
+                    bufs.push(std::mem::take(&mut ts[ts_idx].msac_buf));
                 }
-                reset_context(&mut l, keyframe, is_tip);
-                decode_tile_sbrow_entropy(
-                    bd_local,
-                    &fis[tc],
-                    frame_hdr,
-                    &mut ts[ts_idx],
-                    &mut msacs[tc],
-                    a,
-                    &mut lf.mask,
-                    &mut lf.lr_mask,
-                    &mut l,
-                    &mut *dst_y,
-                    &mut *dst_u,
-                    &mut *dst_v,
-                    &mut cf,
-                    &recon_frame,
-                    &mut cur_segmap[..],
-                    prev_segmap_ref,
-                    &mut lf.segmap_uv,
-                    lf.uv_segmap_stride,
-                    &mut cur_ccsomap[..],
-                    prev_ccsomap_ref,
-                    &mut part_ws[tc],
-                    &part_r,
-                    by,
-                    sb256w,
-                    root_bs,
-                    c_root_bs,
-                    &mut rt,
-                    rf_ref,
-                    &mut cur_mvs,
-                    &refp_pics,
-                    &svc_v,
-                    seq_hdr,
-                    frame_hdr,
-                    &masks,
-                )?;
+                // The buffers Vec now owns the tile data; build the symbol decoders
+                // borrowing from it (read-only) so they persist across the sby loop.
+                let mut msacs: Vec<MsacContext> = bufs
+                    .iter()
+                    .map(|b| MsacContext::new(b, disable_cdf))
+                    .collect();
+                let mut part_ws: Vec<Vec<u8>> = (0..cols).map(|_| Vec::new()).collect();
+                let part_r: Vec<u8> = Vec::new();
+
+                // The tile row spans the same block-row range for every tile-col (only
+                // the column range differs), so derive the sbrow loop from tile-col 0.
+                let (row_rs, row_re) = ranges[0];
+
+                // PHASE A: decode every superblock-row across all tile-cols.
+                let mut by = row_rs;
+                while by < row_re {
+                    // Project reference temporal MVs into the rolling-window `rf.rp_proj`
+                    // for this superblock row (dav2d_refmvs_load_tmvs, decode.c:5151).
+                    // Run once per sbrow over the full block-row width, before any
+                    // tile-col reads it, so the inter tmvp candidates and frame_mode=2
+                    // whole-frame TIP recon see this row's projection.
+                    if need_load_tmvs {
+                        let by_end = (by + sb_step) >> 1;
+                        refmvs::load_tmvs(
+                            rf,
+                            tr,
+                            0,
+                            bw >> 1,
+                            by >> 1,
+                            by_end,
+                            seq_hdr.mv_traj,
+                            frame_hdr.tip.frame_mode,
+                            seq_hdr.tip_hole_fill,
+                            frame_hdr.tmvp_sample_step as i32,
+                            frame_hdr.n_ref_frames as i32,
+                        );
+                    }
+                    let rf_ref: &refmvs::Frame = &*rf;
+                    for tc in 0..cols as usize {
+                        let ts_idx = ts_base + tc;
+                        let (rs, re) = ranges[tc];
+                        if by < rs || by >= re {
+                            continue;
+                        }
+                        reset_context(&mut l, keyframe, is_tip);
+                        decode_tile_sbrow_entropy(
+                            bd_local,
+                            &fis[tc],
+                            frame_hdr,
+                            &mut ts[ts_idx],
+                            &mut msacs[tc],
+                            a,
+                            &mut lf.mask,
+                            &mut lf.lr_mask,
+                            &mut l,
+                            &mut *dst_y,
+                            &mut *dst_u,
+                            &mut *dst_v,
+                            &mut cf,
+                            &recon_frame,
+                            &mut cur_segmap[..],
+                            prev_segmap_ref,
+                            &mut lf.segmap_uv,
+                            lf.uv_segmap_stride,
+                            &mut cur_ccsomap[..],
+                            prev_ccsomap_ref,
+                            &mut part_ws[tc],
+                            &part_r,
+                            by,
+                            sb256w,
+                            root_bs,
+                            c_root_bs,
+                            &mut rt,
+                            rf_ref,
+                            &mut cur_mvs,
+                            &refp_pics,
+                            &svc_v,
+                            seq_hdr,
+                            frame_hdr,
+                            &masks,
+                        )?;
+                    }
+                    by += sb_step;
+                }
+
+                // Return the MSAC buffers to the tile states.
+                drop(msacs);
+                for (tc, buf) in bufs.into_iter().enumerate() {
+                    ts[ts_base + tc].msac_buf = buf;
+                }
+
+                // PHASE B: deferred per-superblock-row filter pass over the whole tile
+                // row (deblock cols -> deblock rows + copy_db -> CDEF(+CCSO) -> LR).
+                let mut by = row_rs;
+                while by < row_re {
+                    let sby = by / sb_step;
+                    filter_sbrow(
+                        bd_local,
+                        seq_hdr,
+                        frame_hdr,
+                        lf,
+                        &mut *dst_y,
+                        &mut *dst_u,
+                        &mut *dst_v,
+                        &filter_params,
+                        cur_segmap,
+                        b4_stride_v,
+                        hbd_v,
+                        fc_inloop_filters,
+                        fc_sbh,
+                        sb_step,
+                        sb256w,
+                        sb128,
+                        bw,
+                        bh,
+                        sby,
+                    );
+                    by += sb_step;
+                }
             }
-            by += sb_step;
-        }
-
-        // Return the MSAC buffers to the tile states.
-        drop(msacs);
-        for (tc, buf) in bufs.into_iter().enumerate() {
-            ts[ts_base + tc].msac_buf = buf;
-        }
-
-        // PHASE B: deferred per-superblock-row filter pass over the whole tile
-        // row (deblock cols -> deblock rows + copy_db -> CDEF(+CCSO) -> LR).
-        let mut by = row_rs;
-        while by < row_re {
-            let sby = by / sb_step;
-            filter_sbrow(
-                bd_local,
-                seq_hdr,
-                frame_hdr,
-                lf,
-                &mut *dst_y,
-                &mut *dst_u,
-                &mut *dst_v,
-                &filter_params,
-                cur_segmap,
-                b4_stride_v,
-                hbd_v,
-                fc_inloop_filters,
-                fc_sbh,
-                sb_step,
-                sb256w,
-                sb128,
-                bw,
-                bh,
-                sby,
-            );
-            by += sb_step;
-        }
-    }
         }};
     }
 
@@ -4100,13 +4100,27 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     // Hand the reconstructed picture to the decoder's output path. (Visibility
     // filtering / POC reordering is wired with full output queueing later.)
     // The output buffer must be independently owned; clone the shared pixels.
-    c.frame_out.push(clone_picture(&shared));
+    // The plane copy is parallelised across `c.n_tc` (the recon core stays on
+    // the single-thread path; only this disjoint-output display copy threads).
+    let display_threads = c.n_tc;
+    c.frame_out.push(clone_picture_mt(&shared, display_threads));
     Ok(())
 }
 
 /// Clone a `Picture`'s pixel planes into a fresh independently-owned allocation
 /// (the output path takes ownership while references keep the shared `Arc`).
 pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
+    clone_picture_mt(src, 1)
+}
+
+/// `clone_picture` with optional per-plane parallelism. The three colour planes
+/// occupy independent allocations and are copied by independent jobs, so the
+/// result is byte-identical regardless of thread count. `n_threads <= 1` runs
+/// the exact sequential copy (single-thread path unchanged).
+pub(crate) fn clone_picture_mt(
+    src: &crate::picture::Picture,
+    n_threads: u32,
+) -> crate::picture::Picture {
     let allocator: std::sync::Arc<dyn crate::picture::PicAllocator> =
         std::sync::Arc::new(crate::picture::DefaultPicAllocator::new());
     let mut dst = match crate::picture::Picture::alloc(
@@ -4127,34 +4141,48 @@ pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Pi
     } else {
         3
     };
+    // Wrap the raw plane pointers so each plane-copy job can move them across a
+    // thread boundary. The planes are separate allocations and each job touches
+    // only its own plane, so this is race-free.
+    struct PlanePtr(*const u8, *mut u8);
+    // SAFETY: each job copies exactly one plane between two distinct allocations.
+    unsafe impl Send for PlanePtr {}
+
+    let ss_ver = (src.p.layout == crate::headers::PixelLayout::I420) as i32;
+    let ss_hor = matches!(
+        src.p.layout,
+        crate::headers::PixelLayout::I420 | crate::headers::PixelLayout::I422
+    ) as i32;
+    let bytes = (src.p.bpc + 7) / 8;
+
+    let mut jobs: Vec<Box<dyn FnOnce() + Send>> = Vec::with_capacity(n_planes);
     for pl in 0..n_planes {
         let (sp, dp) = (src.data[pl], dst.data[pl]);
         if let (Some(sp), Some(dp)) = (sp, dp) {
             let stride_idx = if pl == 0 { 0 } else { 1 };
             let s_stride = src.stride[stride_idx];
             let d_stride = dst.stride[stride_idx];
-            let ss_ver = (src.p.layout == crate::headers::PixelLayout::I420) as i32;
-            let ss_hor = matches!(
-                src.p.layout,
-                crate::headers::PixelLayout::I420 | crate::headers::PixelLayout::I422
-            ) as i32;
-            let bytes = (src.p.bpc + 7) / 8;
             let (pw, ph) = if pl == 0 {
                 (src.p.w, src.p.h)
             } else {
                 ((src.p.w + ss_hor) >> ss_hor, (src.p.h + ss_ver) >> ss_ver)
             };
             let row_bytes = (pw * bytes) as usize;
-            for y in 0..ph as usize {
-                // SAFETY: both allocations span stride*height bytes per plane.
-                unsafe {
-                    let srow = sp.as_ptr().offset(y as isize * s_stride);
-                    let drow = dp.as_ptr().offset(y as isize * d_stride);
-                    std::ptr::copy_nonoverlapping(srow, drow, row_bytes);
+            let ptrs = PlanePtr(sp.as_ptr(), dp.as_ptr());
+            jobs.push(Box::new(move || {
+                let ptrs = ptrs;
+                for y in 0..ph as usize {
+                    // SAFETY: both allocations span stride*height bytes per plane.
+                    unsafe {
+                        let srow = ptrs.0.offset(y as isize * s_stride);
+                        let drow = ptrs.1.offset(y as isize * d_stride);
+                        std::ptr::copy_nonoverlapping(srow, drow, row_bytes);
+                    }
                 }
-            }
+            }));
         }
     }
+    crate::thread_task::run_disjoint_jobs(n_threads, jobs);
     dst
 }
 
@@ -4182,17 +4210,28 @@ pub(crate) fn picture_has_grain(pic: &crate::picture::Picture) -> bool {
 /// dav2d's memcpy-of-non-modified-planes), then the grain kernels overwrite the
 /// grained planes reading from the ungrained `src` planes.
 pub(crate) fn apply_grain_to_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
+    apply_grain_to_picture_mt(src, 1)
+}
+
+/// `apply_grain_to_picture` with optional parallelism: the base copy is done
+/// per-plane and the grain synthesis over independent row bands, both via
+/// `run_disjoint_jobs`. `n_threads <= 1` is byte-identical to the sequential
+/// path and spawns no threads.
+pub(crate) fn apply_grain_to_picture_mt(
+    src: &crate::picture::Picture,
+    n_threads: u32,
+) -> crate::picture::Picture {
     let fgd = match src.fgm {
         Some(f) => f,
-        None => return clone_picture(src),
+        None => return clone_picture_mt(src, n_threads),
     };
     if src.p.bpc != 8 {
         // Only 8bpc grain kernels are ported; higher bit depths fall back to a
         // plain copy (no clip corpus exercises >8bpc grain yet).
-        return clone_picture(src);
+        return clone_picture_mt(src, n_threads);
     }
 
-    let dst = clone_picture(src);
+    let dst = clone_picture_mt(src, n_threads);
     let seed = src
         .frame_hdr
         .as_ref()
@@ -4230,7 +4269,7 @@ pub(crate) fn apply_grain_to_picture(src: &crate::picture::Picture) -> crate::pi
             (&[], &[], &mut [], &mut [])
         };
 
-        crate::filmgrain::apply_grain_8bpc(
+        crate::filmgrain::apply_grain_8bpc_mt(
             dst_y,
             dst_u,
             dst_v,
@@ -4245,6 +4284,7 @@ pub(crate) fn apply_grain_to_picture(src: &crate::picture::Picture) -> crate::pi
             seed,
             ss_hor,
             ss_ver,
+            n_threads,
         );
     }
 
@@ -8912,14 +8952,43 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
             );
         } else {
             crate::mc_neon::put_8tap_8bpc(
-                dst8, dst_stride, src8, src_off, src_stride, w, h, mxf, myf, filter as i32,
+                dst8,
+                dst_stride,
+                src8,
+                src_off,
+                src_stride,
+                w,
+                h,
+                mxf,
+                myf,
+                filter as i32,
             );
         }
     } else if is_bilin {
-        crate::mc::put_bilin(bd, dst, dst_stride, &src[src_off..], src_stride, w, h, mxf, myf);
+        crate::mc::put_bilin(
+            bd,
+            dst,
+            dst_stride,
+            &src[src_off..],
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+        );
     } else {
         crate::mc::put_8tap(
-            bd, dst, dst_stride, src, src_off, src_stride, w, h, mxf, myf, filter as i32,
+            bd,
+            dst,
+            dst_stride,
+            src,
+            src_off,
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+            filter as i32,
         );
     }
 }
@@ -9035,14 +9104,43 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
             );
         } else {
             crate::mc_neon::prep_8tap_8bpc(
-                tmp, tmp_stride, src8, src_off, src_stride, w, h, mxf, myf, filter as i32,
+                tmp,
+                tmp_stride,
+                src8,
+                src_off,
+                src_stride,
+                w,
+                h,
+                mxf,
+                myf,
+                filter as i32,
             );
         }
     } else if is_bilin {
-        crate::mc::prep_bilin(bd, tmp, tmp_stride, &src[src_off..], src_stride, w, h, mxf, myf);
+        crate::mc::prep_bilin(
+            bd,
+            tmp,
+            tmp_stride,
+            &src[src_off..],
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+        );
     } else {
         crate::mc::prep_8tap(
-            bd, tmp, tmp_stride, src, src_off, src_stride, w, h, mxf, myf, filter as i32,
+            bd,
+            tmp,
+            tmp_stride,
+            src,
+            src_off,
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+            filter as i32,
         );
     }
 }
@@ -10866,7 +10964,16 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                 } else {
                     (&tmp1[0], &tmp0[0])
                 };
-                mc_mask(recon.bd, &mut recon.dst_y[dst_off..], y_stride, a0, a1, w, h, mask);
+                mc_mask(
+                    recon.bd,
+                    &mut recon.dst_y[dst_off..],
+                    y_stride,
+                    a0,
+                    a1,
+                    w,
+                    h,
+                    mask,
+                );
             }
             3 => {
                 // SEG: luma w_mask derives subsampled seg mask for chroma reuse.
@@ -13048,14 +13155,43 @@ fn mc_prep_bounds_8bpc<BD: crate::pixel::BitDepth>(
             );
         } else {
             crate::mc_neon::prep_8tap_8bpc(
-                tmp, tmp_stride, src8, src_off, src_stride, w, h, mxf, myf, filter as i32,
+                tmp,
+                tmp_stride,
+                src8,
+                src_off,
+                src_stride,
+                w,
+                h,
+                mxf,
+                myf,
+                filter as i32,
             );
         }
     } else if is_bilin {
-        crate::mc::prep_bilin(bd, tmp, tmp_stride, &src[src_off..], src_stride, w, h, mxf, myf);
+        crate::mc::prep_bilin(
+            bd,
+            tmp,
+            tmp_stride,
+            &src[src_off..],
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+        );
     } else {
         crate::mc::prep_8tap(
-            bd, tmp, tmp_stride, src, src_off, src_stride, w, h, mxf, myf, filter as i32,
+            bd,
+            tmp,
+            tmp_stride,
+            src,
+            src_off,
+            src_stride,
+            w,
+            h,
+            mxf,
+            myf,
+            filter as i32,
         );
     }
 }
@@ -13611,8 +13747,8 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                 }
             } else {
                 inter_mc_plane_8bpc(
-                    bd, dst, uv_stride, &refp, pl, cbx, cby, cbw4, cbh4, mv.x, mv.y, filter, ss_hor,
-                    ss_ver, fi.bw, fi.bh,
+                    bd, dst, uv_stride, &refp, pl, cbx, cby, cbw4, cbh4, mv.x, mv.y, filter,
+                    ss_hor, ss_ver, fi.bw, fi.bh,
                 );
             }
         }
@@ -15769,7 +15905,18 @@ fn dispatch_ipred<BD: crate::pixel::BitDepth>(
         let edge8: &[u8] =
             unsafe { std::slice::from_raw_parts(edge.as_ptr() as *const u8, edge.len()) };
         dispatch_ipred_8bpc(
-            m, dst8, dst_off, stride, edge8, edge_o, w, h, angle, max_w, max_h, ibp_weights,
+            m,
+            dst8,
+            dst_off,
+            stride,
+            edge8,
+            edge_o,
+            w,
+            h,
+            angle,
+            max_w,
+            max_h,
+            ibp_weights,
         );
         return;
     }
@@ -15923,11 +16070,32 @@ fn mc_w_mask<BD: crate::pixel::BitDepth>(
         let d8: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
         crate::mc_neon::w_mask_8bpc(
-            d8, dst_stride, tmp1, tmp2, w, h, m, mask_stride, sign, ss_hor, ss_ver,
+            d8,
+            dst_stride,
+            tmp1,
+            tmp2,
+            w,
+            h,
+            m,
+            mask_stride,
+            sign,
+            ss_hor,
+            ss_ver,
         );
     } else {
         crate::mc::w_mask(
-            bd, dst, dst_stride, tmp1, tmp2, w, h, m, mask_stride, sign, ss_hor, ss_ver,
+            bd,
+            dst,
+            dst_stride,
+            tmp1,
+            tmp2,
+            w,
+            h,
+            m,
+            mask_stride,
+            sign,
+            ss_hor,
+            ss_ver,
         );
     }
 }
