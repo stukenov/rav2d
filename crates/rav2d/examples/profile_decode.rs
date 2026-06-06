@@ -40,7 +40,10 @@ fn decode_once(bytes: &[u8]) -> usize {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = PathBuf::from(args.get(1).expect("usage: profile_decode <clip.obu> [iters]"));
+    let path = PathBuf::from(
+        args.get(1)
+            .expect("usage: profile_decode <clip.obu> [iters]"),
+    );
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2000);
     let bytes = std::fs::read(&path).expect("read clip");
     let mut total = 0usize;
