@@ -2078,7 +2078,15 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
 /// invisible frames emitted in coding order) and asserts every plane of every
 /// frame is byte-identical — the 16bpc analogue of the 8bpc full-clip sweep.
 #[test]
-#[ignore = "HBD recon WIP: enable once the 16bpc pixel path is bit-exact"]
+#[ignore = "HBD recon WIP: the entropy/header/refmvs path already decodes the \
+            10-bit streams with the right frame count and geometry, but the pixel \
+            recon path is still u8-hardcoded — ReconCtx.dst_* are &mut [u8] and \
+            y_stride_px holds the BYTE stride, so prediction/residual write 8-bit \
+            samples at byte offsets into the 16-bit planes (first diff at plane 0 \
+            sample 0: intra frames yield rav2d=0, inter frames pack two bytes e.g. \
+            0x6565=25957). Foundation (BitDepth trait) and itx (inv_txfm_add) are \
+            generic; remaining: make ipred/cfl/mc/deblock/cdef generic and thread \
+            BitDepth through recon_b_intra*/recon_b_inter*/ReconCtx in decode.rs."]
 fn bit_exact_hbd_sweep() {
     let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
     let mut all = Vec::new();
