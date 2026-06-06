@@ -116,7 +116,7 @@ fn corpus() -> Vec<Vec<u8>> {
 #[test]
 fn fuzz_random_bytes_no_panic() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    for iter in 0..3000u64 {
+    for iter in 0..6000u64 {
         let len = rng.below(4096);
         let buf: Vec<u8> = (0..len).map(|_| rng.byte()).collect();
         if let Err(msg) = decode_catch(buf) {
@@ -136,7 +136,7 @@ fn fuzz_mutated_streams_no_panic() {
         if base.is_empty() {
             continue;
         }
-        for iter in 0..2000u64 {
+        for iter in 0..3000u64 {
             let mut b = base.clone();
             match rng.below(4) {
                 // single/multi byte flips

@@ -7471,7 +7471,10 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 recon.frm_hdr,
             );
             let diff = unsafe { b.data.intra.intrabc_mv };
-            let drl = unsafe { b.data.inter.drl_idx[0] } as usize;
+            // drl_idx can reach max_drl_bits/max_bvp_drl_bits, which a malformed
+            // header can push past the 6-entry mvstack; clamp to the stack bound
+            // (no-op for valid streams, where drl < n_mvs <= mvstack.len()).
+            let drl = (unsafe { b.data.inter.drl_idx[0] } as usize).min(mvstack.len() - 1);
             let mut mv = mvstack[drl].mv[0];
             if unsafe { mv.n } == 0 {
                 // Force the refmv to a nonzero value (decode.c:990-998).
@@ -7676,7 +7679,8 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                     recon.frm_hdr,
                 );
                 let diff = unsafe { b.data.inter.mv[0] };
-                let drl = unsafe { b.data.inter.drl_idx[0] } as usize;
+                // Clamp drl to the mvstack bound (see the IntraBC path above).
+                let drl = (unsafe { b.data.inter.drl_idx[0] } as usize).min(mvstack.len() - 1);
                 let mut mv = if inter_mode == InterPredMode::WarpMv as u8 {
                     let wri = unsafe { b.data.inter.warp_ref_idx } as usize;
                     let prec = if unsafe { b.data.inter.warpmv_with_mvd } != 0 {
@@ -8229,7 +8233,8 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 let packed_prec = unsafe { b.data.inter.mv_prec } as i32;
                 for n in 0..2 {
                     let diff = unsafe { b.data.inter.mv[n] };
-                    let drl = unsafe { b.data.inter.drl_idx[n] } as usize;
+                    // Clamp drl to the mvstack bound (see the single-ref path above).
+                    let drl = (unsafe { b.data.inter.drl_idx[n] } as usize).min(mvstack.len() - 1);
                     let mut mv = unsafe { mvstack[drl].mv[n].c };
                     if m_pair[n] == InterPredMode::NewMv as u8 {
                         // Per-ref precision (decode.c:1275); for joint modes the
