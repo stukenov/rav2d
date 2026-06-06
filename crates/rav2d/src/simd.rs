@@ -10,7 +10,7 @@
 //! Bit-exactness relies on `wide::i32x8`'s `>>` being an **arithmetic**
 //! (sign-propagating) shift; `shr_is_arithmetic` below is the pre-flight gate.
 
-use wide::i32x8;
+use wide::{CmpLt, i32x8};
 
 use crate::pixel::{BitDepth, Pixel};
 
@@ -42,6 +42,19 @@ fn load8_u8(s: &[u8]) -> i32x8 {
         s[6] as i32,
         s[7] as i32,
     ])
+}
+
+/// Load 8 consecutive `i32` into an `i32x8`.
+#[inline(always)]
+fn load8_i32(s: &[i32]) -> i32x8 {
+    i32x8::from([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
+}
+
+/// Store an `i32x8` to 8 consecutive `i32`.
+#[inline(always)]
+fn store8_i32(dst: &mut [i32], v: i32x8) {
+    let a = v.to_array();
+    dst[..8].copy_from_slice(&a);
 }
 
 /// Load 8 consecutive pixels (`u8`/`u16`, zero-extended) into an `i32x8`.
@@ -215,6 +228,57 @@ pub fn morph_row<BD: BitDepth>(bd: BD, dst: &mut [BD::Pixel], alpha: i32, beta: 
     }
 }
 
+/// itx DC-only row: `dst[x] = clip(dst[x] + dc)` for `x in 0..n`.
+#[inline]
+pub fn dc_add_row<BD: BitDepth>(bd: BD, dst: &mut [BD::Pixel], dc: i32, n: usize) {
+    let dc_v = i32x8::splat(dc);
+    let mut x = 0;
+    while x + 8 <= n {
+        let r = load8_pix(&dst[x..]) + dc_v;
+        store8_clip(bd, &mut dst[x..], r);
+        x += 8;
+    }
+    while x < n {
+        let p: i32 = dst[x].into();
+        dst[x] = bd.pixel_clip(p + dc);
+        x += 1;
+    }
+}
+
+/// `cctx` row: cross-component-transform rotate + clip over two i32 planes.
+/// `u'[i] = iclip((u*cosa - v*sina + 128 - (a<0)) >> 8, min, max)`,
+/// `v'[i] = iclip((u*sina + v*cosa + 128 - (b<0)) >> 8, min, max)`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn cctx_row(u: &mut [i32], v: &mut [i32], sina: i32, cosa: i32, sz: usize, min: i32, max: i32) {
+    let sina_v = i32x8::splat(sina);
+    let cosa_v = i32x8::splat(cosa);
+    let c128 = i32x8::splat(128);
+    let zero = i32x8::splat(0);
+    let min_v = i32x8::splat(min);
+    let max_v = i32x8::splat(max);
+    let mut i = 0;
+    while i + 8 <= sz {
+        let uu = load8_i32(&u[i..]);
+        let vv = load8_i32(&v[i..]);
+        let a = uu * cosa_v - vv * sina_v;
+        let b = uu * sina_v + vv * cosa_v;
+        // `a.cmp_lt(0)` yields -1 lanes where a<0, i.e. `+ (-1)` == `- (a<0)`.
+        let ra = sra(a + c128 + a.cmp_lt(zero), 8).max(min_v).min(max_v);
+        let rb = sra(b + c128 + b.cmp_lt(zero), 8).max(min_v).min(max_v);
+        store8_i32(&mut u[i..], ra);
+        store8_i32(&mut v[i..], rb);
+        i += 8;
+    }
+    while i < sz {
+        let a = u[i] * cosa - v[i] * sina;
+        let b = u[i] * sina + v[i] * cosa;
+        u[i] = (((a + 128 - (a < 0) as i32) >> 8).max(min)).min(max);
+        v[i] = (((b + 128 - (b < 0) as i32) >> 8).max(min)).min(max);
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +427,66 @@ mod tests {
                 })
                 .collect();
             assert_eq!(got, want, "blend n={n}");
+        }
+    }
+
+    #[test]
+    fn dc_add_matches_scalar() {
+        let mut rng = Rng(0xDC_ADD_111);
+        for &(bpc, max) in &[(8u8, 255i32), (10, 1023), (12, 4095)] {
+            for dc in [-300i32, -1, 0, 1, 50, 5000] {
+                for n in lens() {
+                    if bpc == 8 {
+                        let bd = BitDepth8;
+                        let d0: Vec<u8> = (0..n).map(|_| rng.u8()).collect();
+                        let mut got = d0.clone();
+                        dc_add_row(bd, &mut got, dc, n);
+                        let want: Vec<u8> =
+                            (0..n).map(|i| bd.pixel_clip(d0[i] as i32 + dc)).collect();
+                        assert_eq!(got, want, "dc 8bpc n={n} dc={dc}");
+                    } else {
+                        let bd = BitDepth16::new(bpc);
+                        let d0: Vec<u16> =
+                            (0..n).map(|_| (rng.next() % (max as u64 + 1)) as u16).collect();
+                        let mut got = d0.clone();
+                        dc_add_row(bd, &mut got, dc, n);
+                        let want: Vec<u16> =
+                            (0..n).map(|i| bd.pixel_clip(d0[i] as i32 + dc)).collect();
+                        assert_eq!(got, want, "dc {bpc}b n={n} dc={dc}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cctx_matches_scalar() {
+        let mut rng = Rng(0xCC_7700_3311);
+        for bitdepth in [8i32, 10, 12] {
+            let min = -(1 << (bitdepth + 7));
+            let max = (1 << (bitdepth + 7)) - 1;
+            // angle coeffs scaled by ~2^8 (rotation cos/sin); keep small like real data.
+            for &(sina, cosa) in &[(0i32, 256i32), (181, 181), (256, 0), (-181, 181), (100, 236)] {
+                // sizes are powers of two in 16..=1024; also test a few + an odd tail.
+                for sz in [16usize, 32, 64, 256, 1024, 17, 23] {
+                    let u0: Vec<i32> = (0..sz).map(|_| (rng.next() as i32) % (max + 1)).collect();
+                    let v0: Vec<i32> = (0..sz).map(|_| (rng.next() as i32) % (max + 1)).collect();
+                    let (mut us, mut vs) = (u0.clone(), v0.clone());
+                    cctx_row(&mut us, &mut vs, sina, cosa, sz, min, max);
+                    // independent scalar reference
+                    let (mut ur, mut vr) = (u0.clone(), v0.clone());
+                    for i in 0..sz {
+                        let a = ur[i] * cosa - vr[i] * sina;
+                        let b = ur[i] * sina + vr[i] * cosa;
+                        let na = ((a + 128 - (a < 0) as i32) >> 8).clamp(min, max);
+                        let nb = ((b + 128 - (b < 0) as i32) >> 8).clamp(min, max);
+                        ur[i] = na;
+                        vr[i] = nb;
+                    }
+                    assert_eq!(us, ur, "cctx u bd={bitdepth} sz={sz} ang=({sina},{cosa})");
+                    assert_eq!(vs, vr, "cctx v bd={bitdepth} sz={sz} ang=({sina},{cosa})");
+                }
+            }
         }
     }
 

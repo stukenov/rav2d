@@ -1,4 +1,3 @@
-use crate::intops::iclip;
 use crate::levels::{N_TX_1D_TYPES, N_TX_SIZES};
 
 pub type Itx1dFn = fn(c: &mut [i32], stride: usize);
@@ -262,12 +261,7 @@ pub fn cctx(u: &mut [i32], v: &mut [i32], angle: &[i16; 3], sz: usize, bitdepth:
     let sina = angle[0] as i32;
     let cosa = angle[1] as i32;
     debug_assert!(angle[2] == -angle[0]);
-    for i in 0..sz {
-        let a = u[i] * cosa - v[i] * sina;
-        let b = u[i] * sina + v[i] * cosa;
-        u[i] = iclip((a + 128 - (a < 0) as i32) >> 8, min, max);
-        v[i] = iclip((b + 128 - (b < 0) as i32) >> 8, min, max);
-    }
+    crate::simd::cctx_row(u, v, sina, cosa, sz, min, max);
 }
 
 pub fn inv_wht_wht_4x4(coeff: &[i32; 16], tmp: &mut [i32; 16]) {

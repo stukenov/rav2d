@@ -69,10 +69,13 @@ pub fn inv_txfm_add<BD: BitDepth>(
         }
         dc = (dc + rnd) >> shift;
         for y in 0..h {
-            for x in 0..w {
-                let p = dst[dst_off + y * stride + x].into();
-                dst[dst_off + y * stride + x] = bd.pixel_clip(p + dc);
+            let row = dst_off + y * stride;
+            if row >= dst.len() {
+                break;
             }
+            let d = &mut dst[row..];
+            let n = w.min(d.len());
+            crate::simd::dc_add_row(bd, d, dc, n);
         }
         return;
     }
