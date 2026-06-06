@@ -2781,6 +2781,15 @@ pub fn load_tmvs(
         let tgt = rf.mfmv[n].tgt;
         let ref_sign = rf.mfmv[n].dir as usize;
 
+        // The TIP mfmv source is added without consulting `ref_done`, so on a
+        // malformed stream it can point at a reference whose temporal grid was
+        // never populated (empty rp_ref plane). Skip such a source instead of
+        // indexing an empty buffer. Valid streams always have a populated grid
+        // for any selected mfmv reference.
+        if rf.rp_ref[mfmv_ref].is_empty() {
+            continue;
+        }
+
         for y in (row_start8..row_end8).step_by(tmvp_sample_step as usize) {
             for x in (col_start8i..col_end8i).step_by(tmvp_sample_step as usize) {
                 let pos = (y as usize & (sbsz8 as usize - 1)) * stride as usize + x as usize;
