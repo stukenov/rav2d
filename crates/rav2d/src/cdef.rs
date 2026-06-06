@@ -1,5 +1,6 @@
-use crate::ccso::{ccso_add_8bpc, ccso_prep_8bpc};
+use crate::ccso::{ccso_add, ccso_prep};
 use crate::intops::{apply_sign, iclip, imax, imin, ulog2};
+use crate::pixel::{BitDepth, BitDepth8, Pixel};
 use crate::tables::CDEF_DIRECTIONS;
 
 pub const CDEF_HAVE_LEFT: u8 = 1 << 0;
@@ -21,6 +22,41 @@ pub fn cdef_padding_8bpc(
     top: &[u8],
     top_off: usize,
     bottom: &[u8],
+    bottom_off: usize,
+    w: usize,
+    h: usize,
+    edges: u8,
+) {
+    cdef_padding(
+        BitDepth8,
+        tmp,
+        tmp_stride,
+        src,
+        src_stride,
+        src_off,
+        left,
+        top,
+        top_off,
+        bottom,
+        bottom_off,
+        w,
+        h,
+        edges,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cdef_padding<BD: BitDepth>(
+    _bd: BD,
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    src: &[BD::Pixel],
+    src_stride: usize,
+    src_off: usize,
+    left: &[[BD::Pixel; 2]],
+    top: &[BD::Pixel],
+    top_off: usize,
+    bottom: &[BD::Pixel],
     bottom_off: usize,
     w: usize,
     h: usize,
@@ -58,7 +94,7 @@ pub fn cdef_padding_8bpc(
     for y in y_start..0 {
         for x in x_start..x_end {
             let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
-            tmp[ti] = top[(toff as i32 + x) as usize] as i16;
+            tmp[ti] = Into::<i32>::into(top[(toff as i32 + x) as usize]) as i16;
         }
         toff += src_stride;
     }
@@ -66,7 +102,7 @@ pub fn cdef_padding_8bpc(
     for y in 0..h as i32 {
         for x in x_start..0 {
             let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
-            tmp[ti] = left[y as usize][(2 + x) as usize] as i16;
+            tmp[ti] = Into::<i32>::into(left[y as usize][(2 + x) as usize]) as i16;
         }
     }
 
@@ -74,7 +110,7 @@ pub fn cdef_padding_8bpc(
     for y in 0..h as i32 {
         for x in 0..x_end {
             let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
-            tmp[ti] = src[(soff as i32 + x) as usize] as i16;
+            tmp[ti] = Into::<i32>::into(src[(soff as i32 + x) as usize]) as i16;
         }
         soff += src_stride;
     }
@@ -83,7 +119,7 @@ pub fn cdef_padding_8bpc(
     for y in h as i32..y_end {
         for x in x_start..x_end {
             let ti = (o as i32 + x + y * tmp_stride as i32) as usize;
-            tmp[ti] = bottom[(boff as i32 + x) as usize] as i16;
+            tmp[ti] = Into::<i32>::into(bottom[(boff as i32 + x) as usize]) as i16;
         }
         boff += src_stride;
     }
@@ -104,13 +140,23 @@ pub fn fill(tmp: &mut [i16], stride: usize, w: usize, h: usize) {
 }
 
 pub fn cdef_find_dir(img: &[u8], stride: usize, var: &mut u32) -> i32 {
+    cdef_find_dir_bd(BitDepth8, img, stride, var)
+}
+
+pub fn cdef_find_dir_bd<BD: BitDepth>(
+    bd: BD,
+    img: &[BD::Pixel],
+    stride: usize,
+    var: &mut u32,
+) -> i32 {
+    let bitdepth_min_8 = bd.bitdepth_min_8();
     let mut partial_sum_hv = [[0i32; 8]; 2];
     let mut partial_sum_diag = [[0i32; 15]; 2];
     let mut partial_sum_alt = [[0i32; 11]; 4];
 
     for y in 0..8usize {
         for x in 0..8usize {
-            let px = img[y * stride + x] as i32 - 128;
+            let px = (Into::<i32>::into(img[y * stride + x]) >> bitdepth_min_8) - 128;
 
             partial_sum_diag[0][y + x] += px;
             partial_sum_alt[0][y + (x >> 1)] += px;
@@ -199,10 +245,10 @@ pub const BACKUP_2X8_UV: u8 = 1 << 1;
 
 /// Backup last 2 rows from a single plane for CDEF line buffer.
 /// `height` is the block height for this plane (8 for luma, 8 or 4 for chroma).
-pub fn backup2lines_plane(
-    dst: &mut [u8],
+pub fn backup2lines_plane<P: Pixel>(
+    dst: &mut [P],
     dst_off: usize,
-    src: &[u8],
+    src: &[P],
     src_off: usize,
     stride: isize,
     height: usize,
@@ -221,9 +267,9 @@ pub fn backup2lines_plane(
 
 /// Backup a 2-pixel-wide column from a single plane for CDEF.
 /// Saves pixels at (x_off - 2) and (x_off - 1) for `rows` rows.
-pub fn backup2x8_plane(
-    dst: &mut [[u8; 2]],
-    src: &[u8],
+pub fn backup2x8_plane<P: Pixel>(
+    dst: &mut [[P; 2]],
+    src: &[P],
     src_off: usize,
     stride: isize,
     x_off: isize,
@@ -237,6 +283,7 @@ pub fn backup2x8_plane(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cdef_filter_block_8bpc(
     dst: &mut [u8],
     dst_stride: usize,
@@ -254,11 +301,51 @@ pub fn cdef_filter_block_8bpc(
     h: usize,
     edges: u8,
 ) {
+    cdef_filter_block(
+        BitDepth8,
+        dst,
+        dst_stride,
+        dst_off,
+        left,
+        top,
+        top_off,
+        bottom,
+        bottom_off,
+        pri_strength,
+        sec_strength,
+        dir,
+        damping,
+        w,
+        h,
+        edges,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cdef_filter_block<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    dst_off: usize,
+    left: &[[BD::Pixel; 2]],
+    top: &[BD::Pixel],
+    top_off: usize,
+    bottom: &[BD::Pixel],
+    bottom_off: usize,
+    pri_strength: i32,
+    sec_strength: i32,
+    dir: usize,
+    damping: i32,
+    w: usize,
+    h: usize,
+    edges: u8,
+) {
     let tmp_stride: usize = 12;
     let mut tmp_buf = [0i16; 144];
     let o = 2 * tmp_stride + 2;
 
-    cdef_padding_8bpc(
+    cdef_padding(
+        bd,
         &mut tmp_buf,
         tmp_stride,
         &*dst,
@@ -274,17 +361,18 @@ pub fn cdef_filter_block_8bpc(
         edges,
     );
 
+    let bitdepth_min_8 = bd.bitdepth_min_8();
     let mut dp = dst_off;
     let mut tp = o;
 
     if pri_strength != 0 {
-        let pri_tap = 4 - (pri_strength & 1);
+        let pri_tap = 4 - ((pri_strength >> bitdepth_min_8) & 1);
         let pri_shift = imax(0, damping - ulog2(pri_strength as u32));
         if sec_strength != 0 {
             let sec_shift = damping - ulog2(sec_strength as u32);
             for _y in 0..h {
                 for x in 0..w {
-                    let px = dst[dp + x] as i32;
+                    let px = Into::<i32>::into(dst[dp + x]);
                     let mut sum = 0i32;
                     let mut max_v = px;
                     let mut min_v = px;
@@ -320,8 +408,11 @@ pub fn cdef_filter_block_8bpc(
                         min_v = imin(s3, min_v);
                         max_v = imax(s3, max_v);
                     }
-                    dst[dp + x] =
-                        iclip(px + ((sum - (sum < 0) as i32 + 8) >> 4), min_v, max_v) as u8;
+                    dst[dp + x] = BD::Pixel::from_i32(iclip(
+                        px + ((sum - (sum < 0) as i32 + 8) >> 4),
+                        min_v,
+                        max_v,
+                    ));
                 }
                 dp += dst_stride;
                 tp += tmp_stride;
@@ -329,7 +420,7 @@ pub fn cdef_filter_block_8bpc(
         } else {
             for _y in 0..h {
                 for x in 0..w {
-                    let px = dst[dp + x] as i32;
+                    let px = Into::<i32>::into(dst[dp + x]);
                     let mut sum = 0i32;
                     let mut pri_tap_k = pri_tap;
                     for k in 0..2 {
@@ -340,7 +431,7 @@ pub fn cdef_filter_block_8bpc(
                         sum += pri_tap_k * constrain(p1 - px, pri_strength, pri_shift);
                         pri_tap_k = (pri_tap_k & 3) | 2;
                     }
-                    dst[dp + x] = (px + ((sum - (sum < 0) as i32 + 8) >> 4)) as u8;
+                    dst[dp + x] = BD::Pixel::from_i32(px + ((sum - (sum < 0) as i32 + 8) >> 4));
                 }
                 dp += dst_stride;
                 tp += tmp_stride;
@@ -350,7 +441,7 @@ pub fn cdef_filter_block_8bpc(
         let sec_shift = damping - ulog2(sec_strength as u32);
         for _y in 0..h {
             for x in 0..w {
-                let px = dst[dp + x] as i32;
+                let px = Into::<i32>::into(dst[dp + x]);
                 let mut sum = 0i32;
                 for k in 0..2 {
                     let off1 = CDEF_DIRECTIONS[dir + 4][k] as isize;
@@ -365,7 +456,7 @@ pub fn cdef_filter_block_8bpc(
                     sum += sec_tap * constrain(s2 - px, sec_strength, sec_shift);
                     sum += sec_tap * constrain(s3 - px, sec_strength, sec_shift);
                 }
-                dst[dp + x] = (px + ((sum - (sum < 0) as i32 + 8) >> 4)) as u8;
+                dst[dp + x] = BD::Pixel::from_i32(px + ((sum - (sum < 0) as i32 + 8) >> 4));
             }
             dp += dst_stride;
             tp += tmp_stride;
@@ -406,6 +497,16 @@ pub enum Backup2x8Flags {
 pub fn backup2lines_8bpc(
     dst: &mut [Vec<u8>; 3],
     src: &[&[u8]; 3],
+    strides: &[isize; 2],
+    layout: crate::headers::PixelLayout,
+    row: usize,
+) {
+    backup2lines(dst, src, strides, layout, row);
+}
+
+pub fn backup2lines<P: Pixel>(
+    dst: &mut [Vec<P>; 3],
+    src: &[&[P]; 3],
     strides: &[isize; 2],
     layout: crate::headers::PixelLayout,
     row: usize,
@@ -512,11 +613,11 @@ const UV_DIRS: [[u8; 8]; 2] = [[0, 1, 2, 3, 4, 5, 6, 7], [7, 0, 2, 4, 5, 6, 6, 6
 /// bank (each plane bank is laid out with the plane's positive stride spacing so
 /// the next band can read it as `top`). Port of dav2d `backup2lines`
 /// (cdef_apply_tmpl.c:41) for positive strides (single-thread path).
-fn cdef_backup2lines_bank(
-    bank: &mut [Vec<u8>; 3],
-    src_y: &[u8],
-    src_u: &[u8],
-    src_v: &[u8],
+fn cdef_backup2lines_bank<P: Pixel>(
+    bank: &mut [Vec<P>; 3],
+    src_y: &[P],
+    src_u: &[P],
+    src_v: &[P],
     y_off: usize,
     uv_off: usize,
     y_stride: usize,
@@ -550,9 +651,9 @@ fn cdef_backup2lines_bank(
 
 /// Backup a pre-CDEF 2x8 left-column block from a plane into `dst[8]`
 /// (`dst[row] = {col x_off-2, col x_off-1}`). Port of dav2d `backup2x8`.
-fn cdef_backup2x8(
-    dst: &mut [[u8; 2]; 8],
-    src: &[u8],
+fn cdef_backup2x8<P: Pixel>(
+    dst: &mut [[P; 2]; 8],
+    src: &[P],
     base: usize,
     stride: usize,
     x_off: usize,
@@ -585,8 +686,41 @@ pub fn cdef_brow_8bpc(
     sby: i32,
     sbrow_start: bool,
 ) {
+    cdef_brow(
+        BitDepth8,
+        y,
+        u,
+        v,
+        p,
+        y_stride,
+        uv_stride,
+        cdef_line,
+        toggle,
+        by_start,
+        by_end,
+        sby,
+        sbrow_start,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cdef_brow<BD: BitDepth>(
+    bd: BD,
+    y: &mut [BD::Pixel],
+    u: &mut [BD::Pixel],
+    v: &mut [BD::Pixel],
+    p: &CdefBrowParams,
+    y_stride: isize,
+    uv_stride: isize,
+    cdef_line: &mut [[Vec<BD::Pixel>; 3]; 2],
+    toggle: &mut usize,
+    by_start: i32,
+    by_end: i32,
+    sby: i32,
+    sbrow_start: bool,
+) {
     let _ = sby;
-    let bitdepth_min_8 = 0; // 8bpc
+    let bitdepth_min_8 = bd.bitdepth_min_8();
     let damping = p.damping + bitdepth_min_8;
     let y_ls = y_stride.unsigned_abs();
     let uv_ls = uv_stride.unsigned_abs();
@@ -635,7 +769,8 @@ pub fn cdef_brow_8bpc(
         }
 
         // Left 2x8 backups (toggled `bit`), one per plane, pre-CDEF.
-        let mut lr_bak: [[[[u8; 2]; 8]; 3]; 2] = [[[[0u8; 2]; 8]; 3]; 2];
+        let mut lr_bak: [[[[BD::Pixel; 2]; 8]; 3]; 2] =
+            [[[[BD::Pixel::default(); 2]; 8]; 3]; 2];
         let mut bit = 0usize;
         edges &= !CDEF_HAVE_LEFT;
         edges |= CDEF_HAVE_RIGHT;
@@ -698,7 +833,8 @@ pub fn cdef_brow_8bpc(
                     // top/bottom luma lines (single-thread sb_st_y case).
                     let top_off = sbx as usize * (sbsz as usize) * 4;
                     let bot_off = sb_y + 8 * y_ls;
-                    ccso_prep_8bpc(
+                    ccso_prep(
+                        bd,
                         &mut ccso_lut_idx[pl],
                         64 >> pl_ss_hor,
                         y,
@@ -840,7 +976,7 @@ pub fn cdef_brow_8bpc(
 
                     let mut variance = 0u32;
                     let dir = if y_pri_lvl != 0 || uv_pri_lvl != 0 {
-                        cdef_find_dir(&y[b_y..], y_ls, &mut variance) as usize
+                        cdef_find_dir_bd(bd, &y[b_y..], y_ls, &mut variance) as usize
                     } else {
                         0
                     };
@@ -852,7 +988,8 @@ pub fn cdef_brow_8bpc(
                     if y_pri_lvl != 0 {
                         let adj = adjust_strength(y_pri_lvl, variance);
                         if (adj != 0 || y_sec_lvl != 0) && !y_lossless {
-                            cdef_filter_block_8bpc(
+                            cdef_filter_block(
+                                bd,
                                 y,
                                 y_ls,
                                 b_y,
@@ -871,7 +1008,8 @@ pub fn cdef_brow_8bpc(
                             );
                         }
                     } else if y_sec_lvl != 0 && !y_lossless {
-                        cdef_filter_block_8bpc(
+                        cdef_filter_block(
+                            bd,
                             y,
                             y_ls,
                             b_y,
@@ -900,7 +1038,8 @@ pub fn cdef_brow_8bpc(
                         let ch = 8 >> ss_ver;
                         let top_col_uv = (bx as usize * 4) >> ss_hor;
                         let bot_uv = b_uv + ch * uv_ls;
-                        cdef_filter_block_8bpc(
+                        cdef_filter_block(
+                            bd,
                             u,
                             uv_ls,
                             b_uv,
@@ -917,7 +1056,8 @@ pub fn cdef_brow_8bpc(
                             ch,
                             edges,
                         );
-                        cdef_filter_block_8bpc(
+                        cdef_filter_block(
+                            bd,
                             v,
                             uv_ls,
                             b_uv,
@@ -990,7 +1130,7 @@ pub fn cdef_brow_8bpc(
                     let pl_ss_hor = if pl != 0 { ss_hor } else { 0 };
                     let pl_ss_ver = if pl != 0 { ss_ver } else { 0 };
                     let w_full = imin(sbsz, p.bw - sbx * sbsz) * 4;
-                    let (dst, dst_off, dst_ls): (&mut [u8], usize, usize) = if pl == 0 {
+                    let (dst, dst_off, dst_ls): (&mut [BD::Pixel], usize, usize) = if pl == 0 {
                         (y, sb_y, y_ls)
                     } else if pl == 1 {
                         (u, sb_uv, uv_ls)
@@ -1019,7 +1159,8 @@ pub fn cdef_brow_8bpc(
                         }
                     }
                     let ll: &[[u16; 4]] = &ll_buf;
-                    ccso_add_8bpc(
+                    ccso_add(
+                        bd,
                         &mut dst[dst_off..],
                         dst_ls,
                         &ccso_lut_idx[pl],
