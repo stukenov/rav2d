@@ -43,7 +43,7 @@ pub fn ipred_v(
     if angle & ANGLE_MULTI_MRL_FLAG != 0
         || !neon::ipred_simple(neon::Mode::V, dst, stride, tl, o, width, height, angle)
     {
-        crate::ipred::ipred_v(dst, stride, tl, o, width, height, angle);
+        crate::ipred::ipred_v_8bpc(dst, stride, tl, o, width, height, angle);
     }
 }
 
@@ -61,21 +61,21 @@ pub fn ipred_h(
     if angle & ANGLE_MULTI_MRL_FLAG != 0
         || !neon::ipred_simple(neon::Mode::H, dst, stride, tl, o, width, height, angle)
     {
-        crate::ipred::ipred_h(dst, stride, tl, o, width, height, angle);
+        crate::ipred::ipred_h_8bpc(dst, stride, tl, o, width, height, angle);
     }
 }
 
 /// SMOOTH_V_PRED: vertical smooth interpolation between top row and bottom edge.
 pub fn ipred_smooth_v(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usize, h: usize) {
     if !neon::ipred_simple(neon::Mode::SmoothV, dst, stride, tl, o, w, h, 0) {
-        crate::ipred::ipred_smooth_v(dst, stride, tl, o, w, h);
+        crate::ipred::ipred_smooth_v_8bpc(dst, stride, tl, o, w, h);
     }
 }
 
 /// SMOOTH_H_PRED: horizontal smooth interpolation between left column and right edge.
 pub fn ipred_smooth_h(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usize, h: usize) {
     if !neon::ipred_simple(neon::Mode::SmoothH, dst, stride, tl, o, w, h, 0) {
-        crate::ipred::ipred_smooth_h(dst, stride, tl, o, w, h);
+        crate::ipred::ipred_smooth_h_8bpc(dst, stride, tl, o, w, h);
     }
 }
 
@@ -265,13 +265,13 @@ mod tests {
             let mut a = vec![0u8; stride * h];
             let mut b = vec![0u8; stride * h];
 
-            crate::ipred::ipred_v(&mut a, stride, &tl, o, w, h, 0);
+            crate::ipred::ipred_v_8bpc(&mut a, stride, &tl, o, w, h, 0);
             super::ipred_v(&mut b, stride, &tl, o, w, h, 0);
             assert_eq!(a, b, "ipred_v {w}x{h}");
 
             a.iter_mut().for_each(|p| *p = 0);
             b.iter_mut().for_each(|p| *p = 0);
-            crate::ipred::ipred_h(&mut a, stride, &tl, o, w, h, 0);
+            crate::ipred::ipred_h_8bpc(&mut a, stride, &tl, o, w, h, 0);
             super::ipred_h(&mut b, stride, &tl, o, w, h, 0);
             assert_eq!(a, b, "ipred_h {w}x{h}");
         }
@@ -286,13 +286,13 @@ mod tests {
             let mut a = vec![0u8; stride * h];
             let mut b = vec![0u8; stride * h];
 
-            crate::ipred::ipred_smooth_v(&mut a, stride, &tl, o, w, h);
+            crate::ipred::ipred_smooth_v_8bpc(&mut a, stride, &tl, o, w, h);
             super::ipred_smooth_v(&mut b, stride, &tl, o, w, h);
             assert_eq!(a, b, "ipred_smooth_v {w}x{h}");
 
             a.iter_mut().for_each(|p| *p = 0);
             b.iter_mut().for_each(|p| *p = 0);
-            crate::ipred::ipred_smooth_h(&mut a, stride, &tl, o, w, h);
+            crate::ipred::ipred_smooth_h_8bpc(&mut a, stride, &tl, o, w, h);
             super::ipred_smooth_h(&mut b, stride, &tl, o, w, h);
             assert_eq!(a, b, "ipred_smooth_h {w}x{h}");
         }
