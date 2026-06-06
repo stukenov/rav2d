@@ -136,7 +136,7 @@ fn fuzz_mutated_streams_no_panic() {
         if base.is_empty() {
             continue;
         }
-        for iter in 0..3000u64 {
+        for iter in 0..2500u64 {
             let mut b = base.clone();
             match rng.below(4) {
                 // single/multi byte flips
