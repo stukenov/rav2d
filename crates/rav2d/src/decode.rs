@@ -4623,6 +4623,14 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     } else {
         b.seg_id = 0;
     }
+    // For valid streams every segment id is in [0, MAX_SEGMENTS); the segment
+    // map and predicted-id paths can leave an out-of-range value on a malformed
+    // stream, which would overflow the `1 << seg_id` mask and index the
+    // MAX_SEGMENTS-sized per-segment tables out of bounds. Clamp once here; this
+    // is a no-op for valid input.
+    if b.seg_id >= crate::headers::MAX_SEGMENTS as u8 {
+        b.seg_id = 0;
+    }
 
     // skip_mode
     if (fi.seg_globalmv_mask | fi.seg_skip_mask) & (1 << b.seg_id) == 0
@@ -4898,6 +4906,11 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             if b.seg_id >= crate::headers::MAX_SEGMENTS as u8 {
                 b.seg_id = 0;
             }
+        }
+        // Same defensive clamp as the pre-skip path: keep seg_id in range for the
+        // segment-map / predicted-id branches above. No-op for valid input.
+        if b.seg_id >= crate::headers::MAX_SEGMENTS as u8 {
+            b.seg_id = 0;
         }
         if trace_blk {
             eprintln!("  CK post_segid seg_id={} rng={}", b.seg_id, msac.dbg_rng());
