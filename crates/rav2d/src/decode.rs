@@ -2358,6 +2358,11 @@ pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
     /// because the 8x8 rounding can otherwise read `a` entries already clobbered
     /// by a left neighbour in the same SB (decode.c:4630-4641, AVM #1091).
     pub a_sb_cache: crate::env::SBEdgeCtx,
+    /// Per-plane block-adaptive weighted prediction state (`t->pb.bawp[plane]` =
+    /// alpha/beta). The luma plane derives alpha/beta from neighbour templates;
+    /// chroma reuses the luma alpha. Sub-blocks of a >64px partition reuse the
+    /// alpha/beta of the partition's first block (recon_tmpl.c `bawp`).
+    pub bawp_ab: [(i32, i32); 3],
 }
 
 /// Decode one superblock row of a tile (entropy/parse pass).
@@ -2622,6 +2627,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
             frm_hdr,
             warpmv: [crate::headers::WarpedMotionParams::default(); 2],
             a_sb_cache: crate::env::SBEdgeCtx::default(),
+            bawp_ab: [(256, 0); 3],
         };
 
         // Snapshot the above-row block context into `a_sb_cache` before the
@@ -8565,6 +8571,227 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
     Ok(())
 }
 
+/// Block-adaptive weighted prediction (`bawp`, recon_tmpl.c:2690). After the
+/// translational MC prediction is written to `dst`, BAWP rescales it by a
+/// per-block linear model `dst = clip((alpha*dst + beta) >> 8)`. The model
+/// `(alpha, beta)` is derived from the reconstructed neighbour template (rows
+/// above / columns left of the block) versus the corresponding reference-plane
+/// template. The luma plane derives `(alpha, beta)`; chroma reuses the luma
+/// `alpha`. `plane` is 0 for luma, 1 for U, 2 for V. `bawp_idx` is the parsed
+/// per-block index (luma); chroma always passes 1.
+///
+/// Edge handling assumes a single tile (`col_start == row_start == 0`) and the
+/// single-thread, full-frame-alias decode used by the conformance harness, so
+/// the top template row resolves to `dst[-stride]` in both the in-SB and the
+/// SB-edge case (recon_tmpl.c:2780-2783 with `prefilter_data_full_frame`).
+#[allow(clippy::too_many_arguments)]
+fn bawp_plane<BD: crate::pixel::BitDepth>(
+    recon: &mut ReconCtx<BD>,
+    bawp_idx: i32,
+    mv: crate::levels::MvXY,
+    dst_off: usize,
+    stride: usize,
+    ref_pic: &crate::picture::Picture,
+    refidx: usize,
+    plane: usize,
+    bw4: i32,
+    bh4: i32,
+    w4: i32,
+    h4: i32,
+    bx: i32,
+    by: i32,
+    sb_bs: BlockSize,
+    fi: &SbFrameInfo,
+) {
+    let bd = recon.bd;
+    let chroma = plane != 0;
+    let ss_hor = if chroma { fi.ss_hor } else { 0 };
+    let ss_ver = if chroma { fi.ss_ver } else { 0 };
+    let h_mul = 4 >> ss_hor;
+    let v_mul = 4 >> ss_ver;
+    let sb_dim = &BLOCK_DIMENSIONS[sb_bs as u8 as usize];
+    let sb_dim0 = sb_dim[0] as i32;
+    let sb_dim1 = sb_dim[1] as i32;
+
+    let dst: &mut [BD::Pixel] = match plane {
+        0 => recon.dst_y,
+        1 => recon.dst_u,
+        _ => recon.dst_v,
+    };
+
+    // >64px partition sub-blocks reuse the partition's first-block model.
+    if (sb_dim0 > (16 << ss_hor) && (bx & (sb_dim0 - 1)) != 0)
+        || (sb_dim1 > (16 << ss_ver) && (by & (sb_dim1 - 1)) != 0)
+    {
+        let (alpha, beta) = recon.bawp_ab[plane];
+        if alpha != 256 || beta != 0 {
+            crate::mc::morph(
+                bd,
+                &mut dst[dst_off..],
+                stride,
+                alpha,
+                beta,
+                (bw4 * h_mul) as usize,
+                (bh4 * v_mul) as usize,
+            );
+        }
+        return;
+    }
+
+    // defaults
+    recon.bawp_ab[plane] = (256, 0);
+
+    // Inter BAWP (refp != cur): tile edges span the whole frame.
+    let tile_top_edge = 0i32;
+    let tile_left_edge = 0i32;
+    let tile_bottom_edge = fi.bh * v_mul;
+    let tile_right_edge = fi.bw * h_mul;
+
+    let mvx = (mv.x + 3 + (mv.x >= 0) as i32) >> (3 + ss_hor);
+    let mvy = (mv.y + 3 + (mv.y >= 0) as i32) >> (3 + ss_ver);
+    let ref_y = by * v_mul + mvy;
+    let ref_x = bx * h_mul + mvx;
+    let ref_tmplt_x = ref_x - 1;
+    let ref_tmplt_y = ref_y - 1;
+    let sb_w4 = imin(sb_dim0, fi.bw - bx);
+    let sb_h4 = imin(sb_dim1, fi.bh - by);
+    let ref_bottom_edge = ref_y + sb_h4 * v_mul;
+    let ref_right_edge = ref_x + sb_w4 * h_mul;
+
+    let can_morph = ref_bottom_edge <= tile_bottom_edge
+        && ref_right_edge <= tile_right_edge
+        && ref_tmplt_y >= tile_top_edge
+        && ref_tmplt_x >= tile_left_edge;
+    if !can_morph {
+        return;
+    }
+
+    // n_edge_samples[have_above && have_left][lh4][lw4][above, left]
+    const N_EDGE_SAMPLES: [[[[u8; 2]; 3]; 3]; 2] = [
+        [
+            [[2, 2], [3, 2], [4, 2]],
+            [[2, 3], [3, 3], [4, 3]],
+            [[2, 4], [3, 4], [4, 4]],
+        ],
+        [
+            [[2, 2], [2, 2], [4, 0]],
+            [[2, 2], [3, 3], [3, 3]],
+            [[0, 4], [3, 3], [4, 4]],
+        ],
+    ];
+    // Single tile: col_start == row_start == 0.
+    let have_left = bx > 0;
+    let have_above = by > 0;
+    let lw4 = (imin(crate::intops::ulog2(w4 as u32), 2) - ss_hor) as usize;
+    let lh4 = (imin(crate::intops::ulog2(h4 as u32), 2) - ss_ver) as usize;
+    let idx = (have_above && have_left) as usize;
+    let n_above_l2 = have_above as i32 * N_EDGE_SAMPLES[idx][lh4][lw4][0] as i32;
+    let n_left_l2 = have_left as i32 * N_EDGE_SAMPLES[idx][lh4][lw4][1] as i32;
+
+    let ref_stride =
+        ref_pic.stride[(plane != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
+    let ref_base = match ref_pic.data[plane] {
+        Some(p) => {
+            let ph = if plane == 0 {
+                ref_pic.p.h
+            } else {
+                (ref_pic.p.h + ss_ver) >> ss_ver
+            };
+            // SAFETY: ref_pic owns a stride*height allocation for this plane.
+            let s: &[BD::Pixel] = unsafe {
+                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
+            };
+            s
+        }
+        None => return,
+    };
+    let ref_off = ref_y as usize * ref_stride + ref_x as usize;
+
+    debug_assert!(n_above_l2 == 0 || n_left_l2 == 0 || n_above_l2 == n_left_l2);
+    let count_l2 = n_above_l2
+        + if n_above_l2 == n_left_l2 {
+            (n_above_l2 != 0) as i32
+        } else {
+            n_left_l2
+        };
+    let mut sum_x: i32 = 0;
+    let mut sum_y: i32 = 0;
+    let mut sum_xy: i32 = 0;
+    let mut sum_x2: i32 = 0;
+    if n_above_l2 != 0 {
+        let bw = 4 << lw4;
+        let step = bw >> n_above_l2;
+        let start = step >> 1;
+        // Single-thread full-frame alias: the SB-edge top row resolves to the
+        // current plane one row above the block (recon_tmpl.c:2780-2783).
+        let top_off = (dst_off as isize - stride as isize) as usize;
+        let mut i = start;
+        while i < bw {
+            let x: i32 = ref_base[ref_off - ref_stride + i as usize].into();
+            let y: i32 = dst[top_off + i as usize].into();
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+            i += step;
+        }
+    }
+    if n_left_l2 != 0 {
+        let bh = 4 << lh4;
+        let step = bh >> n_left_l2;
+        let start = step >> 1;
+        let mut i = start;
+        while i < bh {
+            let x: i32 = ref_base[ref_off + (i as usize) * ref_stride - 1].into();
+            let y: i32 =
+                dst[(dst_off as isize + (i as isize) * stride as isize - 1) as usize].into();
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+            i += step;
+        }
+    }
+
+    let alpha: i32 = if chroma {
+        if have_left || have_above {
+            recon.bawp_ab[0].0
+        } else {
+            256
+        }
+    } else if bawp_idx != 1 {
+        debug_assert!(bawp_idx & 2 != 0);
+        let aidx = (1 + (bawp_idx >> 2) + (fi.absrefdist[refidx] as i32 > 4) as i32)
+            * (if bawp_idx & 1 != 0 { 1 } else { -1 });
+        256 + 16 * aidx
+    } else if count_l2 != 0 {
+        let num = sum_xy - (((sum_x as i64) * (sum_y as i64)) >> count_l2) as i32;
+        let den = sum_x2 - (((sum_x as i64) * (sum_x as i64)) >> count_l2) as i32;
+        crate::recon::derive_alpha(num, den, 256)
+    } else {
+        256
+    };
+    recon.bawp_ab[plane].0 = alpha;
+
+    let beta: i32 = if count_l2 != 0 {
+        let diff = (sum_y << 8) - sum_x * alpha;
+        crate::intops::apply_sign(diff.abs() >> count_l2, diff)
+    } else {
+        -128
+    };
+    recon.bawp_ab[plane].1 = beta;
+
+    crate::mc::morph(
+        bd,
+        &mut dst[dst_off..],
+        stride,
+        alpha,
+        beta,
+        (bw4 * h_mul) as usize,
+        (bh4 * v_mul) as usize,
+    );
+}
+
 /// Motion-compensate one plane of a single reference into `dst` (8bpc), mirroring
 /// the unscaled branch of `mc()` (recon_tmpl.c:1569-1610). `mvx`/`mvy` are the
 /// block MV (1/8-pel luma units). Uses the proper separable 8-tap / bilinear
@@ -13197,9 +13424,36 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
             );
         }
 
-        // Inter-intra blend (recon_tmpl.c:3199-3200): blend an intra prediction
-        // over the inter prediction for INTERINTRA / warp-interintra blocks.
-        if motion_mode == MotionMode::InterIntra as u8 || unsafe { b.data.inter.warp_ii } != 0 {
+        // Block-adaptive weighted prediction (recon_tmpl.c:3190) takes priority
+        // over the inter-intra blend for single-ref blocks.
+        let bawp0 = unsafe { b.data.inter.bawp[0] } as i32;
+        if bawp0 != 0 {
+            let w4c = imin(bw4, fi.bw - bx);
+            let h4c = imin(bh4, fi.bh - by);
+            bawp_plane(
+                recon,
+                bawp0,
+                mv,
+                dst_off,
+                y_stride,
+                &refp,
+                ref0 as usize,
+                0,
+                bw4,
+                bh4,
+                w4c,
+                h4c,
+                bx,
+                by,
+                bs,
+                fi,
+            );
+        } else if motion_mode == MotionMode::InterIntra as u8
+            || unsafe { b.data.inter.warp_ii } != 0
+        {
+            // Inter-intra blend (recon_tmpl.c:3199-3200): blend an intra
+            // prediction over the inter prediction for INTERINTRA / warp-
+            // interintra blocks.
             let dst_off_y = dst_off;
             // SAFETY: split the recon borrow — iiblend needs &mut recon for the
             // edge/masks while writing dst_y; pass dst_y through recon directly.
@@ -13363,12 +13617,44 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
             }
         }
 
+        // Chroma BAWP (recon_tmpl.c:3679). Applied per plane after the chroma MC
+        // and before the residual; takes priority over the chroma inter-intra
+        // blend. Chroma always passes bawp_idx=1 and reuses the luma alpha.
+        let chroma_bawp = !sub8x8 && do_chroma_mc && unsafe { b.data.inter.bawp[1] } != 0;
+        if chroma_bawp {
+            let cw4c = imin(cbw4, fi.bw - cbx);
+            let ch4c = imin(cbh4, fi.bh - cby);
+            let blk_bs = unsafe { BlockSize::from_raw(b.bs) };
+            for pl in 1..3usize {
+                let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
+                bawp_plane(
+                    recon,
+                    1,
+                    mv,
+                    dst_off,
+                    uv_stride,
+                    &refp,
+                    ref0 as usize,
+                    pl,
+                    cbw4,
+                    cbh4,
+                    cw4c,
+                    ch4c,
+                    cbx,
+                    cby,
+                    blk_bs,
+                    fi,
+                );
+            }
+        }
+
         // Inter-intra blend for chroma (recon_tmpl.c:3682). Only on the
         // single-ref / compound branches, never on sub8x8 chroma coding (the
         // sub8x8 branch in dav2d_recon_b has no iiblend). The II-mask block size
         // is the chroma-subsampled block size SS_BS[cbs][layout-1] (wedge keeps
         // cbs), matching the C `dav2d_ss_bs[cbs][layout-1]` argument.
         if !sub8x8
+            && !chroma_bawp
             && do_chroma_mc
             && (motion_mode == MotionMode::InterIntra as u8 || unsafe { b.data.inter.warp_ii } != 0)
         {
@@ -16955,6 +17241,7 @@ mod tests {
                 frm_hdr: &__frmh,
                 warpmv: [crate::headers::WarpedMotionParams::default(); 2],
                 a_sb_cache: crate::env::SBEdgeCtx::default(),
+                bawp_ab: [(256, 0); 3],
             };
         };
     }
