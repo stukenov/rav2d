@@ -82,6 +82,7 @@ pub(crate) mod recon;
 pub(crate) mod ref_count;
 pub(crate) mod refmvs;
 pub(crate) mod scan;
+pub(crate) mod simd;
 pub(crate) mod stx;
 pub(crate) mod stx_tables;
 pub(crate) mod tables;

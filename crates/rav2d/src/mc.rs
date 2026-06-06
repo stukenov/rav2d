@@ -99,14 +99,12 @@ pub fn avg<BD: BitDepth>(
         if row >= dst.len() {
             break;
         }
-        for x in 0..w {
-            let ti = y * w + x;
-            let di = row + x;
-            if di >= dst.len() || ti >= tmp1.len() || ti >= tmp2.len() {
-                break;
-            }
-            dst[di] = bd.pixel_clip((tmp1[ti] as i32 + tmp2[ti] as i32 + rnd) >> sh);
-        }
+        let yw = y * w;
+        let d = &mut dst[row..];
+        let t1 = &tmp1[yw.min(tmp1.len())..];
+        let t2 = &tmp2[yw.min(tmp2.len())..];
+        let n = w.min(d.len()).min(t1.len()).min(t2.len());
+        crate::simd::avg_row(bd, d, t1, t2, n, rnd, sh);
     }
 }
 
@@ -141,16 +139,12 @@ pub fn w_avg<BD: BitDepth>(
         if row >= dst.len() {
             break;
         }
-        for x in 0..w {
-            let ti = y * w + x;
-            let di = row + x;
-            if di >= dst.len() || ti >= tmp1.len() || ti >= tmp2.len() {
-                break;
-            }
-            dst[di] = bd.pixel_clip(
-                (tmp1[ti] as i32 * weight + tmp2[ti] as i32 * (16 - weight) + rnd) >> sh,
-            );
-        }
+        let yw = y * w;
+        let d = &mut dst[row..];
+        let t1 = &tmp1[yw.min(tmp1.len())..];
+        let t2 = &tmp2[yw.min(tmp2.len())..];
+        let n = w.min(d.len()).min(t1.len()).min(t2.len());
+        crate::simd::w_avg_row(bd, d, t1, t2, n, weight, rnd, sh);
     }
 }
 
@@ -185,16 +179,17 @@ pub fn mask_fn<BD: BitDepth>(
         if row >= dst.len() {
             break;
         }
-        for x in 0..w {
-            let ti = y * w + x;
-            let di = row + x;
-            if di >= dst.len() || ti >= mask.len() || ti >= tmp1.len() || ti >= tmp2.len() {
-                break;
-            }
-            let m = mask[ti] as i32;
-            dst[di] =
-                bd.pixel_clip((tmp1[ti] as i32 * m + tmp2[ti] as i32 * (64 - m) + rnd) >> sh);
-        }
+        let yw = y * w;
+        let d = &mut dst[row..];
+        let t1 = &tmp1[yw.min(tmp1.len())..];
+        let t2 = &tmp2[yw.min(tmp2.len())..];
+        let mk = &mask[yw.min(mask.len())..];
+        let n = w
+            .min(d.len())
+            .min(t1.len())
+            .min(t2.len())
+            .min(mk.len());
+        crate::simd::mask_row(bd, d, t1, t2, mk, n, rnd, sh);
     }
 }
 
@@ -215,17 +210,12 @@ pub fn blend<P: Pixel>(
         if row >= dst.len() {
             break;
         }
-        for x in 0..w {
-            let di = row + x;
-            let ti = y * w + x;
-            if di >= dst.len() || ti >= mask.len() || ti >= tmp.len() {
-                break;
-            }
-            let m = mask[ti] as i32;
-            let d: i32 = dst[di].into();
-            let t: i32 = tmp[ti].into();
-            dst[di] = P::from_i32((d * (64 - m) + t * m + 32) >> 6);
-        }
+        let yw = y * w;
+        let d = &mut dst[row..];
+        let t = &tmp[yw.min(tmp.len())..];
+        let mk = &mask[yw.min(mask.len())..];
+        let n = w.min(d.len()).min(t.len()).min(mk.len());
+        crate::simd::blend_row(d, t, mk, n);
     }
 }
 
@@ -247,14 +237,9 @@ pub fn morph<BD: BitDepth>(
         if row >= dst.len() {
             break;
         }
-        for x in 0..w {
-            let di = row + x;
-            if di >= dst.len() {
-                break;
-            }
-            let d: i32 = dst[di].into();
-            dst[di] = bd.pixel_clip((alpha * d + beta) >> 8);
-        }
+        let d = &mut dst[row..];
+        let n = w.min(d.len());
+        crate::simd::morph_row(bd, d, alpha, beta, n);
     }
 }
 

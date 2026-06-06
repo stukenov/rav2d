@@ -10,6 +10,10 @@ keywords = ["av2", "video", "decoder", "codec"]
 categories = ["multimedia::video"]
 
 [dependencies]
+# Portable SIMD on stable Rust. Compiles to NEON (aarch64) / AVX2 (x86_64) / etc.
+# from one source; used for the hot scalar kernels (itx, blend, ipred, filters).
+# Every SIMD kernel is verified bit-exact against dav2d via the conformance oracle.
+wide = "0.7"
 
 [build-dependencies]
 cc = "1.0"
