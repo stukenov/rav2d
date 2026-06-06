@@ -291,7 +291,7 @@ pub fn sad_nxn_8bpc(
     w: usize,
     h: usize,
 ) -> i32 {
-    sad_nxn(p0, p0_stride, p1, p1_stride, w, h)
+    sad_nxn(p0, p0_stride, p1, p1_stride, w, h, 0)
 }
 
 pub fn sad_nxn<P: Pixel>(
@@ -301,6 +301,7 @@ pub fn sad_nxn<P: Pixel>(
     p1_stride: usize,
     w: usize,
     h: usize,
+    bd_min8: i32,
 ) -> i32 {
     let mut sad = 0i32;
     let mut o0 = 0;
@@ -316,7 +317,7 @@ pub fn sad_nxn<P: Pixel>(
         o1 += p1_stride * 2;
         y += 2;
     }
-    sad
+    sad >> bd_min8
 }
 
 fn get_h_filter(mx: i32, filter_type: i32, w: usize) -> Option<[i8; 8]> {
@@ -799,10 +800,16 @@ pub fn prep_bilin<BD: BitDepth>(
 }
 
 pub fn sad8x8_8bpc(p0: &[u8], p0_stride: usize, p1: &[u8], p1_stride: usize) -> u32 {
-    sad8x8(p0, p0_stride, p1, p1_stride)
+    sad8x8(p0, p0_stride, p1, p1_stride, 0)
 }
 
-pub fn sad8x8<P: Pixel>(p0: &[P], p0_stride: usize, p1: &[P], p1_stride: usize) -> u32 {
+pub fn sad8x8<P: Pixel>(
+    p0: &[P],
+    p0_stride: usize,
+    p1: &[P],
+    p1_stride: usize,
+    bd_min8: i32,
+) -> u32 {
     let mut sad = 0u32;
     for y in 0..8 {
         for x in 0..8 {
@@ -811,7 +818,7 @@ pub fn sad8x8<P: Pixel>(p0: &[P], p0_stride: usize, p1: &[P], p1_stride: usize) 
             sad += (a - b).unsigned_abs();
         }
     }
-    sad
+    sad >> bd_min8
 }
 
 pub fn sad_refine_mv_8bpc(
@@ -823,7 +830,7 @@ pub fn sad_refine_mv_8bpc(
     h: usize,
     is_implicit: bool,
 ) -> (i32, i32) {
-    sad_refine_mv(p0, p0_stride, p1, p1_stride, w, h, is_implicit)
+    sad_refine_mv(p0, p0_stride, p1, p1_stride, w, h, is_implicit, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -835,6 +842,7 @@ pub fn sad_refine_mv<P: Pixel>(
     w: usize,
     h: usize,
     is_implicit: bool,
+    bd_min8: i32,
 ) -> (i32, i32) {
     let sadw = w + 4;
     let sadh = h + 4;
@@ -851,6 +859,7 @@ pub fn sad_refine_mv<P: Pixel>(
             p1_stride,
             sadw,
             sadh,
+            bd_min8,
         );
         best_sad = (best_sad * 7 + 7) >> 3;
         if best_sad < sad_thr {
@@ -870,6 +879,7 @@ pub fn sad_refine_mv<P: Pixel>(
                 p1_stride,
                 sadw,
                 sadh,
+                bd_min8,
             );
             if sad >= best_sad {
                 continue;

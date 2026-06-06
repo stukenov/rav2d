@@ -11258,6 +11258,7 @@ fn opfl_pred_luma<BD: crate::pixel::BitDepth>(
                     (sw4 * 4) as usize,
                     (sh4 * 4) as usize,
                     refine_mv == 2,
+                    bd.bitdepth_min_8(),
                 );
                 if opfl {
                     let mut res = [crate::mc::OpflRegressionData::default(); 4];
@@ -11951,6 +11952,7 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
                             (step * 4) as usize,
                             (step * 4) as usize,
                             true,
+                            bd.bitdepth_min_8(),
                         );
                         dy = rdy;
                         dx = rdx;
@@ -11967,7 +11969,13 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
                     } else {
                         let o0 = ((4 + dy) * p_stride as i32 + (4 + dx)) as usize;
                         let o1 = ((4 - dy) * p_stride as i32 + (4 - dx)) as usize;
-                        crate::mc::sad8x8::<BD::Pixel>(&p[0][o0..], p_stride, &p[1][o1..], p_stride)
+                        crate::mc::sad8x8::<BD::Pixel>(
+                            &p[0][o0..],
+                            p_stride,
+                            &p[1][o1..],
+                            p_stride,
+                            bd.bitdepth_min_8(),
+                        )
                     };
                     if sad >= sad8x8_thr {
                         let mut res = [crate::mc::OpflRegressionData::default(); 4];
