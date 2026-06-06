@@ -1,6 +1,7 @@
 use crate::headers::FrameHeader;
 use crate::intops::{iclip, imin};
 use crate::lf_mask::{deblock_quant_thr, deblock_side_thr};
+use crate::pixel::{BitDepth, BitDepth8, Pixel};
 
 pub static MAX_WIDTH_Y: [i8; 4] = [1, 3, 6, 8];
 pub static MAX_WIDTH_UV: [i8; 3] = [1, 3, 4];
@@ -65,16 +66,35 @@ fn filter_choice_8bpc(
     q_thr: u32,
     side_thr: u32,
 ) -> i32 {
+    filter_choice_bd(
+        buf,
+        s,
+        t,
+        stride,
+        max_width_neg,
+        max_width_pos,
+        q_thr,
+        side_thr,
+    )
+}
+
+fn filter_choice_bd<P: Pixel>(
+    buf: &[P],
+    s: isize,
+    t: isize,
+    stride: isize,
+    max_width_neg: i32,
+    max_width_pos: i32,
+    q_thr: u32,
+    side_thr: u32,
+) -> i32 {
+    let at = |off: isize| -> i32 { buf[off as usize].into() };
     let mut sd = [0u32; 4];
     for dist in -2i32..2 {
         let d = dist as isize;
-        let ds = (buf[(s + (d - 1) * stride) as usize] as i32
-            - (buf[(s + d * stride) as usize] as i32) * 2
-            + buf[(s + (d + 1) * stride) as usize] as i32)
+        let ds = (at(s + (d - 1) * stride) - at(s + d * stride) * 2 + at(s + (d + 1) * stride))
             .unsigned_abs();
-        let dt = (buf[(t + (d - 1) * stride) as usize] as i32
-            - (buf[(t + d * stride) as usize] as i32) * 2
-            + buf[(t + (d + 1) * stride) as usize] as i32)
+        let dt = (at(t + (d - 1) * stride) - at(t + d * stride) * 2 + at(t + (d + 1) * stride))
             .unsigned_abs();
         sd[(dist + 2) as usize] = (ds + dt + 1) >> 1;
     }
@@ -107,27 +127,19 @@ fn filter_choice_8bpc(
     let end_thr = (side_thr * 3) >> 4;
 
     if max_width_neg >= 3 {
-        let ds = (buf[(s - stride) as usize] as i32
-            - buf[(s - 4 * stride) as usize] as i32
-            - 3 * (buf[(s - stride) as usize] as i32 - buf[(s - 2 * stride) as usize] as i32))
+        let ds = (at(s - stride) - at(s - 4 * stride) - 3 * (at(s - stride) - at(s - 2 * stride)))
             .unsigned_abs();
-        let dt = (buf[(t - stride) as usize] as i32
-            - buf[(t - 4 * stride) as usize] as i32
-            - 3 * (buf[(t - stride) as usize] as i32 - buf[(t - 2 * stride) as usize] as i32))
+        let dt = (at(t - stride) - at(t - 4 * stride) - 3 * (at(t - stride) - at(t - 2 * stride)))
             .unsigned_abs();
         if ((ds + dt + 1) >> 1) > end_thr {
             return 2;
         }
     }
 
-    let ds = (buf[s as usize] as i32
-        - buf[(s + 3 * stride) as usize] as i32
-        - 3 * (buf[s as usize] as i32 - buf[(s + stride) as usize] as i32))
-        .unsigned_abs();
-    let dt = (buf[t as usize] as i32
-        - buf[(t + 3 * stride) as usize] as i32
-        - 3 * (buf[t as usize] as i32 - buf[(t + stride) as usize] as i32))
-        .unsigned_abs();
+    let ds =
+        (at(s) - at(s + 3 * stride) - 3 * (at(s) - at(s + stride))).unsigned_abs();
+    let dt =
+        (at(t) - at(t + 3 * stride) - 3 * (at(t) - at(t + stride))).unsigned_abs();
     if ((ds + dt + 1) >> 1) > end_thr {
         return 2;
     }
@@ -147,28 +159,22 @@ fn filter_choice_8bpc(
         let dist2 = imin(7, dist);
 
         if max_width_neg >= dist2 {
-            let ds = (buf[(s - stride) as usize] as i32
-                - buf[(s + (-dist2 as isize - 1) * stride) as usize] as i32
-                - dist2
-                    * (buf[(s - stride) as usize] as i32 - buf[(s - 2 * stride) as usize] as i32))
+            let ds = (at(s - stride)
+                - at(s + (-dist2 as isize - 1) * stride)
+                - dist2 * (at(s - stride) - at(s - 2 * stride)))
                 .unsigned_abs();
-            let dt = (buf[(t - stride) as usize] as i32
-                - buf[(t + (-dist2 as isize - 1) * stride) as usize] as i32
-                - dist2
-                    * (buf[(t - stride) as usize] as i32 - buf[(t - 2 * stride) as usize] as i32))
+            let dt = (at(t - stride)
+                - at(t + (-dist2 as isize - 1) * stride)
+                - dist2 * (at(t - stride) - at(t - 2 * stride)))
                 .unsigned_abs();
             if ((ds + dt + 1) >> 1) > end_thr4 {
                 return prev_dist;
             }
         }
 
-        let ds = (buf[s as usize] as i32
-            - buf[(s + dist2 as isize * stride) as usize] as i32
-            - dist2 * (buf[s as usize] as i32 - buf[(s + stride) as usize] as i32))
+        let ds = (at(s) - at(s + dist2 as isize * stride) - dist2 * (at(s) - at(s + stride)))
             .unsigned_abs();
-        let dt = (buf[t as usize] as i32
-            - buf[(t + dist2 as isize * stride) as usize] as i32
-            - dist2 * (buf[t as usize] as i32 - buf[(t + stride) as usize] as i32))
+        let dt = (at(t) - at(t + dist2 as isize * stride) - dist2 * (at(t) - at(t + stride)))
             .unsigned_abs();
         if ((ds + dt + 1) >> 1) > end_thr4 {
             return prev_dist;
@@ -181,6 +187,7 @@ fn filter_choice_8bpc(
     max_width_pos
 }
 
+#[allow(clippy::too_many_arguments)]
 fn deblock_8bpc(
     dst: &mut [u8],
     off: isize,
@@ -193,7 +200,37 @@ fn deblock_8bpc(
     pos_lossless: bool,
     neg_lossless: bool,
 ) {
-    let width = filter_choice_8bpc(
+    deblock_bd(
+        BitDepth8,
+        dst,
+        off,
+        q_thr,
+        side_thr,
+        stridea,
+        strideb,
+        max_width_pos,
+        max_width_neg,
+        pos_lossless,
+        neg_lossless,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deblock_bd<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    off: isize,
+    q_thr: u32,
+    side_thr: u32,
+    stridea: isize,
+    strideb: isize,
+    max_width_pos: i32,
+    max_width_neg: i32,
+    pos_lossless: bool,
+    neg_lossless: bool,
+) {
+    let bdmax = bd.bitdepth_max();
+    let width = filter_choice_bd(
         dst,
         off,
         off + 3 * stridea,
@@ -213,10 +250,10 @@ fn deblock_8bpc(
     let q_thr_clamp = q_thr as i32 * Q_THRESH_MULTS[(width - 1) as usize] as i32;
     let mut dp = off;
     for _ in 0..4 {
-        let d0 = dst[dp as usize] as i32;
-        let dm1 = dst[(dp - strideb) as usize] as i32;
-        let dp1 = dst[(dp + strideb) as usize] as i32;
-        let dm2 = dst[(dp - 2 * strideb) as usize] as i32;
+        let d0: i32 = dst[dp as usize].into();
+        let dm1: i32 = dst[(dp - strideb) as usize].into();
+        let dp1: i32 = dst[(dp + strideb) as usize].into();
+        let dm2: i32 = dst[(dp - 2 * strideb) as usize].into();
         let delta_m2 = iclip(
             4 * (3 * (d0 - dm1) - (dp1 - dm2)),
             -q_thr_clamp,
@@ -228,7 +265,8 @@ fn deblock_8bpc(
             for j in 0..width_neg {
                 let idx = (dp + (-(j as isize) - 1) * strideb) as usize;
                 let diff = (delta_m2_neg * (width_neg - j) + (1 << 10)) >> 11;
-                dst[idx] = iclip(dst[idx] as i32 + diff, 0, 255) as u8;
+                let cur: i32 = dst[idx].into();
+                dst[idx] = BD::Pixel::from_i32(iclip(cur + diff, 0, bdmax));
             }
         }
 
@@ -237,7 +275,8 @@ fn deblock_8bpc(
             for j in 0..width_pos {
                 let idx = (dp + j as isize * strideb) as usize;
                 let diff = (delta_m2_pos * (width_pos - j) + (1 << 10)) >> 11;
-                dst[idx] = iclip(dst[idx] as i32 - diff, 0, 255) as u8;
+                let cur: i32 = dst[idx].into();
+                dst[idx] = BD::Pixel::from_i32(iclip(cur - diff, 0, bdmax));
             }
         }
 
@@ -247,6 +286,31 @@ fn deblock_8bpc(
 
 pub fn deblock_h_sb64y_8bpc(
     dst: &mut [u8],
+    dst_off: usize,
+    stride: usize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u8],
+    side_thr: &[u8],
+    edge: bool,
+) {
+    deblock_h_sb64y_bd(
+        BitDepth8,
+        dst,
+        dst_off,
+        stride,
+        vmask,
+        ll_mask,
+        q_thr,
+        side_thr,
+        edge,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_h_sb64y_bd<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
     dst_off: usize,
     stride: usize,
     vmask: &[u16],
@@ -274,7 +338,8 @@ pub fn deblock_h_sb64y_8bpc(
             } else {
                 max_width_pos
             };
-            deblock_8bpc(
+            deblock_bd(
+                bd,
                 dst,
                 dp as isize,
                 q_thr[qi] as u32,
@@ -303,6 +368,31 @@ pub fn deblock_v_sb64y_8bpc(
     side_thr: &[u8],
     edge: bool,
 ) {
+    deblock_v_sb64y_bd(
+        BitDepth8,
+        dst,
+        dst_off,
+        stride,
+        vmask,
+        ll_mask,
+        q_thr,
+        side_thr,
+        edge,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_v_sb64y_bd<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_off: usize,
+    stride: usize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u8],
+    side_thr: &[u8],
+    edge: bool,
+) {
     let vm = vmask[0] as u32 | vmask[1] as u32 | vmask[2] as u32 | vmask[3] as u32;
     let mut x: u32 = 1;
     let mut dp = dst_off;
@@ -322,7 +412,8 @@ pub fn deblock_v_sb64y_8bpc(
             } else {
                 max_width_pos
             };
-            deblock_8bpc(
+            deblock_bd(
+                bd,
                 dst,
                 dp as isize,
                 q_thr[qi] as u32,
@@ -351,6 +442,31 @@ pub fn deblock_h_sb64uv_8bpc(
     side_thr: &[u8],
     edge: bool,
 ) {
+    deblock_h_sb64uv_bd(
+        BitDepth8,
+        dst,
+        dst_off,
+        stride,
+        vmask,
+        ll_mask,
+        q_thr,
+        side_thr,
+        edge,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_h_sb64uv_bd<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_off: usize,
+    stride: usize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u8],
+    side_thr: &[u8],
+    edge: bool,
+) {
     let vm = vmask[0] as u32 | vmask[1] as u32 | vmask[2] as u32;
     let mut y: u32 = 1;
     let mut dp = dst_off;
@@ -368,7 +484,8 @@ pub fn deblock_h_sb64uv_8bpc(
             } else {
                 max_width_pos
             };
-            deblock_8bpc(
+            deblock_bd(
+                bd,
                 dst,
                 dp as isize,
                 q_thr[qi] as u32,
@@ -397,6 +514,31 @@ pub fn deblock_v_sb64uv_8bpc(
     side_thr: &[u8],
     edge: bool,
 ) {
+    deblock_v_sb64uv_bd(
+        BitDepth8,
+        dst,
+        dst_off,
+        stride,
+        vmask,
+        ll_mask,
+        q_thr,
+        side_thr,
+        edge,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_v_sb64uv_bd<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_off: usize,
+    stride: usize,
+    vmask: &[u16],
+    ll_mask: &[u16],
+    q_thr: &[u8],
+    side_thr: &[u8],
+    edge: bool,
+) {
     let vm = vmask[0] as u32 | vmask[1] as u32 | vmask[2] as u32;
     let mut x: u32 = 1;
     let mut dp = dst_off;
@@ -414,7 +556,8 @@ pub fn deblock_v_sb64uv_8bpc(
             } else {
                 max_width_pos
             };
-            deblock_8bpc(
+            deblock_bd(
+                bd,
                 dst,
                 dp as isize,
                 q_thr[qi] as u32,
@@ -1503,12 +1646,13 @@ fn init_lut_uv(ctx: &DeblockCtx, qidx: i32) -> [[[u32; 16]; 2]; 2] {
 /// Port of `deblock_sbrow64_cols` (single-tile). `p_*` are whole planes; the
 /// `*_off` are byte offsets to this 64-row band's first pixel.
 #[allow(clippy::too_many_arguments)]
-fn deblock64_cols(
+fn deblock64_cols<BD: BitDepth>(
+    bd: BD,
     ctx: &DeblockCtx,
-    p_y: &mut [u8],
+    p_y: &mut [BD::Pixel],
     y_off: usize,
-    p_u: &mut [u8],
-    p_v: &mut [u8],
+    p_u: &mut [BD::Pixel],
+    p_v: &mut [BD::Pixel],
     uv_off: usize,
     y64: i32,
 ) {
@@ -1606,7 +1750,8 @@ fn deblock64_cols(
                 // first column of an x64 that begins a new tile; for single-tile
                 // frames it is always false. Passing `x == 0` here would wrongly
                 // clamp max_width_neg at every superblock-column's left edge.
-                deblock_h_sb64y_8bpc(
+                deblock_h_sb64y_bd(
+                    bd,
                     p_y,
                     cur_off + x * 4,
                     ls.unsigned_abs(),
@@ -1713,7 +1858,8 @@ fn deblock64_cols(
             let llm = [ll_mask[x], ll_mask[x + 1]];
             // Single-tile: tile_edge is always false (see luma above).
             if apply_u {
-                deblock_h_sb64uv_8bpc(
+                deblock_h_sb64uv_bd(
+                    bd,
                     p_u,
                     cur_off + x * 4,
                     ls.unsigned_abs(),
@@ -1725,7 +1871,8 @@ fn deblock64_cols(
                 );
             }
             if apply_v {
-                deblock_h_sb64uv_8bpc(
+                deblock_h_sb64uv_bd(
+                    bd,
                     p_v,
                     cur_off + x * 4,
                     ls.unsigned_abs(),
@@ -1742,12 +1889,13 @@ fn deblock64_cols(
 
 /// Port of `deblock_sbrow64_rows` (single-tile).
 #[allow(clippy::too_many_arguments)]
-fn deblock64_rows(
+fn deblock64_rows<BD: BitDepth>(
+    bd: BD,
     ctx: &DeblockCtx,
-    p_y: &mut [u8],
+    p_y: &mut [BD::Pixel],
     y_off: usize,
-    p_u: &mut [u8],
-    p_v: &mut [u8],
+    p_u: &mut [BD::Pixel],
+    p_v: &mut [BD::Pixel],
     uv_off: usize,
     y64: i32,
 ) {
@@ -1859,7 +2007,8 @@ fn deblock64_rows(
                     row[3][(x64 & 3) as usize],
                 ];
                 let llm = [ll_mask[y], ll_mask[y + 1]];
-                deblock_v_sb64y_8bpc(
+                deblock_v_sb64y_bd(
+                    bd,
                     p_y,
                     (cur_off as isize + y as isize * 4 * ls) as usize,
                     ls.unsigned_abs(),
@@ -1987,7 +2136,8 @@ fn deblock64_rows(
             ];
             let llm = [ll_mask[y], ll_mask[y + 1]];
             if apply_u {
-                deblock_v_sb64uv_8bpc(
+                deblock_v_sb64uv_bd(
+                    bd,
                     p_u,
                     (cur_off as isize + y as isize * 4 * ls) as usize,
                     ls.unsigned_abs(),
@@ -1999,7 +2149,8 @@ fn deblock64_rows(
                 );
             }
             if apply_v {
-                deblock_v_sb64uv_8bpc(
+                deblock_v_sb64uv_bd(
+                    bd,
                     p_v,
                     (cur_off as isize + y as isize * 4 * ls) as usize,
                     ls.unsigned_abs(),
@@ -2017,12 +2168,13 @@ fn deblock64_rows(
 /// Faithful `dav2d_deblock_sbrow_cols` (single-tile). `p_*` whole planes; the
 /// sbrow's first pixel is at `y_off`/`uv_off`.
 #[allow(clippy::too_many_arguments)]
-pub fn deblock_sbrow_cols(
+pub fn deblock_sbrow_cols<BD: BitDepth>(
+    bd: BD,
     ctx: &mut DeblockCtx,
-    p_y: &mut [u8],
+    p_y: &mut [BD::Pixel],
     y_off0: usize,
-    p_u: &mut [u8],
-    p_v: &mut [u8],
+    p_u: &mut [BD::Pixel],
+    p_v: &mut [BD::Pixel],
     uv_off0: usize,
     sby: i32,
     _start_of_tile_row: bool,
@@ -2034,7 +2186,7 @@ pub fn deblock_sbrow_cols(
     for y64 in y64_start..y64_end {
         // bottom-frame crop must run before the cols pass reads filter_y[1].
         // (db_apply_tmpl.c performs it inside deblock_sbrow64_cols.)
-        deblock64_cols(ctx, p_y, y_off, p_u, p_v, uv_off, y64);
+        deblock64_cols(bd, ctx, p_y, y_off, p_u, p_v, uv_off, y64);
         y_off = (y_off as isize + 64 * ctx.y_stride) as usize;
         uv_off = (uv_off as isize + (64 * ctx.uv_stride >> ctx.ss_ver)) as usize;
     }
@@ -2042,12 +2194,13 @@ pub fn deblock_sbrow_cols(
 
 /// Faithful `dav2d_deblock_sbrow_rows` (single-tile).
 #[allow(clippy::too_many_arguments)]
-pub fn deblock_sbrow_rows(
+pub fn deblock_sbrow_rows<BD: BitDepth>(
+    bd: BD,
     ctx: &mut DeblockCtx,
-    p_y: &mut [u8],
+    p_y: &mut [BD::Pixel],
     y_off0: usize,
-    p_u: &mut [u8],
-    p_v: &mut [u8],
+    p_u: &mut [BD::Pixel],
+    p_v: &mut [BD::Pixel],
     uv_off0: usize,
     sby: i32,
 ) {
@@ -2056,7 +2209,7 @@ pub fn deblock_sbrow_rows(
     let mut y_off = y_off0;
     let mut uv_off = uv_off0;
     for y64 in y64_start..y64_end {
-        deblock64_rows(ctx, p_y, y_off, p_u, p_v, uv_off, y64);
+        deblock64_rows(bd, ctx, p_y, y_off, p_u, p_v, uv_off, y64);
         y_off = (y_off as isize + 64 * ctx.y_stride) as usize;
         uv_off = (uv_off as isize + (64 * ctx.uv_stride >> ctx.ss_ver)) as usize;
     }

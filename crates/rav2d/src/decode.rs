@@ -3343,6 +3343,7 @@ fn filter_sbrow(
             layout: seq_hdr.layout,
         };
         crate::deblock::deblock_sbrow_cols(
+            crate::pixel::BitDepth8,
             &mut dctx,
             dst_y,
             y_off0 as usize,
@@ -3353,6 +3354,7 @@ fn filter_sbrow(
             start_of_tile_row,
         );
         crate::deblock::deblock_sbrow_rows(
+            crate::pixel::BitDepth8,
             &mut dctx,
             dst_y,
             y_off0 as usize,
