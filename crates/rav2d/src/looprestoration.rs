@@ -103,7 +103,45 @@ pub fn compute_gradient_row_8bpc(
     shift: u32,
 ) {
     let offs: [[i32; 2]; 4] = [[1, 0], [0, 1], [1, 1], [-1, 1]];
-    let mut x1 = 0usize;
+    let ncells = (w + 2 + 1) >> 1; // number of output cells (x1 = 0,2,..,<w+2)
+
+    // SIMD: process full groups of 4 output cells (= 8 input columns) per
+    // direction; the 8-wide load reads columns [col_off+cell*2-1 .. +8], which
+    // stays in-bounds only for full groups, so a partial trailing group falls
+    // back to scalar below.
+    let full_groups = ncells / 4;
+    for g in 0..full_groups {
+        let base_cell = g * 4;
+        let col0 = col_off + base_cell * 2;
+        for d in 0..4 {
+            let dy = offs[d][0];
+            let dx = offs[d][1];
+            let center_rows = [rows[row_off - 1], rows[row_off]];
+            let a_rows = [
+                rows[(row_off as i32 - 1 - dy) as usize],
+                rows[(row_off as i32 - dy) as usize],
+            ];
+            let c_rows = [
+                rows[(row_off as i32 - 1 + dy) as usize],
+                rows[(row_off as i32 + dy) as usize],
+            ];
+            crate::simd::gdf_gradient_group(
+                dst,
+                d,
+                base_cell,
+                4,
+                center_rows,
+                a_rows,
+                c_rows,
+                col0,
+                dx,
+                shift,
+            );
+        }
+    }
+
+    // Scalar tail for the remaining < 4 cells.
+    let mut x1 = (full_groups * 4) * 2;
     while x1 < w + 2 {
         for d in 0..4 {
             let mut grad = 0i32;
@@ -200,19 +238,30 @@ pub fn gdf_add_8bpc(
     scale: i32,
     ll_mask: &[[u16; 4]],
 ) {
-    let shift = 4;
-    let rnd = 1 << (shift - 1);
+    let bw = w >> 2;
     for by in 0..h >> 2 {
-        for bx in 0..w >> 2 {
-            if ll_mask[by][0] & (1 << bx) != 0 {
+        let skip_mask = ll_mask[by][0];
+        let mut bx = 0usize;
+        while bx < bw {
+            if skip_mask & (1 << bx) != 0 {
+                bx += 1;
                 continue;
             }
+            // Batch consecutive non-skipped 4x4 blocks into one run per row.
+            let bx_start = bx;
+            bx += 1;
+            while bx < bw && skip_mask & (1 << bx) == 0 {
+                bx += 1;
+            }
+            let x0 = bx_start << 2;
+            let n = (bx - bx_start) << 2;
             for y in by * 4..by * 4 + 4 {
-                for x in bx * 4..bx * 4 + 4 {
-                    let diff = err[y * err_stride + x] as i32 * scale;
-                    let adj = apply_sign((diff.abs() + rnd) >> shift, diff);
-                    p[y * stride + x] = iclip(p[y * stride + x] as i32 + adj, 0, 255) as u8;
-                }
+                crate::simd::gdf_add_run(
+                    &mut p[y * stride + x0..],
+                    &err[y * err_stride + x0..],
+                    scale,
+                    n,
+                );
             }
         }
     }
@@ -525,26 +574,34 @@ pub fn ns_wiener_single_y_8bpc(
             bak_idx = 0;
         }
 
-        for bx in 0..(w >> 2) {
-            if ll_mask[y >> 2][0] & (1 << bx) != 0 {
+        let refs: [&[u8]; 9] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
+        let taps: [crate::simd::WienerTap; 16] = core::array::from_fn(|i| {
+            let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
+            let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
+            crate::simd::WienerTap {
+                row_p: refs[(4 + dy) as usize],
+                row_m: refs[(4 - dy) as usize],
+                dx,
+                coef: filter[i] as i32,
+            }
+        });
+        let skip_mask = ll_mask[y >> 2][0];
+        let dst_row = &mut p[p_off + y * stride..];
+        let bw = w >> 2;
+        let mut bx = 0usize;
+        while bx < bw {
+            if skip_mask & (1 << bx) != 0 {
+                bx += 1;
                 continue;
             }
-            for x in bx * 4..bx * 4 + 4 {
-                let m = row_buffers[ptrs[4]][o + x] as i32;
-                let mut s = m << 7;
-                for i in 0..16 {
-                    let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
-                    let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
-                    let a = row_buffers[ptrs[(4 + dy) as usize]]
-                        [(o as i32 + x as i32 + dx) as usize] as i32;
-                    let b = row_buffers[ptrs[(4 - dy) as usize]]
-                        [(o as i32 + x as i32 - dx) as usize] as i32;
-                    let diff = a + b - 2 * m;
-                    s += diff * filter[i] as i32;
-                }
-                let v = (s + 64) >> 7;
-                p[p_off + y * stride + x] = iclip(v, 0, 255) as u8;
+            let bx_start = bx;
+            bx += 1;
+            while bx < bw && skip_mask & (1 << bx) == 0 {
+                bx += 1;
             }
+            let x0 = bx_start << 2;
+            let n = (bx - bx_start) << 2;
+            crate::simd::ns_wiener_fir_run(&mut dst_row[x0..x0 + n], refs[4], o + x0, &taps, n);
         }
 
         for r in 0..8 {
@@ -772,46 +829,70 @@ fn wiener_multi_8bpc(
                 bak_idx = 0;
             }
 
-            for bx in 0..bw {
-                if ll_mask[y >> 2][0] & (1 << bx) != 0 {
+            // Row references for the FIR taps; immutable borrow of row_buffers
+            // (disjoint from the mutable `p` we write).
+            let refs: [&[u8]; 10] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
+            let skip_mask = ll_mask[y >> 2][0];
+            let dst_row = &mut p[p_off + y * stride..];
+
+            // Batch consecutive non-skipped bx that share the same class into a
+            // single SIMD FIR run (every pixel in the run uses one filter; the
+            // run breaks at any skip or class change, so it stays bit-exact).
+            let mut bx = 0usize;
+            while bx < bw {
+                if skip_mask & (1 << bx) != 0 {
+                    bx += 1;
                     continue;
                 }
+                let cls = classes[bx];
+                let bx_start = bx;
+                bx += 1;
+                while bx < bw && skip_mask & (1 << bx) == 0 && classes[bx] == cls {
+                    bx += 1;
+                }
+                let x0 = bx_start << 2;
+                let n = (bx - bx_start) << 2;
+                let col0 = o + x0;
 
                 if let Some(fu) = filters_user {
-                    let filter = &fu[classes[bx] as usize];
-                    for x in (bx << 2)..(bx << 2) + 4 {
-                        let m = row_buffers[ptrs[4]][o + x] as i32;
-                        let mut s = m << 7;
-                        for i in 0..16 {
-                            let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
-                            let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
-                            let a = row_buffers[ptrs[(4 + dy) as usize]]
-                                [(o as i32 + x as i32 + dx) as usize]
-                                as i32;
-                            let b = row_buffers[ptrs[(4 - dy) as usize]]
-                                [(o as i32 + x as i32 - dx) as usize]
-                                as i32;
-                            s += (a + b - 2 * m) * filter[i] as i32;
+                    let filter = &fu[cls as usize];
+                    let taps: [crate::simd::WienerTap; 16] = core::array::from_fn(|i| {
+                        let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
+                        let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
+                        crate::simd::WienerTap {
+                            row_p: refs[(4 + dy) as usize],
+                            row_m: refs[(4 - dy) as usize],
+                            dx,
+                            coef: filter[i] as i32,
                         }
-                        p[p_off + y * stride + x] = iclip((s + 64) >> 7, 0, 255) as u8;
-                    }
+                    });
+                    crate::simd::ns_wiener_fir_run(
+                        &mut dst_row[x0..x0 + n],
+                        refs[4],
+                        col0,
+                        &taps,
+                        n,
+                    );
                 } else if let Some(fp) = filters_pretrained {
-                    let filter = &fp[classes[bx] as usize];
-                    for x in (bx << 2)..(bx << 2) + 4 {
-                        let mut s = row_buffers[ptrs[4]][o + x] as i32 * filter[12] as i32;
-                        for i in 0..12 {
-                            let dy = PC_WIENER_CONFIG[i][0] as i32;
-                            let dx = PC_WIENER_CONFIG[i][1] as i32;
-                            let a = row_buffers[ptrs[(4 + dy) as usize]]
-                                [(o as i32 + x as i32 + dx) as usize]
-                                as i32;
-                            let b = row_buffers[ptrs[(4 - dy) as usize]]
-                                [(o as i32 + x as i32 - dx) as usize]
-                                as i32;
-                            s += filter[i] as i32 * (a + b);
+                    let filter = &fp[cls as usize];
+                    let taps: [crate::simd::WienerTap; 12] = core::array::from_fn(|i| {
+                        let dy = PC_WIENER_CONFIG[i][0] as i32;
+                        let dx = PC_WIENER_CONFIG[i][1] as i32;
+                        crate::simd::WienerTap {
+                            row_p: refs[(4 + dy) as usize],
+                            row_m: refs[(4 - dy) as usize],
+                            dx,
+                            coef: filter[i] as i32,
                         }
-                        p[p_off + y * stride + x] = iclip((s + 64) >> 7, 0, 255) as u8;
-                    }
+                    });
+                    crate::simd::pc_wiener_fir_run(
+                        &mut dst_row[x0..x0 + n],
+                        refs[4],
+                        filter[12] as i32,
+                        col0,
+                        &taps,
+                        n,
+                    );
                 }
             }
 

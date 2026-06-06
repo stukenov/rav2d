@@ -142,7 +142,10 @@ pub fn w_avg_row<BD: BitDepth>(
     let rnd_v = i32x8::splat(rnd);
     let mut x = 0;
     while x + 8 <= n {
-        let r = sra(load8_i16(&tmp1[x..]) * w1 + load8_i16(&tmp2[x..]) * w2 + rnd_v, sh);
+        let r = sra(
+            load8_i16(&tmp1[x..]) * w1 + load8_i16(&tmp2[x..]) * w2 + rnd_v,
+            sh,
+        );
         store8_clip(bd, &mut dst[x..], r);
         x += 8;
     }
@@ -324,6 +327,213 @@ pub fn cctx_row(u: &mut [i32], v: &mut [i32], sina: i32, cosa: i32, sz: usize, m
     }
 }
 
+// ---------------------------------------------------------------------------
+// Loop-restoration FIR kernels.
+//
+// Each loop-restoration filter computes, per output pixel `x`, a separable-ish
+// FIR over a small set of taps. Every tap reads ONE byte from a (per-tap) row
+// buffer at a (per-tap) signed column offset. Across a run of consecutive `x`
+// the access for a fixed tap is a *contiguous* 8-wide load from that row, so
+// the MAC vectorizes cleanly — provided the whole run uses the SAME filter
+// coefficients and is not skipped (the caller guarantees this by only batching
+// runs of uniform class / no-skip).
+//
+// Rounding is a PLAIN arithmetic round `(s + 64) >> 7` (NOT CDEF's asymmetric
+// `-(sum<0)` correction). Final clip is `[0, bitdepth_max]`.
+// ---------------------------------------------------------------------------
+
+/// One symmetric FIR tap: `a` is read from `row_p` at `+dx`, `b` from `row_m`
+/// at `-dx` (relative to the per-pixel column `o + x`); both rows are u8 buffers
+/// and `dx` is added to the run's base column offset.
+pub(crate) struct WienerTap<'a> {
+    pub row_p: &'a [u8],
+    pub row_m: &'a [u8],
+    pub dx: i32,
+    pub coef: i32,
+}
+
+/// User ("NS") Wiener FIR over a run of `n` consecutive pixels.
+///
+/// `dst` is the destination row (already offset to the run's first pixel).
+/// `center` is the center row buffer; `col0 = o + x0` is the column of the
+/// run's first pixel inside every row buffer. Each tap contributes
+/// `(a + b - 2*m) * coef`; accumulator starts at `m << 7`; output is
+/// `clip((s + 64) >> 7, 0, 255)`.
+#[inline]
+pub(crate) fn ns_wiener_fir_run(
+    dst: &mut [u8],
+    center: &[u8],
+    col0: usize,
+    taps: &[WienerTap],
+    n: usize,
+) {
+    let rnd = i32x8::splat(64);
+    let mut x = 0;
+    while x + 8 <= n {
+        let c = col0 + x;
+        let m = load8_u8(&center[c..]);
+        let mut s = m << i32x8::splat(7);
+        let two_m = m + m;
+        for t in taps {
+            let cp = (c as i32 + t.dx) as usize;
+            let cm = (c as i32 - t.dx) as usize;
+            let a = load8_u8(&t.row_p[cp..]);
+            let b = load8_u8(&t.row_m[cm..]);
+            s += (a + b - two_m) * i32x8::splat(t.coef);
+        }
+        let v = sra(s + rnd, 7).max(i32x8::splat(0)).min(i32x8::splat(255));
+        let arr = v.to_array();
+        for k in 0..8 {
+            dst[x + k] = arr[k] as u8;
+        }
+        x += 8;
+    }
+    while x < n {
+        let c = col0 + x;
+        let m = center[c] as i32;
+        let mut s = m << 7;
+        for t in taps {
+            let a = t.row_p[(c as i32 + t.dx) as usize] as i32;
+            let b = t.row_m[(c as i32 - t.dx) as usize] as i32;
+            s += (a + b - 2 * m) * t.coef;
+        }
+        dst[x] = ((s + 64) >> 7).clamp(0, 255) as u8;
+        x += 1;
+    }
+}
+
+/// Pretrained ("PC") Wiener FIR over a run of `n` consecutive pixels.
+///
+/// Identical access pattern to [`ns_wiener_fir_run`] but each tap contributes
+/// `coef * (a + b)` and the accumulator starts at `m * center_coef`.
+#[inline]
+pub(crate) fn pc_wiener_fir_run(
+    dst: &mut [u8],
+    center: &[u8],
+    center_coef: i32,
+    col0: usize,
+    taps: &[WienerTap],
+    n: usize,
+) {
+    let rnd = i32x8::splat(64);
+    let cc = i32x8::splat(center_coef);
+    let mut x = 0;
+    while x + 8 <= n {
+        let c = col0 + x;
+        let m = load8_u8(&center[c..]);
+        let mut s = m * cc;
+        for t in taps {
+            let cp = (c as i32 + t.dx) as usize;
+            let cm = (c as i32 - t.dx) as usize;
+            let a = load8_u8(&t.row_p[cp..]);
+            let b = load8_u8(&t.row_m[cm..]);
+            s += (a + b) * i32x8::splat(t.coef);
+        }
+        let v = sra(s + rnd, 7).max(i32x8::splat(0)).min(i32x8::splat(255));
+        let arr = v.to_array();
+        for k in 0..8 {
+            dst[x + k] = arr[k] as u8;
+        }
+        x += 8;
+    }
+    while x < n {
+        let c = col0 + x;
+        let m = center[c] as i32;
+        let mut s = m * center_coef;
+        for t in taps {
+            let a = t.row_p[(c as i32 + t.dx) as usize] as i32;
+            let b = t.row_m[(c as i32 - t.dx) as usize] as i32;
+            s += (a + b) * t.coef;
+        }
+        dst[x] = ((s + 64) >> 7).clamp(0, 255) as u8;
+        x += 1;
+    }
+}
+
+/// GDF residual add over a run of `n` consecutive pixels in one 4x4 row.
+/// `dst` is offset to the run's first pixel; `err` is offset likewise.
+/// `dst[x] = clip(dst[x] + apply_sign((|err[x]*scale| + rnd) >> shift, err[x]*scale))`
+/// with `shift = 4`, `rnd = 8`. `apply_sign(v, s)` returns `-v` if `s < 0`.
+#[inline]
+pub(crate) fn gdf_add_run(dst: &mut [u8], err: &[i8], scale: i32, n: usize) {
+    let rnd = i32x8::splat(8);
+    let sc = i32x8::splat(scale);
+    let zero = i32x8::splat(0);
+    let mut x = 0;
+    while x + 8 <= n {
+        // load 8 i8 (sign-extended)
+        let diff = i32x8::from([
+            err[x] as i32,
+            err[x + 1] as i32,
+            err[x + 2] as i32,
+            err[x + 3] as i32,
+            err[x + 4] as i32,
+            err[x + 5] as i32,
+            err[x + 6] as i32,
+            err[x + 7] as i32,
+        ]) * sc;
+        let mag = sra(diff.abs() + rnd, 4);
+        // apply_sign: negate where diff < 0. cmp_lt yields the all-ones mask
+        // where diff<0; blend(mask, t, f) picks `t` there, `f` elsewhere.
+        let neg = diff.cmp_lt(zero);
+        let adj = neg.blend(zero - mag, mag);
+        let d = load8_u8(&dst[x..]) + adj;
+        let v = d.max(zero).min(i32x8::splat(255));
+        let arr = v.to_array();
+        for k in 0..8 {
+            dst[x + k] = arr[k] as u8;
+        }
+        x += 8;
+    }
+    while x < n {
+        let diff = err[x] as i32 * scale;
+        let mag = (diff.abs() + 8) >> 4;
+        let adj = if diff < 0 { -mag } else { mag };
+        dst[x] = (dst[x] as i32 + adj).clamp(0, 255) as u8;
+        x += 1;
+    }
+}
+
+/// GDF gradient: for one direction, accumulate the per-column gradient
+/// `|b*2 - a - c|` over 2 `y` rows into 8 lanes (one per input column), then
+/// pair-reduce adjacent lanes into 4 output gradients.
+///
+/// For lane `j` (column `col0 + j`): `b = center_rows[y][col0+j-1]`,
+/// `a = a_rows[y][col0+j-1-dx]`, `c = c_rows[y][col0+j-1+dx]` (all `>> shift`),
+/// where `(a_rows[y], c_rows[y])` are the up/down rows for direction `d`.
+/// Output `out[k] = lane(2k) + lane(2k+1)` summed over both `y`. Writes
+/// `dst[k][d]` for k in 0..ncells.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(crate) fn gdf_gradient_group(
+    dst: &mut [[u16; 4]],
+    d: usize,
+    base_cell: usize,
+    ncells: usize,
+    center_rows: [&[u8]; 2],
+    a_rows: [&[u8]; 2],
+    c_rows: [&[u8]; 2],
+    col0: usize,
+    dx: i32,
+    shift: u32,
+) {
+    let sh = i32x8::splat(shift as i32);
+    let mut acc = i32x8::splat(0);
+    for y in 0..2 {
+        let bcol = col0 - 1;
+        let b = load8_u8(&center_rows[y][bcol..]) >> sh;
+        let acol = (bcol as i32 - dx) as usize;
+        let ccol = (bcol as i32 + dx) as usize;
+        let a = load8_u8(&a_rows[y][acol..]) >> sh;
+        let c = load8_u8(&c_rows[y][ccol..]) >> sh;
+        acc += (b + b - a - c).abs();
+    }
+    let arr = acc.to_array();
+    for k in 0..ncells {
+        dst[base_cell + k][d] = (arr[2 * k] + arr[2 * k + 1]) as u16;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,7 +544,11 @@ mod tests {
     #[test]
     fn shr_is_arithmetic() {
         let v = i32x8::splat(-8);
-        assert_eq!(sra(v, 1).to_array(), [-4i32; 8], "i32x8 >> must be arithmetic");
+        assert_eq!(
+            sra(v, 1).to_array(),
+            [-4i32; 8],
+            "i32x8 >> must be arithmetic"
+        );
         let v = i32x8::from([-1, -2, -3, -16, 15, 256, -257, 1024]);
         let got = sra(v, 4).to_array();
         let want = [-1, -1, -1, -1, 0, 16, -17, 64];
@@ -417,7 +631,12 @@ mod tests {
                     let bd = BitDepth16::new(bd_max.0);
                     let mut got = vec![0u16; n];
                     avg_row(bd, &mut got, &t1, &t2, n, rnd, sh);
-                    assert_eq!(got, ref_avg(bd, &t1, &t2, rnd, sh), "avg n={n} {}b", bd_max.0);
+                    assert_eq!(
+                        got,
+                        ref_avg(bd, &t1, &t2, rnd, sh),
+                        "avg n={n} {}b",
+                        bd_max.0
+                    );
                 }
             }
         }
@@ -434,7 +653,11 @@ mod tests {
                 let bd = BitDepth16::new(10);
                 let mut got = vec![0u16; n];
                 w_avg_row(bd, &mut got, &t1, &t2, n, wt, rnd, sh);
-                assert_eq!(got, ref_wavg(bd, &t1, &t2, wt, rnd, sh), "wavg n={n} wt={wt}");
+                assert_eq!(
+                    got,
+                    ref_wavg(bd, &t1, &t2, wt, rnd, sh),
+                    "wavg n={n} wt={wt}"
+                );
             }
         }
     }
@@ -512,8 +735,9 @@ mod tests {
                         assert_eq!(got, want, "resadd 8bpc n={n}");
                     } else {
                         let bd = BitDepth16::new(bpc);
-                        let d0: Vec<u16> =
-                            (0..n).map(|_| (rng.next() % (max as u64 + 1)) as u16).collect();
+                        let d0: Vec<u16> = (0..n)
+                            .map(|_| (rng.next() % (max as u64 + 1)) as u16)
+                            .collect();
                         let mut got = d0.clone();
                         residual_add_row(bd, &mut got, &c, n, rnd, shift);
                         let want: Vec<u16> = (0..n)
@@ -542,8 +766,9 @@ mod tests {
                         assert_eq!(got, want, "dc 8bpc n={n} dc={dc}");
                     } else {
                         let bd = BitDepth16::new(bpc);
-                        let d0: Vec<u16> =
-                            (0..n).map(|_| (rng.next() % (max as u64 + 1)) as u16).collect();
+                        let d0: Vec<u16> = (0..n)
+                            .map(|_| (rng.next() % (max as u64 + 1)) as u16)
+                            .collect();
                         let mut got = d0.clone();
                         dc_add_row(bd, &mut got, dc, n);
                         let want: Vec<u16> =
@@ -562,7 +787,13 @@ mod tests {
             let min = -(1 << (bitdepth + 7));
             let max = (1 << (bitdepth + 7)) - 1;
             // angle coeffs scaled by ~2^8 (rotation cos/sin); keep small like real data.
-            for &(sina, cosa) in &[(0i32, 256i32), (181, 181), (256, 0), (-181, 181), (100, 236)] {
+            for &(sina, cosa) in &[
+                (0i32, 256i32),
+                (181, 181),
+                (256, 0),
+                (-181, 181),
+                (100, 236),
+            ] {
                 // sizes are powers of two in 16..=1024; also test a few + an odd tail.
                 for sz in [16usize, 32, 64, 256, 1024, 17, 23] {
                     let u0: Vec<i32> = (0..sz).map(|_| (rng.next() as i32) % (max + 1)).collect();
@@ -600,6 +831,220 @@ mod tests {
                 .map(|i| bd.pixel_clip((alpha * dst0[i] as i32 + beta) >> 8))
                 .collect();
             assert_eq!(got, want, "morph n={n}");
+        }
+    }
+
+    impl Rng {
+        fn u8b(&mut self) -> u8 {
+            (self.next() >> 32) as u8
+        }
+        fn i8b(&mut self) -> i8 {
+            (self.next() >> 40) as i8
+        }
+    }
+
+    // Build a set of random u8 row buffers wide enough for a `cols`-pixel run
+    // with column offsets in [-OFF, +OFF] starting at base `col0`.
+    fn rand_rows(rng: &mut Rng, nrows: usize, len: usize) -> Vec<Vec<u8>> {
+        (0..nrows)
+            .map(|_| (0..len).map(|_| rng.u8b()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn ns_wiener_fir_matches_scalar() {
+        let mut rng = Rng(0x4E57_1234);
+        let col0 = 6usize; // o
+        let bufw = col0 + 64 + 8; // room for run + offsets + 8-wide load slack
+        for ntaps in [6usize, 16] {
+            for n in 0..=40usize {
+                let nrows = 2 * ntaps + 1;
+                let rows = rand_rows(&mut rng, nrows, bufw);
+                let center = &rows[0];
+                // random taps: each picks two rows, a dx in [-4,4], coef in [-128,127]
+                let mut tap_meta = Vec::new();
+                for i in 0..ntaps {
+                    let rp = 1 + (i % (nrows - 1));
+                    let rm = 1 + ((i + 1) % (nrows - 1));
+                    let dx = (rng.next() % 9) as i32 - 4;
+                    let coef = rng.i8b() as i32;
+                    tap_meta.push((rp, rm, dx, coef));
+                }
+                let taps: Vec<WienerTap> = tap_meta
+                    .iter()
+                    .map(|&(rp, rm, dx, coef)| WienerTap {
+                        row_p: &rows[rp],
+                        row_m: &rows[rm],
+                        dx,
+                        coef,
+                    })
+                    .collect();
+                let mut got = vec![0u8; n];
+                ns_wiener_fir_run(&mut got, center, col0, &taps, n);
+                let want: Vec<u8> = (0..n)
+                    .map(|x| {
+                        let c = col0 + x;
+                        let m = center[c] as i32;
+                        let mut s = m << 7;
+                        for &(rp, rm, dx, coef) in &tap_meta {
+                            let a = rows[rp][(c as i32 + dx) as usize] as i32;
+                            let b = rows[rm][(c as i32 - dx) as usize] as i32;
+                            s += (a + b - 2 * m) * coef;
+                        }
+                        ((s + 64) >> 7).clamp(0, 255) as u8
+                    })
+                    .collect();
+                assert_eq!(got, want, "ns_wiener taps={ntaps} n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn pc_wiener_fir_matches_scalar() {
+        let mut rng = Rng(0x9C77_3311);
+        let col0 = 6usize;
+        let bufw = col0 + 64 + 8;
+        let ntaps = 12usize;
+        for n in 0..=40usize {
+            let nrows = 2 * ntaps + 1;
+            let rows = rand_rows(&mut rng, nrows, bufw);
+            let center = &rows[0];
+            let center_coef = rng.i16() as i32; // pretrained filters are i16
+            let mut tap_meta = Vec::new();
+            for i in 0..ntaps {
+                let rp = 1 + (i % (nrows - 1));
+                let rm = 1 + ((i + 1) % (nrows - 1));
+                let dx = (rng.next() % 9) as i32 - 4;
+                let coef = rng.i16() as i32;
+                tap_meta.push((rp, rm, dx, coef));
+            }
+            let taps: Vec<WienerTap> = tap_meta
+                .iter()
+                .map(|&(rp, rm, dx, coef)| WienerTap {
+                    row_p: &rows[rp],
+                    row_m: &rows[rm],
+                    dx,
+                    coef,
+                })
+                .collect();
+            let mut got = vec![0u8; n];
+            pc_wiener_fir_run(&mut got, center, center_coef, col0, &taps, n);
+            let want: Vec<u8> = (0..n)
+                .map(|x| {
+                    let c = col0 + x;
+                    let m = center[c] as i32;
+                    let mut s = m * center_coef;
+                    for &(rp, rm, dx, coef) in &tap_meta {
+                        let a = rows[rp][(c as i32 + dx) as usize] as i32;
+                        let b = rows[rm][(c as i32 - dx) as usize] as i32;
+                        s += (a + b) * coef;
+                    }
+                    ((s + 64) >> 7).clamp(0, 255) as u8
+                })
+                .collect();
+            assert_eq!(got, want, "pc_wiener n={n}");
+        }
+    }
+
+    #[test]
+    fn gdf_gradient_group_matches_scalar() {
+        let mut rng = Rng(0x67AD_9911);
+        // mirrors compute_gradient_row_8bpc's per-cell math for one full group.
+        let offs: [[i32; 2]; 4] = [[1, 0], [0, 1], [1, 1], [-1, 1]];
+        let bufw = 6 + 64 + 16;
+        for shift in [0u32, 2] {
+            for row_off in [6usize, 8] {
+                // need rows indexed [row_off-1-1 .. row_off+1]; allocate plenty.
+                let nrows = row_off + 4;
+                let rows: Vec<Vec<u8>> = (0..nrows)
+                    .map(|_| (0..bufw).map(|_| rng.u8b()).collect())
+                    .collect();
+                let rowrefs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+                for col_off in [6usize, 7] {
+                    let base_cell = 0usize;
+                    let col0 = col_off + base_cell * 2;
+                    let mut got = vec![[0u16; 4]; 8];
+                    for d in 0..4 {
+                        let dy = offs[d][0];
+                        let dx = offs[d][1];
+                        let center_rows = [rowrefs[row_off - 1], rowrefs[row_off]];
+                        let a_rows = [
+                            rowrefs[(row_off as i32 - 1 - dy) as usize],
+                            rowrefs[(row_off as i32 - dy) as usize],
+                        ];
+                        let c_rows = [
+                            rowrefs[(row_off as i32 - 1 + dy) as usize],
+                            rowrefs[(row_off as i32 + dy) as usize],
+                        ];
+                        gdf_gradient_group(
+                            &mut got,
+                            d,
+                            base_cell,
+                            4,
+                            center_rows,
+                            a_rows,
+                            c_rows,
+                            col0,
+                            dx,
+                            shift,
+                        );
+                    }
+                    // scalar reference for 4 cells (x1 = 0,2,4,6)
+                    let mut want = vec![[0u16; 4]; 8];
+                    let mut x1 = 0usize;
+                    while x1 < 8 {
+                        for d in 0..4 {
+                            let mut grad = 0i32;
+                            for x2 in 0..2usize {
+                                let x = col_off + x1 + x2;
+                                for y in 0..2 {
+                                    let dy = offs[d][0];
+                                    let dx = offs[d][1];
+                                    let ry = row_off + y;
+                                    let a = (rowrefs[(ry as i32 - 1 - dy) as usize]
+                                        [(x as i32 - 1 - dx) as usize]
+                                        >> shift)
+                                        as i32;
+                                    let b = (rowrefs[ry - 1][x - 1] >> shift) as i32;
+                                    let c = (rowrefs[(ry as i32 - 1 + dy) as usize]
+                                        [(x as i32 - 1 + dx) as usize]
+                                        >> shift)
+                                        as i32;
+                                    grad += (b * 2 - a - c).abs();
+                                }
+                            }
+                            want[x1 >> 1][d] = grad as u16;
+                        }
+                        x1 += 2;
+                    }
+                    assert_eq!(
+                        got, want,
+                        "gdf_grad shift={shift} ro={row_off} co={col_off}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gdf_add_matches_scalar() {
+        let mut rng = Rng(0x6DF_ADD7);
+        for scale in [5i32, 8] {
+            for n in 0..=40usize {
+                let dst0: Vec<u8> = (0..n).map(|_| rng.u8b()).collect();
+                let err: Vec<i8> = (0..n).map(|_| rng.i8b()).collect();
+                let mut got = dst0.clone();
+                gdf_add_run(&mut got, &err, scale, n);
+                let want: Vec<u8> = (0..n)
+                    .map(|x| {
+                        let diff = err[x] as i32 * scale;
+                        let mag = (diff.abs() + 8) >> 4;
+                        let adj = if diff < 0 { -mag } else { mag };
+                        (dst0[x] as i32 + adj).clamp(0, 255) as u8
+                    })
+                    .collect();
+                assert_eq!(got, want, "gdf_add scale={scale} n={n}");
+            }
         }
     }
 }
