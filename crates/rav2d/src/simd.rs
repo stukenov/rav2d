@@ -245,6 +245,51 @@ pub fn dc_add_row<BD: BitDepth>(bd: BD, dst: &mut [BD::Pixel], dc: i32, n: usize
     }
 }
 
+/// itx row-clip pass: `tmp[i] = clip((tmp[i] + rnd) >> shift, min, max)` in place.
+#[inline]
+pub fn row_clip(tmp: &mut [i32], n: usize, rnd: i32, shift: i32, min: i32, max: i32) {
+    let rnd_v = i32x8::splat(rnd);
+    let min_v = i32x8::splat(min);
+    let max_v = i32x8::splat(max);
+    let mut i = 0;
+    while i + 8 <= n {
+        let v = sra(load8_i32(&tmp[i..]) + rnd_v, shift)
+            .max(min_v)
+            .min(max_v);
+        store8_i32(&mut tmp[i..], v);
+        i += 8;
+    }
+    while i < n {
+        tmp[i] = (((tmp[i] + rnd) >> shift).max(min)).min(max);
+        i += 1;
+    }
+}
+
+/// itx plain residual-add row (dpcm_flag 0): `dst[x] = clip(dst[x] + ((c[x]+rnd)>>shift))`.
+#[inline]
+pub fn residual_add_row<BD: BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    c: &[i32],
+    n: usize,
+    rnd: i32,
+    shift: i32,
+) {
+    let rnd_v = i32x8::splat(rnd);
+    let mut x = 0;
+    while x + 8 <= n {
+        let cf = sra(load8_i32(&c[x..]) + rnd_v, shift);
+        let r = load8_pix(&dst[x..]) + cf;
+        store8_clip(bd, &mut dst[x..], r);
+        x += 8;
+    }
+    while x < n {
+        let p: i32 = dst[x].into();
+        dst[x] = bd.pixel_clip(p + ((c[x] + rnd) >> shift));
+        x += 1;
+    }
+}
+
 /// `cctx` row: cross-component-transform rotate + clip over two i32 planes.
 /// `u'[i] = iclip((u*cosa - v*sina + 128 - (a<0)) >> 8, min, max)`,
 /// `v'[i] = iclip((u*sina + v*cosa + 128 - (b<0)) >> 8, min, max)`.
@@ -427,6 +472,57 @@ mod tests {
                 })
                 .collect();
             assert_eq!(got, want, "blend n={n}");
+        }
+    }
+
+    #[test]
+    fn row_clip_matches_scalar() {
+        let mut rng = Rng(0x12_ABCD_77);
+        for &(min, max) in &[(i16::MIN as i32, i16::MAX as i32), (-524288, 524287)] {
+            for &(rnd, shift) in &[(8i32, 4i32), (1, 1), (2048, 12)] {
+                for n in [0usize, 8, 16, 32, 64, 256, 1024] {
+                    let v0: Vec<i32> = (0..n).map(|_| (rng.next() as i32) >> 8).collect();
+                    let mut got = v0.clone();
+                    row_clip(&mut got, n, rnd, shift, min, max);
+                    let want: Vec<i32> = v0
+                        .iter()
+                        .map(|&v| ((v + rnd) >> shift).clamp(min, max))
+                        .collect();
+                    assert_eq!(got, want, "row_clip n={n} sh={shift}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn residual_add_matches_scalar() {
+        let mut rng = Rng(0x5A5A_3C3C);
+        for &(bpc, max) in &[(8u8, 255i32), (10, 1023), (12, 4095)] {
+            for &(rnd, shift) in &[(8i32, 4i32), (2048, 12)] {
+                for n in lens() {
+                    let c: Vec<i32> = (0..n).map(|_| (rng.next() as i32) >> 12).collect();
+                    if bpc == 8 {
+                        let bd = BitDepth8;
+                        let d0: Vec<u8> = (0..n).map(|_| rng.u8()).collect();
+                        let mut got = d0.clone();
+                        residual_add_row(bd, &mut got, &c, n, rnd, shift);
+                        let want: Vec<u8> = (0..n)
+                            .map(|i| bd.pixel_clip(d0[i] as i32 + ((c[i] + rnd) >> shift)))
+                            .collect();
+                        assert_eq!(got, want, "resadd 8bpc n={n}");
+                    } else {
+                        let bd = BitDepth16::new(bpc);
+                        let d0: Vec<u16> =
+                            (0..n).map(|_| (rng.next() % (max as u64 + 1)) as u16).collect();
+                        let mut got = d0.clone();
+                        residual_add_row(bd, &mut got, &c, n, rnd, shift);
+                        let want: Vec<u16> = (0..n)
+                            .map(|i| bd.pixel_clip(d0[i] as i32 + ((c[i] + rnd) >> shift)))
+                            .collect();
+                        assert_eq!(got, want, "resadd {bpc}b n={n}");
+                    }
+                }
+            }
         }
     }
 

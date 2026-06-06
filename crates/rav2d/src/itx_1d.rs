@@ -571,13 +571,16 @@ pub fn residual_add<BD: crate::pixel::BitDepth>(
         // `switch (dpcm_flag) { default: assert(0); case 0: ... }` falls through
         // from `default` into `case 0`, i.e. the plain non-DPCM residual add.
         _ => {
-            let mut ci = 0;
             for y in 0..h {
-                for x in 0..w {
-                    let p = dst[y * stride + x].into();
-                    dst[y * stride + x] = bd.pixel_clip(p + ((c[ci] + rnd) >> shift));
-                    ci += 1;
+                let row = y * stride;
+                if row >= dst.len() {
+                    break;
                 }
+                let cw = y * w;
+                let d = &mut dst[row..];
+                let cr = &c[cw.min(c.len())..];
+                let n = w.min(d.len()).min(cr.len());
+                crate::simd::residual_add_row(bd, d, cr, n, rnd, shift);
             }
         }
     }

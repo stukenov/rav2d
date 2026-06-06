@@ -1,4 +1,4 @@
-use crate::intops::{iclip, imin};
+use crate::intops::imin;
 use crate::itx_1d::{TX1D_FNS, TX1D_FNS_X8, inv_wht_wht_4x4, residual_add};
 use crate::pixel::BitDepth;
 use crate::scan::LAST_EOB_PER_COL;
@@ -152,9 +152,7 @@ pub fn inv_txfm_add<BD: BitDepth>(
 
     let shift0 = tx_sh[0] as i32;
     let rnd0 = (1 << shift0) >> 1;
-    for i in 0..sw * sh {
-        tmp[i] = iclip((tmp[i] + rnd0) >> shift0, row_clip_min, row_clip_max);
-    }
+    crate::simd::row_clip(&mut tmp, sw * sh, rnd0, shift0, row_clip_min, row_clip_max);
 
     let second_1d_fn_x8 = TX1D_FNS_X8[t_dim.lh as usize][((txtp >> 5) & 7) as usize];
     let mut x = 0;
