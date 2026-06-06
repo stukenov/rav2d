@@ -95,10 +95,17 @@ pub fn avg<BD: BitDepth>(
     let sh = ib + 1;
     let rnd = (1 << ib) + prep_bias(bd) * 2;
     for y in 0..h {
+        let row = y * dst_stride;
+        if row >= dst.len() {
+            break;
+        }
         for x in 0..w {
             let ti = y * w + x;
-            dst[y * dst_stride + x] =
-                bd.pixel_clip((tmp1[ti] as i32 + tmp2[ti] as i32 + rnd) >> sh);
+            let di = row + x;
+            if di >= dst.len() {
+                break;
+            }
+            dst[di] = bd.pixel_clip((tmp1[ti] as i32 + tmp2[ti] as i32 + rnd) >> sh);
         }
     }
 }
@@ -130,9 +137,17 @@ pub fn w_avg<BD: BitDepth>(
     let sh = ib + 4;
     let rnd = (8 << ib) + prep_bias(bd) * 16;
     for y in 0..h {
+        let row = y * dst_stride;
+        if row >= dst.len() {
+            break;
+        }
         for x in 0..w {
             let ti = y * w + x;
-            dst[y * dst_stride + x] = bd.pixel_clip(
+            let di = row + x;
+            if di >= dst.len() {
+                break;
+            }
+            dst[di] = bd.pixel_clip(
                 (tmp1[ti] as i32 * weight + tmp2[ti] as i32 * (16 - weight) + rnd) >> sh,
             );
         }
@@ -166,10 +181,18 @@ pub fn mask_fn<BD: BitDepth>(
     let sh = ib + 6;
     let rnd = (32 << ib) + prep_bias(bd) * 64;
     for y in 0..h {
+        let row = y * dst_stride;
+        if row >= dst.len() {
+            break;
+        }
         for x in 0..w {
             let ti = y * w + x;
+            let di = row + x;
+            if di >= dst.len() {
+                break;
+            }
             let m = mask[ti] as i32;
-            dst[y * dst_stride + x] =
+            dst[di] =
                 bd.pixel_clip((tmp1[ti] as i32 * m + tmp2[ti] as i32 * (64 - m) + rnd) >> sh);
         }
     }
@@ -188,8 +211,15 @@ pub fn blend<P: Pixel>(
     mask: &[u8],
 ) {
     for y in 0..h {
+        let row = y * dst_stride;
+        if row >= dst.len() {
+            break;
+        }
         for x in 0..w {
-            let di = y * dst_stride + x;
+            let di = row + x;
+            if di >= dst.len() {
+                break;
+            }
             let ti = y * w + x;
             let m = mask[ti] as i32;
             let d: i32 = dst[di].into();
@@ -213,8 +243,15 @@ pub fn morph<BD: BitDepth>(
     h: usize,
 ) {
     for y in 0..h {
+        let row = y * dst_stride;
+        if row >= dst.len() {
+            break;
+        }
         for x in 0..w {
-            let di = y * dst_stride + x;
+            let di = row + x;
+            if di >= dst.len() {
+                break;
+            }
             let d: i32 = dst[di].into();
             dst[di] = bd.pixel_clip((alpha * d + beta) >> 8);
         }
