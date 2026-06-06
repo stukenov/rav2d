@@ -98,11 +98,19 @@ pub fn init_ns_wiener_bank(bank: &mut NsWienerBank, pl: usize, n_classes: usize)
 
 pub fn init_start_of_tile_row(buf: &mut Vec<u8>, sbh: i32, tile_rows: u8, row_start_sb: &[u16]) {
     buf.resize(sbh as usize, 0);
+    let sbh = sbh as usize;
     let mut sby = 0usize;
     for tile_row in 0..tile_rows as usize {
+        if sby >= sbh {
+            break;
+        }
         buf[sby] = ((tile_row << 1) | 1) as u8;
         sby += 1;
-        while sby < row_start_sb[tile_row + 1] as usize {
+        // For valid streams row_start_sb[tile_row + 1] <= sbh; clamp the bound so
+        // a malformed tiling whose row starts exceed the frame height cannot
+        // write past the sbh-sized buffer. No-op for valid input.
+        let end = (row_start_sb[tile_row + 1] as usize).min(sbh);
+        while sby < end {
             buf[sby] = (tile_row << 1) as u8;
             sby += 1;
         }
