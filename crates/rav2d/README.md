@@ -1,17 +1,18 @@
 # rav2d
 
-AV2 video decoder library in Rust, ported from [dav2d](https://code.videolan.org/videolan/dav2d).
+Memory-safe **AV2** video decoder library in Rust, ported from [dav2d](https://code.videolan.org/videolan/dav2d). **Bit-exact** with the dav2d C reference across the full conformance corpus (8-bit, filters off and on) and 10-bit streams.
 
 ## Features
 
 - Full OBU bitstream parsing (sequence, frame, tile group headers)
 - Entropy decoding (MSAC) with CDF adaptation
-- Intra and inter block decoding with compound prediction
-- Complete filter pipeline: deblock, CDEF, loop restoration (Wiener/GDF), film grain
-- Motion compensation with optical flow refinement
-- Inverse transforms (all sizes/types)
+- Intra (CfL, MHCCP, MRL, DIP, palette, IntraBC) and inter (compound, warp-affine, OBMC, interintra, BAWP, TIP, OPFL) block decoding
+- Complete filter pipeline: deblock, CDEF, CCSO, loop restoration (Wiener / PC-Wiener / GDF), film grain
+- Motion compensation with optical-flow refinement
+- Inverse transforms (all sizes/types), segmentation, delta-Q, lossless
+- High bit depth (10-bit) decode, bit-exact
 - Reference frame management and motion vector prediction
-- Assembly-optimized DSP kernels via FFI to dav2d
+- aarch64 NEON dispatch (motion compensation + intra H/V/smooth) via FFI to dav2d, scalar Rust fallback (`RAV2D_NEON_OFF=all`)
 
 ## Usage
 

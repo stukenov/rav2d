@@ -1,6 +1,6 @@
 # rav2d-cli
 
-Command-line AV2 video decoder built on the [`rav2d`](../rav2d/) library.
+Command-line AV2 video decoder built on the [`rav2d`](../rav2d/) library — a memory-safe, bit-exact (vs the dav2d C reference) AV2 decoder supporting 8-bit and 10-bit streams.
 
 Reads IVF container files and decodes AV2 bitstreams, optionally writing decoded frames as Y4M output.
 
