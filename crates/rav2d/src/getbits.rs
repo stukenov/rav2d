@@ -72,7 +72,14 @@ impl<'a> GetBits<'a> {
     }
 
     pub fn get_bits(&mut self, n: i32) -> u32 {
-        debug_assert!(n > 0 && n <= 32);
+        debug_assert!(n >= 0 && n <= 32);
+        // A zero-width field carries no bits and reads as 0. The C reference
+        // asserts n > 0 and relies on the field never being zero in practice;
+        // for AV2, ref_frames_log2 is legitimately 0 when ref_frames == 1, so a
+        // 0-bit reference index reaches here on otherwise-valid streams.
+        if n == 0 {
+            return 0;
+        }
         if n as u32 > self.bits_left as u32 {
             self.refill(n);
         }
@@ -83,7 +90,10 @@ impl<'a> GetBits<'a> {
     }
 
     pub fn get_sbits(&mut self, n: i32) -> i32 {
-        debug_assert!(n > 0 && n <= 32);
+        debug_assert!(n >= 0 && n <= 32);
+        if n == 0 {
+            return 0;
+        }
         if n as u32 > self.bits_left as u32 {
             self.refill(n);
         }

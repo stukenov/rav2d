@@ -10,6 +10,21 @@ use crate::warpmv::resolve_divisor_32;
 
 type Result<T> = std::result::Result<T, Rav2dError>;
 
+/// Resolve a reference-bank slot by index, rejecting out-of-range indices.
+///
+/// `hdr.refidx` entries are read from the bitstream, and on the
+/// RAS/open-loop-keyframe path they hold long-term frame ids that can exceed
+/// the 8-slot reference bank. The C reference indexes `c->refs` with these
+/// directly and relies on a later null check; a memory-safe port must bounds
+/// check first. A negative `i8` widens to a huge `usize`, so `get` rejects it.
+#[inline]
+fn ref_slot(refs: &[RefState; 8], idx: i32) -> Result<&RefState> {
+    usize::try_from(idx)
+        .ok()
+        .and_then(|i| refs.get(i))
+        .ok_or(Rav2dError::InvalidData)
+}
+
 static LAYOUTS: [PixelLayout; 4] = [
     PixelLayout::I420,
     PixelLayout::I400,
@@ -895,7 +910,7 @@ pub fn parse_frame_hdr(
         }
         let poc = hdr.frame_offset as i32;
         for n in 0..hdr.n_ref_frames as usize {
-            let refhdr = refs[hdr.refidx[n] as usize]
+            let refhdr = ref_slot(refs, hdr.refidx[n] as i32)?
                 .p
                 .frame_hdr
                 .as_ref()
@@ -976,7 +991,7 @@ pub fn parse_frame_hdr(
                     };
                 }
             }
-            find_tip_ref_frames(&mut hdr, seqhdr, refs);
+            find_tip_ref_frames(&mut hdr, seqhdr, refs)?;
         } else {
             hdr.opfl_refine_type = if (seqhdr.opfl_refine as u8) < 3 {
                 seqhdr.opfl_refine as u8
@@ -1008,12 +1023,20 @@ pub fn parse_frame_hdr(
                 // tip_explicit_qp is unset, quant.yac is derived from the two TIP
                 // reference frames (the branch below), as in dav2d.
             } else {
-                let ref1hdr = refs[hdr.refidx[hdr.tip.r#ref[0] as usize] as usize]
+                let tip_ref0 = *hdr
+                    .refidx
+                    .get(hdr.tip.r#ref[0] as usize)
+                    .ok_or(Rav2dError::InvalidData)?;
+                let tip_ref1 = *hdr
+                    .refidx
+                    .get(hdr.tip.r#ref[1] as usize)
+                    .ok_or(Rav2dError::InvalidData)?;
+                let ref1hdr = ref_slot(refs, tip_ref0 as i32)?
                     .p
                     .frame_hdr
                     .as_ref()
                     .ok_or(Rav2dError::InvalidData)?;
-                let ref2hdr = refs[hdr.refidx[hdr.tip.r#ref[1] as usize] as usize]
+                let ref2hdr = ref_slot(refs, tip_ref1 as i32)?
                     .p
                     .frame_hdr
                     .as_ref()
@@ -1378,7 +1401,7 @@ pub fn parse_frame_hdr(
                                     return Err(Rav2dError::InvalidData);
                                 }
                             }
-                            let refhdr = refs[hdr.refidx[r#ref as usize] as usize]
+                            let refhdr = ref_slot(refs, hdr.refidx[r#ref as usize] as i32)?
                                 .p
                                 .frame_hdr
                                 .as_ref()
@@ -1466,7 +1489,7 @@ pub fn parse_frame_hdr(
 
                 let mut i = 0usize;
                 for r in 0..hdr.n_ref_frames as usize {
-                    let ref_hdr = refs[hdr.refidx[r] as usize]
+                    let ref_hdr = ref_slot(refs, hdr.refidx[r] as i32)?
                         .p
                         .frame_hdr
                         .as_ref()
@@ -1636,7 +1659,7 @@ pub fn parse_frame_hdr(
                                     return Err(Rav2dError::InvalidData);
                                 }
                             }
-                            let refhdr = refs[hdr.refidx[r#ref as usize] as usize]
+                            let refhdr = ref_slot(refs, hdr.refidx[r#ref as usize] as i32)?
                                 .p
                                 .frame_hdr
                                 .as_ref()
@@ -1694,7 +1717,11 @@ pub fn parse_frame_hdr(
                             }
                         }
                     } else {
-                        let refhdr = refs[hdr.refidx[hdr.ccso.p[p].refidx as usize] as usize]
+                        let ccso_ref = *hdr
+                            .refidx
+                            .get(hdr.ccso.p[p].refidx as usize)
+                            .ok_or(Rav2dError::InvalidData)?;
+                        let refhdr = ref_slot(refs, ccso_ref as i32)?
                             .p
                             .frame_hdr
                             .as_ref()
@@ -1746,8 +1773,11 @@ pub fn parse_frame_hdr(
                 ref_base_mat = DEFAULT_WM_PARAMS.matrix;
                 in_dist = 1;
             } else {
-                let refidx = hdr.refidx[hdr.gmv.r#ref as usize] as usize;
-                let refhdr = refs[refidx]
+                let refidx = *hdr
+                    .refidx
+                    .get(hdr.gmv.r#ref as usize)
+                    .ok_or(Rav2dError::InvalidData)?;
+                let refhdr = ref_slot(refs, refidx as i32)?
                     .p
                     .frame_hdr
                     .as_ref()
@@ -1765,7 +1795,7 @@ pub fn parse_frame_hdr(
                     in_dist = get_poc_diff(
                         seqhdr.order_hint_n_bits as i32,
                         refhdr.frame_offset as i32,
-                        refs[refidx].refpoc[hdr.gmv.refref as usize] as i32,
+                        ref_slot(refs, refidx as i32)?.refpoc[hdr.gmv.refref as usize] as i32,
                     );
                 }
             }
@@ -1785,7 +1815,7 @@ pub fn parse_frame_hdr(
                 let out_dist = get_poc_diff(
                     seqhdr.order_hint_n_bits as i32,
                     hdr.frame_offset as i32,
-                    refs[hdr.refidx[i] as usize]
+                    ref_slot(refs, hdr.refidx[i] as i32)?
                         .p
                         .frame_hdr
                         .as_ref()
@@ -2167,7 +2197,7 @@ pub fn read_frame_size(
     if hdr.frame_size_override != 0 && hdr.is_inter_or_switch() {
         for i in 0..hdr.n_ref_frames as usize {
             if gb.get_bit() != 0 {
-                let refhdr = refs[hdr.refidx[i] as usize]
+                let refhdr = ref_slot(refs, hdr.refidx[i] as i32)?
                     .p
                     .frame_hdr
                     .as_ref()
@@ -2363,12 +2393,18 @@ pub fn get_ref_frames(
     imin(7, n_refs)
 }
 
-pub fn find_tip_ref_frames(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, refs: &[RefState; 8]) {
+pub fn find_tip_ref_frames(
+    hdr: &mut FrameHeader,
+    seqhdr: &SequenceHeader,
+    refs: &[RefState; 8],
+) -> Result<()> {
     let n_refs = hdr.n_ref_frames as usize;
-    if n_refs == 1 {
+    // n_refs >= 2 is required to pick two TIP references; the index arithmetic
+    // below underflows for 0 and is degenerate for 1.
+    if n_refs < 2 {
         hdr.tip.r#ref[0] = 0;
         hdr.tip.r#ref[1] = 0;
-        return;
+        return Ok(());
     }
 
     let poc = hdr.frame_offset as i32;
@@ -2378,11 +2414,11 @@ pub fn find_tip_ref_frames(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, refs:
     let mut n_past = 0usize;
 
     for n in 0..n_refs {
-        let refpoc = refs[hdr.refidx[n] as usize]
+        let refpoc = ref_slot(refs, hdr.refidx[n] as i32)?
             .p
             .frame_hdr
             .as_ref()
-            .unwrap()
+            .ok_or(Rav2dError::InvalidData)?
             .frame_offset;
         let dist = get_poc_diff(nbits, refpoc as i32, poc);
         refdist[n] = dist as i8;
@@ -2407,6 +2443,7 @@ pub fn find_tip_ref_frames(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, refs:
         hdr.tip.r#ref[0] = order[n_past - 1] as i8;
         hdr.tip.r#ref[1] = order[n_past] as i8;
     }
+    Ok(())
 }
 
 pub fn derive_pri_sec_ref(
@@ -2424,7 +2461,10 @@ pub fn derive_pri_sec_ref(
     let nbits = seqhdr.order_hint_n_bits as i32;
 
     for i in 0..hdr.n_ref_frames as usize {
-        let refhdr = match refs[hdr.refidx[i] as usize].p.frame_hdr.as_ref() {
+        let refhdr = match ref_slot(refs, hdr.refidx[i] as i32)
+            .ok()
+            .and_then(|r| r.p.frame_hdr.as_ref())
+        {
             Some(fh) => fh,
             None => continue,
         };
@@ -3154,7 +3194,7 @@ mod tests {
         hdr.tip.r#ref = [-1, -1];
         let seqhdr = SequenceHeader::default();
         let refs: [RefState; 8] = Default::default();
-        find_tip_ref_frames(&mut hdr, &seqhdr, &refs);
+        find_tip_ref_frames(&mut hdr, &seqhdr, &refs).unwrap();
         assert_eq!(hdr.tip.r#ref[0], 0);
         assert_eq!(hdr.tip.r#ref[1], 0);
     }
@@ -3174,7 +3214,7 @@ mod tests {
             (1, make_ref_hdr(6, FrameType::Inter, 320, 240, 50)), // future (poc=6 > 4)
             (2, make_ref_hdr(3, FrameType::Inter, 320, 240, 50)), // past (poc=3 < 4)
         ]);
-        find_tip_ref_frames(&mut hdr, &seqhdr, &refs);
+        find_tip_ref_frames(&mut hdr, &seqhdr, &refs).unwrap();
         // mixed: n_past=2, picks order[n_past-1] and order[n_past]
         // sorted by dist: ref0(poc2,dist=-2), ref2(poc3,dist=-1), ref1(poc6,dist=2)
         // n_past=2 → tip.ref[0] = order[1] = closest past, tip.ref[1] = order[2] = closest future
