@@ -1,0 +1,8 @@
+# Uncomment once a donation channel is live.
+# GitHub Sponsors: check country support first (Stripe Connect); if unsupported,
+# apply for fiscal hosting at https://opencollective.com/opensource and use the
+# open_collective line instead.
+#
+# github: stukenov
+# open_collective: rav2d
+custom: ["https://github.com/stukenov/rav2d/blob/main/funding.json"]

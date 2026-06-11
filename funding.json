@@ -1,0 +1,77 @@
+{
+    "version": "v1.0.0",
+    "entity": {
+        "type": "individual",
+        "role": "owner",
+        "name": "Saken Tukenov",
+        "email": "saken@tukenov.kz",
+        "phone": "",
+        "description": "Author and maintainer of rav2d, a memory-safe AV2 video decoder in Rust. Solo developer porting the dav2d C reference decoder to Rust, bit-exact against the reference for the full 8-bit and 10-bit conformance corpus.",
+        "webpageUrl": {
+            "url": "https://github.com/stukenov"
+        }
+    },
+    "projects": [
+        {
+            "guid": "rav2d",
+            "name": "rav2d",
+            "description": "Memory-safe AV2 video decoder in pure Rust, ported from dav2d (the C reference decoder, an AV2 fork of dav1d). AV2 is the next-generation royalty-free codec from the Alliance for Open Media, successor to AV1. The full decode path is bit-exact with the C reference: every frame of every shipped conformance clip matches byte-for-byte, with in-loop filters off and on, for both 8-bit and 10-bit streams (818 library + 16 conformance tests). Video decoders parse untrusted network input on billions of devices; rav2d removes the memory-unsafety class of vulnerabilities from that path before AV2 ships, following the precedent of rav1d for AV1.",
+            "webpageUrl": {
+                "url": "https://github.com/stukenov/rav2d"
+            },
+            "repositoryUrl": {
+                "url": "https://github.com/stukenov/rav2d"
+            },
+            "licenses": [
+                "spdx:BSD-2-Clause"
+            ],
+            "tags": [
+                "video",
+                "codec",
+                "decoder",
+                "av2",
+                "multimedia",
+                "rust",
+                "memory-safety",
+                "security"
+            ]
+        }
+    ],
+    "funding": {
+        "channels": [
+            {
+                "guid": "email",
+                "type": "other",
+                "address": "saken@tukenov.kz",
+                "description": "Contact by email to arrange payment (bank transfer or via a fiscal host)."
+            }
+        ],
+        "plans": [
+            {
+                "guid": "maintenance-monthly",
+                "status": "active",
+                "name": "Ongoing development and maintenance",
+                "description": "Part-time maintainer funding: tracking the evolving AV2 specification against the AVM reference, fixing bugs, reviewing contributions, and keeping the full conformance corpus bit-exact.",
+                "amount": 3000,
+                "currency": "USD",
+                "frequency": "monthly",
+                "channels": [
+                    "email"
+                ]
+            },
+            {
+                "guid": "milestone-performance",
+                "status": "active",
+                "name": "Milestone: SIMD parity and threaded decoding",
+                "description": "One-time milestone grant funding full-time work on NEON/AVX SIMD kernels for the remaining hot loops and frame/tile-parallel decoding, closing the throughput gap to the C reference so rav2d becomes a production-viable drop-in decoder.",
+                "amount": 50000,
+                "currency": "USD",
+                "frequency": "one-time",
+                "channels": [
+                    "email"
+                ]
+            }
+        ],
+        "history": []
+    }
+}

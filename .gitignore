@@ -7,6 +7,9 @@ Cargo.lock
 /dav2d-install
 /dav2d/build
 
+# Internal grant/funding strategy notes (keep local)
+/grants/
+
 # AI development files
 CLAUDE.md
 AGENTS.md
