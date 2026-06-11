@@ -5,6 +5,9 @@ members = [
     "crates/rav2d-sys",
     "crates/rav2d-cli",
 ]
+exclude = [
+    "crates/rav2d/fuzz",
+]
 
 [workspace.package]
 version = "0.3.0"
