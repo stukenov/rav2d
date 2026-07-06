@@ -139,6 +139,17 @@ Following the [rav1d](https://github.com/memorysafety/rav1d) strategy:
 - `#![warn(unsafe_op_in_unsafe_fn)]` crate-wide.
 - Remaining `unsafe` is concentrated in FFI calls, the NEON dispatch, and performance-critical inner loops.
 
+## Development
+
+rav2d was ported from dav2d with heavy use of AI coding tools (Claude Code). This is
+disclosed here rather than left implicit in the commit history.
+
+The methodology is built so correctness does not depend on trusting the tooling: every
+ported step is checked bit-exact against the dav2d C reference by the FFI oracle described
+in [Conformance](#conformance), and the whole test suite gates the result. Assembly is
+reused via FFI, not regenerated. Where the port and the C reference disagree, the C
+reference wins.
+
 ## Related Projects
 
 - [rav1d](https://github.com/memorysafety/rav1d) — Rust port of dav1d (AV1)
