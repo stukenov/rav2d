@@ -8708,6 +8708,20 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
                 fi.bw * 4,
                 fi.bh * 4,
             );
+            // Morphed IntraBC: apply BAWP over the copied prediction, with the
+            // current plane as the reference (recon_tmpl.c:3153-3155). Chroma
+            // is not morphed (dav2d recon_tmpl.c:3597 leaves it as a FIXME).
+            if unsafe { b.data.intra.morph_pred } != 0 {
+                let y_stride = recon.frame.y_stride_px;
+                let dst_off = 4 * (by as usize * y_stride + bx as usize);
+                let w4c = imin(bw4, fi.bw - bx);
+                let h4c = imin(bh4, fi.bh - by);
+                let blk_bs = unsafe { BlockSize::from_raw(b.bs) };
+                bawp_plane(
+                    recon, 1, mv, dst_off, y_stride, None, 0, 0, bw4, bh4, w4c, h4c, bx, by,
+                    blk_bs, fi,
+                );
+            }
         }
         recon_b_intra_luma(recon, msac, cdf_m, a, l, b, bx, by, bx4, by4, intrabc, fi)?;
     }
@@ -8766,7 +8780,7 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
     mv: crate::levels::MvXY,
     dst_off: usize,
     stride: usize,
-    ref_pic: &crate::picture::Picture,
+    ref_pic: Option<&crate::picture::Picture>,
     refidx: usize,
     plane: usize,
     bw4: i32,
@@ -8863,22 +8877,30 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
     let n_above_l2 = have_above as i32 * N_EDGE_SAMPLES[idx][lh4][lw4][0] as i32;
     let n_left_l2 = have_left as i32 * N_EDGE_SAMPLES[idx][lh4][lw4][1] as i32;
 
-    let ref_stride =
-        ref_pic.stride[(plane != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
-    let ref_base = match ref_pic.data[plane] {
-        Some(p) => {
-            let ph = if plane == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            // SAFETY: ref_pic owns a stride*height allocation for this plane.
-            let s: &[BD::Pixel] = unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
-            };
-            s
+    // IntraBC morph (`ref_pic == None`, recon_tmpl.c:3153) references the
+    // current plane itself: the block vector points inside `dst`.
+    let dst_ro: &[BD::Pixel] = dst;
+    let (ref_stride, ref_base): (usize, &[BD::Pixel]) = match ref_pic {
+        Some(rp) => {
+            let rs =
+                rp.stride[(plane != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
+            match rp.data[plane] {
+                Some(p) => {
+                    let ph = if plane == 0 {
+                        rp.p.h
+                    } else {
+                        (rp.p.h + ss_ver) >> ss_ver
+                    };
+                    // SAFETY: ref_pic owns a stride*height allocation for this plane.
+                    let s: &[BD::Pixel] = unsafe {
+                        std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, rs * ph as usize)
+                    };
+                    (rs, s)
+                }
+                None => return,
+            }
         }
-        None => return,
+        None => (stride, dst_ro),
     };
     let ref_off = ref_y as usize * ref_stride + ref_x as usize;
 
@@ -8903,7 +8925,7 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
         let mut i = start;
         while i < bw {
             let x: i32 = ref_base[ref_off - ref_stride + i as usize].into();
-            let y: i32 = dst[top_off + i as usize].into();
+            let y: i32 = dst_ro[top_off + i as usize].into();
             sum_x += x;
             sum_y += y;
             sum_xy += x * y;
@@ -8919,7 +8941,7 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
         while i < bh {
             let x: i32 = ref_base[ref_off + (i as usize) * ref_stride - 1].into();
             let y: i32 =
-                dst[(dst_off as isize + (i as isize) * stride as isize - 1) as usize].into();
+                dst_ro[(dst_off as isize + (i as isize) * stride as isize - 1) as usize].into();
             sum_x += x;
             sum_y += y;
             sum_xy += x * y;
@@ -13754,7 +13776,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                 mv,
                 dst_off,
                 y_stride,
-                &refp,
+                Some(&refp),
                 ref0 as usize,
                 0,
                 bw4,
@@ -13951,7 +13973,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                     mv,
                     dst_off,
                     uv_stride,
-                    &refp,
+                    Some(&refp),
                     ref0 as usize,
                     pl,
                     cbw4,

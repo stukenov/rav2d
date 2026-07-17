@@ -2242,12 +2242,10 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
 /// frame is byte-identical — the 16bpc analogue of the 8bpc full-clip sweep.
 #[test]
 fn bit_exact_hbd_sweep() {
-    // hbd-10bit-128x128-filters.obu now PARSES fully (11 frames, entropy in
-    // sync) but a palette-block recon diff remains (first diff plane 0 sample
-    // 1120); it joins the sweeps once that is fixed.
     let clips = [
         "hbd-10bit-128x128-intra.obu",
         "hbd-10bit-128x128-8f.obu",
+        "hbd-10bit-128x128-filters.obu",
         "hbd-10bit-128x128-grain.obu",
     ];
     let mut all = Vec::new();
@@ -2300,12 +2298,10 @@ fn bit_exact_hbd_sweep() {
 /// (levels off in the streams) but still assert the stages do not corrupt.
 #[test]
 fn bit_exact_hbd_perfilter_sweep() {
-    // hbd-10bit-128x128-filters.obu now PARSES fully (11 frames, entropy in
-    // sync) but a palette-block recon diff remains (first diff plane 0 sample
-    // 1120); it joins the sweeps once that is fixed.
     let clips = [
         "hbd-10bit-128x128-intra.obu",
         "hbd-10bit-128x128-8f.obu",
+        "hbd-10bit-128x128-filters.obu",
         "hbd-10bit-128x128-grain.obu",
     ];
     // (dav2d DAV2D_INLOOPFILTER_* bit, matching rav2d setting)
@@ -2359,12 +2355,10 @@ fn bit_exact_hbd_perfilter_sweep() {
 /// `BitDepth16` and match dav2d byte-for-byte.
 #[test]
 fn bit_exact_hbd_filtered_sweep() {
-    // hbd-10bit-128x128-filters.obu now PARSES fully (11 frames, entropy in
-    // sync) but a palette-block recon diff remains (first diff plane 0 sample
-    // 1120); it joins the sweeps once that is fixed.
     let clips = [
         "hbd-10bit-128x128-intra.obu",
         "hbd-10bit-128x128-8f.obu",
+        "hbd-10bit-128x128-filters.obu",
         "hbd-10bit-128x128-grain.obu",
     ];
     let mut all = Vec::new();
