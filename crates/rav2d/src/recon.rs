@@ -109,7 +109,10 @@ pub fn derive_alpha(num: i32, den: i32, mut alpha: i32) -> i32 {
     if num != 0 && den != 0 {
         let num_abs = num.abs();
         let shift_n = ulog2(num_abs as u32);
-        debug_assert!(den >= 0);
+        // `den` is non-negative for valid streams, but hostile input can wrap
+        // the CfL sums negative. Release-build dav2d feeds the negative int
+        // through ulog2's unsigned conversion (derivation.h asserts only in
+        // debug); `den as u32` reproduces that deterministic behaviour.
         let shift_d = ulog2(den as u32);
         let e_d = den - (1 << shift_d);
         let f_d = if shift_d > 7 {

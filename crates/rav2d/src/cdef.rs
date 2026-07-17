@@ -157,41 +157,48 @@ pub fn cdef_find_dir_bd<BD: BitDepth>(
         }
     }
 
+    // The cost sums use C int/unsigned arithmetic, which wraps on hostile
+    // streams whose samples exceed the coded bit depth (cdef_tmpl.c find_dir);
+    // valid streams never overflow. Mirror the wrap explicitly.
+    let sq = |v: i32| v.wrapping_mul(v) as u32;
     let mut cost = [0u32; 8];
     for n in 0..8 {
-        cost[2] += (partial_sum_hv[0][n] * partial_sum_hv[0][n]) as u32;
-        cost[6] += (partial_sum_hv[1][n] * partial_sum_hv[1][n]) as u32;
+        cost[2] = cost[2].wrapping_add(sq(partial_sum_hv[0][n]));
+        cost[6] = cost[6].wrapping_add(sq(partial_sum_hv[1][n]));
     }
-    cost[2] *= 105;
-    cost[6] *= 105;
+    cost[2] = cost[2].wrapping_mul(105);
+    cost[6] = cost[6].wrapping_mul(105);
 
     const DIV_TABLE: [u32; 7] = [840, 420, 280, 210, 168, 140, 120];
     for n in 0..7usize {
         let d = DIV_TABLE[n];
-        cost[0] += ((partial_sum_diag[0][n] * partial_sum_diag[0][n]
-            + partial_sum_diag[0][14 - n] * partial_sum_diag[0][14 - n])
-            as u32)
-            * d;
-        cost[4] += ((partial_sum_diag[1][n] * partial_sum_diag[1][n]
-            + partial_sum_diag[1][14 - n] * partial_sum_diag[1][14 - n])
-            as u32)
-            * d;
+        cost[0] = cost[0].wrapping_add(
+            sq(partial_sum_diag[0][n])
+                .wrapping_add(sq(partial_sum_diag[0][14 - n]))
+                .wrapping_mul(d),
+        );
+        cost[4] = cost[4].wrapping_add(
+            sq(partial_sum_diag[1][n])
+                .wrapping_add(sq(partial_sum_diag[1][14 - n]))
+                .wrapping_mul(d),
+        );
     }
-    cost[0] += (partial_sum_diag[0][7] * partial_sum_diag[0][7]) as u32 * 105;
-    cost[4] += (partial_sum_diag[1][7] * partial_sum_diag[1][7]) as u32 * 105;
+    cost[0] = cost[0].wrapping_add(sq(partial_sum_diag[0][7]).wrapping_mul(105));
+    cost[4] = cost[4].wrapping_add(sq(partial_sum_diag[1][7]).wrapping_mul(105));
 
     for n in 0..4usize {
         let ci = n * 2 + 1;
         for m in 0..5usize {
-            cost[ci] += (partial_sum_alt[n][3 + m] * partial_sum_alt[n][3 + m]) as u32;
+            cost[ci] = cost[ci].wrapping_add(sq(partial_sum_alt[n][3 + m]));
         }
-        cost[ci] *= 105;
+        cost[ci] = cost[ci].wrapping_mul(105);
         for m in 0..3usize {
             let d = DIV_TABLE[2 * m + 1];
-            cost[ci] += ((partial_sum_alt[n][m] * partial_sum_alt[n][m]
-                + partial_sum_alt[n][10 - m] * partial_sum_alt[n][10 - m])
-                as u32)
-                * d;
+            cost[ci] = cost[ci].wrapping_add(
+                sq(partial_sum_alt[n][m])
+                    .wrapping_add(sq(partial_sum_alt[n][10 - m]))
+                    .wrapping_mul(d),
+            );
         }
     }
 

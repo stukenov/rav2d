@@ -1888,7 +1888,9 @@ pub const CFL_MHCCP_MAX_LUMA_SIZE: usize = 4736;
 fn sqrnd<BD: BitDepth>(bd: BD, v: i32) -> i32 {
     let b = bd.bitdepth() as i32;
     let mid = 1 << (b - 1);
-    (v * v + mid) >> b
+    // C SQRND is an int multiply that wraps on hostile 12-bit input
+    // (ipred_tmpl.c); valid streams never overflow.
+    v.wrapping_mul(v).wrapping_add(mid) >> b
 }
 
 pub fn cfl_gen_mat_8bpc(
@@ -1956,11 +1958,14 @@ pub fn cfl_gen_mat<BD: BitDepth>(
             let v1 = sqrnd(bd, neighbor);
             imat[0][n] = v0 as u16;
             imat[1][n] = v1 as u16;
-            mat[0][0] += v0 * v0;
-            mat[0][1] += v0 * v1;
-            mat[0][2] += v0 << mat2sh;
-            mat[1][1] += v1 * v1;
-            mat[1][2] += v1 << mat2sh;
+            // int32 accumulation with C's wrap-on-overflow semantics
+            // (ipred_tmpl.c GEN_MATRIX on int32_t mat): hostile 12-bit input
+            // can overflow the squared sums; valid streams never wrap.
+            mat[0][0] = mat[0][0].wrapping_add(v0.wrapping_mul(v0));
+            mat[0][1] = mat[0][1].wrapping_add(v0.wrapping_mul(v1));
+            mat[0][2] = mat[0][2].wrapping_add(v0 << mat2sh);
+            mat[1][1] = mat[1][1].wrapping_add(v1.wrapping_mul(v1));
+            mat[1][2] = mat[1][2].wrapping_add(v1 << mat2sh);
             n += 1;
         }
         let start: usize = if !dir_l && !has_l { 1 } else { 0 };
@@ -1974,11 +1979,14 @@ pub fn cfl_gen_mat<BD: BitDepth>(
             let v1 = sqrnd(bd, y[yi].into());
             imat[0][n] = v0 as u16;
             imat[1][n] = v1 as u16;
-            mat[0][0] += v0 * v0;
-            mat[0][1] += v0 * v1;
-            mat[0][2] += v0 << mat2sh;
-            mat[1][1] += v1 * v1;
-            mat[1][2] += v1 << mat2sh;
+            // int32 accumulation with C's wrap-on-overflow semantics
+            // (ipred_tmpl.c GEN_MATRIX on int32_t mat): hostile 12-bit input
+            // can overflow the squared sums; valid streams never wrap.
+            mat[0][0] = mat[0][0].wrapping_add(v0.wrapping_mul(v0));
+            mat[0][1] = mat[0][1].wrapping_add(v0.wrapping_mul(v1));
+            mat[0][2] = mat[0][2].wrapping_add(v0 << mat2sh);
+            mat[1][1] = mat[1][1].wrapping_add(v1.wrapping_mul(v1));
+            mat[1][2] = mat[1][2].wrapping_add(v1 << mat2sh);
             n += 1;
         }
     }
@@ -1995,11 +2003,14 @@ pub fn cfl_gen_mat<BD: BitDepth>(
             let v1 = sqrnd(bd, y[ni].into());
             imat[0][n] = v0 as u16;
             imat[1][n] = v1 as u16;
-            mat[0][0] += v0 * v0;
-            mat[0][1] += v0 * v1;
-            mat[0][2] += v0 << mat2sh;
-            mat[1][1] += v1 * v1;
-            mat[1][2] += v1 << mat2sh;
+            // int32 accumulation with C's wrap-on-overflow semantics
+            // (ipred_tmpl.c GEN_MATRIX on int32_t mat): hostile 12-bit input
+            // can overflow the squared sums; valid streams never wrap.
+            mat[0][0] = mat[0][0].wrapping_add(v0.wrapping_mul(v0));
+            mat[0][1] = mat[0][1].wrapping_add(v0.wrapping_mul(v1));
+            mat[0][2] = mat[0][2].wrapping_add(v0 << mat2sh);
+            mat[1][1] = mat[1][1].wrapping_add(v1.wrapping_mul(v1));
+            mat[1][2] = mat[1][2].wrapping_add(v1 << mat2sh);
             n += 1;
         }
     }
@@ -2590,6 +2601,10 @@ pub fn cfl_pred<BD: BitDepth>(
 
     let mut alpha = [0i32; 2];
     if implicit {
+        // The C reference accumulates in plain `int` (ipred_tmpl.c:843,1002);
+        // on hostile 12-bit streams the squared sums can exceed i32, which C
+        // silently wraps. Match that with explicit wrapping arithmetic so a
+        // malformed stream cannot panic the decoder (no-op for valid input).
         for j in 0..n_top + n_left {
             let e0: i32 = edge[0][j].into();
             let e1: i32 = edge[1][j].into();
@@ -2597,14 +2612,15 @@ pub fn cfl_pred<BD: BitDepth>(
             sum_x += e0;
             sum_y[0] += e1;
             sum_y[1] += e2;
-            sum_xx += e0 * e0;
-            sum_xy[0] += e0 * e1;
-            sum_xy[1] += e0 * e2;
+            sum_xx = sum_xx.wrapping_add(e0.wrapping_mul(e0));
+            sum_xy[0] = sum_xy[0].wrapping_add(e0.wrapping_mul(e1));
+            sum_xy[1] = sum_xy[1].wrapping_add(e0.wrapping_mul(e2));
         }
         let count_l2 = ctz((n_top + n_left) as u32);
-        let den = sum_xx - ((sum_x as i64 * sum_x as i64) >> count_l2) as i32;
+        let den = sum_xx.wrapping_sub(((sum_x as i64 * sum_x as i64) >> count_l2) as i32);
         for pl in 0..2 {
-            let num = sum_xy[pl] - ((sum_x as i64 * sum_y[pl] as i64) >> count_l2) as i32;
+            let num =
+                sum_xy[pl].wrapping_sub(((sum_x as i64 * sum_y[pl] as i64) >> count_l2) as i32);
             alpha[pl] = derive_alpha(num, den, 0);
         }
     } else {
