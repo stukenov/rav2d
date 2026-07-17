@@ -3814,12 +3814,21 @@ pub fn decode_frame(
             n_tc,
             n_passes,
             &mut fc.frame_thread.tile_start_off,
-        )?;
+        )
+        .inspect_err(|_| {
+            if std::env::var("RAV2D_TRACE_ERR").is_ok() {
+                eprintln!("TRACE_ERR: decode_frame_init_cdf failed");
+            }
+        })?;
     } else {
         decode_tip_frame_init(&mut fc.ts, &frame_hdr, fc.sb_shift, fc.bw, fc.bh, n_tc);
     }
 
-    decode_frame_main(fc, n_passes)?;
+    decode_frame_main(fc, n_passes).inspect_err(|_| {
+        if std::env::var("RAV2D_TRACE_ERR").is_ok() {
+            eprintln!("TRACE_ERR: decode_frame_main failed");
+        }
+    })?;
 
     // Finalize the output CDF (dav2d decode.c:5256-5272). For the single-thread
     // path the update tile's adapted CDF becomes `out_cdf` with its symbol counts
@@ -3953,6 +3962,12 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
                     && bpc == p.p.bpc
             });
             if !valid {
+                if std::env::var("RAV2D_TRACE_ERR").is_ok() {
+                    eprintln!(
+                        "TRACE_ERR: ref {i} (slot {refidx}) invalid: pic={:?}",
+                        rp.pic.as_ref().map(|p| (p.p.w, p.p.h, p.p.bpc))
+                    );
+                }
                 return Err(());
             }
             let p = rpic.unwrap();
@@ -4138,13 +4153,15 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
             } else {
                 fc.prev_segmap.clone()
             };
-            if is_inter_or_switch {
-                c.refs[i].refmvs = if fc.rf.rp.is_empty() {
-                    None
-                } else {
-                    Some(fc.rf.rp.clone())
-                };
-            }
+            // dav2d drops the slot's old motion grid unconditionally and only
+            // inter/switch frames install a new one (decode.c:5713-5716). A
+            // key/intra frame must CLEAR the slot — keeping the previous GOP's
+            // grid desyncs temporal-MV prediction for every following GOP.
+            c.refs[i].refmvs = if is_inter_or_switch && !fc.rf.rp.is_empty() {
+                Some(fc.rf.rp.clone())
+            } else {
+                None
+            };
             c.refs[i].ccsomap = cur_ccsomap_arc.clone();
             c.refs[i].refpoc = fc.refpoc;
         }
