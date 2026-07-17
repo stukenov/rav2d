@@ -76,9 +76,9 @@ pub struct Settings {
     pub inloop_filters: InloopFilterType,
     /// Which frame types to decode.
     pub decode_frame_type: DecodeFrameType,
-    /// Bring-up gate: actually run reconstruction (intra only so far) and emit
-    /// pictures. Default off while recon/filters are incomplete; enabled by the
-    /// conformance harness. Will become unconditional once decode is complete.
+    /// Run reconstruction and emit pictures (the normal decoding mode, on by
+    /// default). Turning this off parses headers only and emits no pictures —
+    /// useful for stream inspection.
     pub run_decode: bool,
 }
 
@@ -95,7 +95,7 @@ impl Default for Settings {
             output_invisible_frames: false,
             inloop_filters: InloopFilterType::All,
             decode_frame_type: DecodeFrameType::All,
-            run_decode: false,
+            run_decode: true,
         }
     }
 }

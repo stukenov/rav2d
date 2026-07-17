@@ -2779,17 +2779,12 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 if !frame_without_data && c.n_tile_data == 0 {
                     return Err(Rav2dError::InvalidData);
                 }
-                // Run the single-threaded frame decode (entropy pass; recon,
-                // filters and output are wired in subsequent milestones). Gated
-                // during bring-up; errors are non-fatal so header parsing still
-                // succeeds.
-                if c.run_decode {
-                    // Best-effort during bring-up: a frame that cannot be decoded
-                    // yet (e.g. inter frames) must not abort header parsing.
-                    let r = crate::decode::submit_frame(c, 1);
-                    if r.is_err() && std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
-                        eprintln!("submit_frame returned Err");
-                    }
+                // Run the single-threaded frame decode. A decode failure aborts
+                // parsing and surfaces to the caller, matching dav2d
+                // (`if ((res = dav2d_submit_frame(c)) < 0) return res;`,
+                // obu.c:2774).
+                if c.run_decode && crate::decode::submit_frame(c, 1).is_err() {
+                    return Err(Rav2dError::InvalidData);
                 }
                 c.frame_hdr = None;
                 c.n_tiles = 0;
