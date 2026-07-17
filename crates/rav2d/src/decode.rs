@@ -1228,6 +1228,7 @@ pub fn read_pal_indices(
     }
     let mut prev_v = msac.decode_uniform(pal_sz as u32) as i32;
     scratch[0] = prev_v as u8;
+
     if copy == 1 {
         for m in 1..lim2 {
             scratch[(m as isize * strides[1]) as usize] = prev_v as u8;
@@ -1362,11 +1363,12 @@ pub fn read_pal_indices(
 pub fn read_pal_plane(
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
-    pal: &mut [u8; 8],
-    a_pal: &[u8; 8],
-    l_pal: &[u8; 8],
+    pal: &mut [u16; 8],
+    a_pal: &[u16; 8],
+    l_pal: &[u16; 8],
     a_cache: i32,
     l_cache: i32,
+    bpc: u32,
 ) -> u8 {
     let pal_sz = msac.decode_symbol_adapt(cdf_m.pal_sz(), 6) as i32 + 2;
 
@@ -1387,10 +1389,10 @@ pub fn read_pal_plane(
         }
     }
 
-    let mut cache = [0u8; 8];
+    let mut cache = [0u16; 8];
     if n_used_cache != 0 {
         // `select`: directly copy the selected cache entries from `dir` into cache[].
-        let select = |dir: &[u8; 8], cache: &mut [u8; 8]| {
+        let select = |dir: &[u16; 8], cache: &mut [u16; 8]| {
             let mut mask = cache_reuse_mask << (32 - off);
             let mut i = 0usize;
             let mut n = 0u32;
@@ -1494,9 +1496,8 @@ pub fn read_pal_plane(
     // parse new entries
     if n_used_cache < pal_sz {
         let mut i = n_used_cache as usize;
-        let bpc = 8u32; // 8bpc path
         let mut prev = msac.decode_bools_bypass(bpc) as i32;
-        pal[i] = prev as u8;
+        pal[i] = prev as u16;
         i += 1;
 
         if (i as i32) < pal_sz {
@@ -1505,11 +1506,11 @@ pub fn read_pal_plane(
             loop {
                 let delta = msac.decode_bools_bypass(bits as u32) as i32;
                 prev = imin(prev + delta + 1, max);
-                pal[i] = prev as u8;
+                pal[i] = prev as u16;
                 i += 1;
                 if prev + 1 >= max {
                     while (i as i32) < pal_sz {
-                        pal[i] = max as u8;
+                        pal[i] = max as u16;
                         i += 1;
                     }
                     break;
@@ -2268,10 +2269,10 @@ pub struct ReconScratch {
     /// recon (`copy_pal_block_y`) and read by `read_pal_plane` to build the
     /// per-block palette colour cache. Never explicitly reset — gating is via the
     /// `pal_sz` block context, mirroring dav2d (recon_tmpl.c al_pal handling).
-    pub al_pal: [[[u8; 8]; 64]; 2],
+    pub al_pal: [[[u16; 8]; 64]; 2],
     /// Current palette block's colour list (`t->scratch.pal`, 8 entries). Filled
     /// by `read_pal_plane` during parse and consumed by the palette recon fill.
-    pub pal: [u8; 8],
+    pub pal: [u16; 8],
     /// Current palette block's packed index map (`t->scratch.pal_idx_y`). `pack`
     /// stores two indices per byte; sized for the largest palette block (64x64).
     pub pal_idx_y: Box<[u8; 64 * 64]>,
@@ -2289,8 +2290,8 @@ impl Default for ReconScratch {
             chroma_u_has_cf: 0,
             txtp_map: [0u16; 256],
             rmv: [[[crate::levels::Mv::default(); 2]; 2]; 256],
-            al_pal: [[[0u8; 8]; 64]; 2],
-            pal: [0u8; 8],
+            al_pal: [[[0u16; 8]; 64]; 2],
+            pal: [0u16; 8],
             pal_idx_y: Box::new([0u8; 64 * 64]),
         }
     }
@@ -5571,9 +5572,17 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 let l_cache = l.pal_sz[by4] as i32;
                 let a_pal = recon.scratch.al_pal[0][bx4];
                 let l_pal = recon.scratch.al_pal[1][by4];
-                let mut pal = [0u8; 8];
-                let pal_sz =
-                    read_pal_plane(msac, cdf_m, &mut pal, &a_pal, &l_pal, a_cache, l_cache);
+                let mut pal = [0u16; 8];
+                let pal_sz = read_pal_plane(
+                    msac,
+                    cdf_m,
+                    &mut pal,
+                    &a_pal,
+                    &l_pal,
+                    a_cache,
+                    l_cache,
+                    recon.frame.bitdepth,
+                );
                 recon.scratch.pal = pal;
                 unsafe {
                     b.data.intra.pal_sz = pal_sz;
@@ -14379,14 +14388,8 @@ fn recon_b_intra_luma_geom<BD: crate::pixel::BitDepth>(
                     recon.dst_y.len() - dst_off,
                 )
             };
-            crate::ipred::pal_pred_8bpc(
-                d8,
-                stride,
-                &recon.scratch.pal,
-                &recon.scratch.pal_idx_y[..],
-                bw,
-                bh,
-            );
+            let pal8: [u8; 8] = std::array::from_fn(|i| recon.scratch.pal[i] as u8);
+            crate::ipred::pal_pred_8bpc(d8, stride, &pal8, &recon.scratch.pal_idx_y[..], bw, bh);
         } else {
             // Palette colours are stored at storage width; widen the u8 list.
             let pal: [BD::Pixel; 8] =
@@ -17994,15 +17997,15 @@ mod tests {
     // several pseudo-random bitstreams; the size is `pal_sz` in 2..=8.
     #[test]
     fn test_read_pal_plane_no_cache_monotone() {
-        let empty = [0u8; 8];
+        let empty = [0u16; 8];
         for seed in 0..16u8 {
             let data: Vec<u8> = (0..64u8)
                 .map(|i| i.wrapping_mul(31).wrapping_add(seed))
                 .collect();
             let mut msac = make_msac(&data);
             let mut cdf_m = make_default_cdf_mode();
-            let mut pal = [0u8; 8];
-            let pal_sz = read_pal_plane(&mut msac, &mut cdf_m, &mut pal, &empty, &empty, 0, 0);
+            let mut pal = [0u16; 8];
+            let pal_sz = read_pal_plane(&mut msac, &mut cdf_m, &mut pal, &empty, &empty, 0, 0, 8);
             assert!((2..=8).contains(&pal_sz), "pal_sz={pal_sz}");
             // entries are non-decreasing and strictly increasing until the 255 cap
             for w in pal[..pal_sz as usize].windows(2) {
@@ -18025,16 +18028,16 @@ mod tests {
     // pal). Exercise the with-cache merge path over several bitstreams.
     #[test]
     fn test_read_pal_plane_with_cache_sorted() {
-        let a_pal = [10u8, 20, 30, 40, 50, 60, 70, 80];
-        let l_pal = [5u8, 25, 45, 65, 85, 105, 125, 145];
+        let a_pal = [10u16, 20, 30, 40, 50, 60, 70, 80];
+        let l_pal = [5u16, 25, 45, 65, 85, 105, 125, 145];
         for seed in 0..16u8 {
             let data: Vec<u8> = (0..64u8)
                 .map(|i| i.wrapping_mul(17).wrapping_add(seed))
                 .collect();
             let mut msac = make_msac(&data);
             let mut cdf_m = make_default_cdf_mode();
-            let mut pal = [0u8; 8];
-            let pal_sz = read_pal_plane(&mut msac, &mut cdf_m, &mut pal, &a_pal, &l_pal, 8, 8);
+            let mut pal = [0u16; 8];
+            let pal_sz = read_pal_plane(&mut msac, &mut cdf_m, &mut pal, &a_pal, &l_pal, 8, 8, 8);
             assert!((2..=8).contains(&pal_sz), "pal_sz={pal_sz}");
             for k in 1..pal_sz as usize {
                 assert!(
