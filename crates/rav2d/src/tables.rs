@@ -465,7 +465,7 @@ pub static TXTP_FROM_UVMODE: [u8; N_UV_INTRA_PRED_MODES] = [
     64, // SMOOTH_V     -> ADST_DCT
     2,  // SMOOTH_H     -> DCT_ADST
     66, // PAETH_PRED   -> ADST_ADST
-    0,  // CFL_PRED     (placeholder)
+    0,  // CFL_PRED     -> DCT_DCT (implicit zero in dav2d's designated initializer)
 ];
 
 pub static NS_WIENER_COEF_RANGE_Y: [[i8; 2]; 16] = [

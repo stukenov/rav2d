@@ -2873,9 +2873,8 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let refdir = *refdir;
     let skip_mode_refs = *skip_mode_refs;
 
-    // Reconstruction destination planes. The decode_b leaf is a no-op this step,
-    // so these slices are threaded but not yet written. Built once and reborrowed
-    // at each tile/sbrow decode_sb call below.
+    // Reconstruction destination planes. Built once and reborrowed at each
+    // tile/sbrow decode_sb call below.
     let ss_hor_v = *ss_hor;
     let ss_ver_v = *ss_ver;
     let bitdepth_max_v = *bitdepth_max;
@@ -3276,11 +3275,6 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
 /// `f->frame_hdr` / `f->lf` inside `dav2d_filter_sbrow*`.
 struct FilterFrameParams {
     deblock: crate::deblock::DeblockApplyParams,
-    /// Deblock thresholds (stubbed: zeroed; deblock is only correct for the
-    /// level==0 no-op case until the per-4px segmentation/delta-q thresholds are
-    /// connected — see the M2 risks).
-    thr_lut_y: [[u8; 16]; 2],
-    thr_lut_uv: [[[u8; 16]; 2]; 2],
     y_stride: isize,
     uv_stride: isize,
     bw: i32,
@@ -3331,8 +3325,6 @@ impl FilterFrameParams {
         };
         FilterFrameParams {
             deblock,
-            thr_lut_y: [[0u8; 16]; 2],
-            thr_lut_uv: [[[0u8; 16]; 2]; 2],
             y_stride,
             uv_stride,
             bw,
@@ -14296,9 +14288,7 @@ fn inter_luma_tx_walk<BD: crate::pixel::BitDepth>(
 /// (recon_tmpl.c:3292-3478) plus `recon_b_luma_tx` (recon_tmpl.c:2443-2675).
 /// Caller guarantees `b.is_intra != 0 && b.intrabc == 0` and luma is present.
 ///
-/// Simplifications vs C (M1a, documented for the bit-exact follow-up):
-///  - palette blocks (`pal_sz != 0`) skip intra prediction (matches C gate) but
-///    are otherwise still walked; palette pixel fill is not implemented.
+/// Simplifications vs C:
 ///  - `n_tr`/`n_bl` top-right / bottom-left availability use the per-SB
 ///    `is_coded` grid as in C; the `prefilter_toplevel_sb_edge` (top SB row
 ///    edge backup) is passed as `None` (no cross-SB-row prefilter buffer yet).
