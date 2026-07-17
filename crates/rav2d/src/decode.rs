@@ -2028,7 +2028,12 @@ pub struct SbFrameInfo {
     pub force_integer_mv: bool,
     pub max_bvp_drl_bits: u8,
     pub max_drl_bits: u8,
+    /// Frame-header BAWP enable (inter block-adaptive weighted prediction).
     pub bawp: bool,
+    /// Sequence-header BAWP capability; the IntraBC `morph_pred` gate reads
+    /// this, NOT the per-frame flag (dav2d decode.c:2386 uses `seq_hdr->bawp`
+    /// — the frame flag is inter-only syntax and stays 0 on key frames).
+    pub seq_bawp: bool,
     pub txfm_switchable: bool,
     pub skip_mode_refs: RefPair,
     pub n_ref_frames: u8,
@@ -2165,6 +2170,7 @@ impl SbFrameInfo {
             max_bvp_drl_bits: frame_hdr.max_bvp_drl_bits,
             max_drl_bits: frame_hdr.max_drl_bits,
             bawp: frame_hdr.bawp != 0,
+            seq_bawp: seq_hdr.bawp,
             txfm_switchable: frame_hdr.txfm_mode == crate::headers::TxfmMode::Switchable,
             skip_mode_refs,
             n_ref_frames: frame_hdr.n_ref_frames,
@@ -5826,7 +5832,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         unsafe {
             b.data.intra.morph_pred = 0;
         }
-        if !fi.is_inter_or_switch && fi.bawp && fi.allow_screen_content_tools {
+        if !fi.is_inter_or_switch && fi.seq_bawp && fi.allow_screen_content_tools {
             let nb_mp_0 = if nb_boff[0] != -1 { nb_morph[0] } else { 0 };
             let nb_mp_1 = if nb_boff[1] != -1 { nb_morph[1] } else { 0 };
             let ctx = nb_mp_0 as usize + nb_mp_1 as usize;
