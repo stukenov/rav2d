@@ -2906,8 +2906,9 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let bytes_per_sample: usize = if bitdepth_v > 8 { 2 } else { 1 };
     let y_stride_px: usize = y_stride_bytes / bytes_per_sample;
     let uv_stride_px: usize = uv_stride_bytes / bytes_per_sample;
-    // `f->seq_hdr->hbd` (0 for 8bpc, 1 for 10/12bpc); used by deblock thresholds.
-    let hbd_v: i32 = (bitdepth_v > 8) as i32;
+    // `f->seq_hdr->hbd` (0 for 8bpc, 1 for 10bpc, 2 for 12bpc); used by deblock
+    // thresholds, which scale with `2 * hbd` bits.
+    let hbd_v: i32 = seq_hdr.hbd as i32;
     // Inter-intra / wedge / segmentation prediction masks (`dav2d_masks`), built
     // once per frame for the compound + interintra recon paths.
     let masks = crate::wedge::init_masks();
@@ -3305,9 +3306,15 @@ impl FilterFrameParams {
         ss_ver: i32,
         y_stride: isize,
         uv_stride: isize,
-        _bitdepth: i32,
+        bitdepth: i32,
         _inloop: u32,
     ) -> Self {
+        // The picture strides are byte strides; the filter pipeline indexes
+        // `BD::Pixel` slices, so convert to per-sample strides here (bytes ==
+        // samples for 8bpc, /2 for HBD).
+        let bps: isize = if bitdepth > 8 { 2 } else { 1 };
+        let y_stride = y_stride / bps;
+        let uv_stride = uv_stride / bps;
         let db = &frame_hdr.deblock;
         let deblock = crate::deblock::DeblockApplyParams {
             y_stride,
@@ -3347,7 +3354,7 @@ impl FilterFrameParams {
 /// Each stage is gated on `inloop` (DAV2D_INLOOPFILTER_* bits) plus the relevant
 /// frame-header enable.
 #[allow(clippy::too_many_arguments)]
-fn filter_sbrow<BD: crate::pixel::BitDepth>(
+fn filter_sbrow<BD: crate::pixel::BitDepth + crate::internal::LfPixelBufs>(
     bd: BD,
     seq_hdr: &crate::headers::SequenceHeader,
     frame_hdr: &crate::headers::FrameHeader,
@@ -3372,22 +3379,6 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
         INLOOPFILTER_CCSO, INLOOPFILTER_CDEF, INLOOPFILTER_DEBLOCK, INLOOPFILTER_GDF,
         INLOOPFILTER_WIENER,
     };
-
-    let _ = bd;
-    // The post-filter stages (deblock/cdef/ccso/lr) are wired for 8bpc only; the
-    // HBD recon oracle runs with all in-loop filters disabled, so for HBD this is
-    // a no-op. The 8bpc arm reinterprets the sample slices as `u8` (byte-identical
-    // to the prior hard-coded path) and runs the unchanged filter pipeline.
-    if BD::BPC != 8 {
-        return;
-    }
-    // SAFETY: BPC==8 => BD::Pixel == u8.
-    let dst_y: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(dst_y.as_mut_ptr() as *mut u8, dst_y.len()) };
-    let dst_u: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(dst_u.as_mut_ptr() as *mut u8, dst_u.len()) };
-    let dst_v: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(dst_v.as_mut_ptr() as *mut u8, dst_v.len()) };
 
     let deblock_on = inloop & INLOOPFILTER_DEBLOCK != 0
         && (fp.deblock.level_y[0] != 0 || fp.deblock.level_y[1] != 0);
@@ -3435,7 +3426,7 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
             layout: seq_hdr.layout,
         };
         crate::deblock::deblock_sbrow_cols(
-            crate::pixel::BitDepth8,
+            bd,
             &mut dctx,
             dst_y,
             y_off0 as usize,
@@ -3446,7 +3437,7 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
             start_of_tile_row,
         );
         crate::deblock::deblock_sbrow_rows(
-            crate::pixel::BitDepth8,
+            bd,
             &mut dctx,
             dst_y,
             y_off0 as usize,
@@ -3456,6 +3447,7 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
             sby,
         );
     }
+
     // dav2d's gate also enables copy_db when CDEF is on, because the *multi*-
     // threaded CDEF path reads `lr_db_line` across the sbrow/tile-row seam. In
     // the single-thread (`have_tt == 0`) path CDEF reads only the toggled
@@ -3467,23 +3459,26 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
     if copy_db_on {
         // Allocate the deblocked-line store (dav2d's `lr_db_line`, n_tc==1 uses
         // num_lines == 20) so backup_db has somewhere to write. Each plane line
-        // buffer is `stride * 20` bytes (positive-stride layout).
+        // buffer is `stride * 20` samples (positive-stride layout).
         let num_lines = 20usize;
         let y_ls = fp.y_stride.unsigned_abs();
         let uv_ls = fp.uv_stride.unsigned_abs();
-        if lf.lr_db_line[0].len() != y_ls * num_lines {
-            lf.lr_db_line[0] = vec![0u8; y_ls * num_lines];
+        let restore_planes = lf.restore_planes;
+        let have_chroma = seq_hdr.layout != crate::headers::PixelLayout::I400;
+        let lr_db = BD::lr_db_line_mut(lf);
+        if lr_db[0].len() != y_ls * num_lines {
+            lr_db[0] = vec![BD::Pixel::default(); y_ls * num_lines];
         }
-        if seq_hdr.layout != crate::headers::PixelLayout::I400 {
-            for b in lf.lr_db_line.iter_mut().skip(1) {
+        if have_chroma {
+            for b in lr_db.iter_mut().skip(1) {
                 if b.len() != uv_ls * num_lines {
-                    *b = vec![0u8; uv_ls * num_lines];
+                    *b = vec![BD::Pixel::default(); uv_ls * num_lines];
                 }
             }
         }
-        let src: [&[u8]; 3] = [&*dst_y, &*dst_u, &*dst_v];
-        crate::deblock::copy_db_8bpc(
-            &mut lf.lr_db_line,
+        let src: [&[BD::Pixel]; 3] = [&*dst_y, &*dst_u, &*dst_v];
+        crate::deblock::copy_db(
+            lr_db,
             &src,
             &[fp.y_stride, fp.uv_stride],
             bw as usize,
@@ -3492,7 +3487,7 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
             frame_hdr.sb128 != 0,
             fp.ss_hor,
             fp.ss_ver,
-            lf.restore_planes != 0,
+            restore_planes != 0,
         );
     }
 
@@ -3511,32 +3506,54 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
         ];
         let any_lossless = frame_hdr.segmentation.enabled != 0
             && (0..crate::headers::MAX_SEGMENTS).any(|i| frame_hdr.segmentation.lossless[i] != 0);
-        // Allocate the toggled CDEF top-row backup banks lazily (2 banks x 3
-        // planes, 2 rows each at the plane's positive stride).
         let y_ls = fp.y_stride.unsigned_abs();
         let uv_ls = fp.uv_stride.unsigned_abs();
         let need_y = 2 * y_ls;
         let need_uv = 2 * uv_ls;
-        for bank in lf.cdef_line.iter_mut() {
+        let start = sby * sb_step;
+
+        // Collect the mask-derived rows for this sbrow (and the previous one for
+        // the cross-sbrow seam) up front: the CDEF line-bank selector below
+        // borrows the whole `lf` mutably, so `lf.mask` reads must finish first.
+        let cur_cdef_idx = collect_cdef_idx(&lf.mask, mask_row, sb256w);
+        let cur_noskip = collect_noskip(&lf.mask, mask_row, sb256w);
+        let cur_ll_y = collect_ll_y(&lf.mask, mask_row, sb256w);
+        let cur_ll_uv = collect_ll_uv(&lf.mask, mask_row, sb256w);
+        let cur_ccso = collect_ccso(&lf.mask, mask_row, sb256w);
+        let prev_masks = if sby > 0 {
+            let prev_mask_row = (((sby - 1) >> (2 - sb128)) * sb256w) as usize;
+            Some((
+                collect_cdef_idx(&lf.mask, prev_mask_row, sb256w),
+                collect_noskip(&lf.mask, prev_mask_row, sb256w),
+                collect_ll_y(&lf.mask, prev_mask_row, sb256w),
+                collect_ll_uv(&lf.mask, prev_mask_row, sb256w),
+                collect_ccso(&lf.mask, prev_mask_row, sb256w),
+            ))
+        } else {
+            None
+        };
+
+        // Allocate the toggled CDEF top-row backup banks lazily (2 banks x 3
+        // planes, 2 rows each at the plane's positive stride). dav2d resets the
+        // toggle at the start of each frame's CDEF (the toggle lives on `lf` so
+        // it persists across sbrows within the frame).
+        let (cdef_line, cdef_line_toggle) = BD::cdef_bufs(lf);
+        for bank in cdef_line.iter_mut() {
             if bank[0].len() != need_y {
-                bank[0] = vec![0u8; need_y];
+                bank[0] = vec![BD::Pixel::default(); need_y];
             }
             if seq_hdr.layout != crate::headers::PixelLayout::I400 {
                 for b in bank.iter_mut().skip(1) {
                     if b.len() != need_uv {
-                        *b = vec![0u8; need_uv];
+                        *b = vec![BD::Pixel::default(); need_uv];
                     }
                 }
             }
         }
-        // dav2d resets the toggle at the start of each frame's CDEF (the toggle
-        // here lives on `lf` so it persists across sbrows within the frame).
-        let start = sby * sb_step;
         // Cross-sbrow seam: re-filter the 2 block-rows straddling the boundary
         // with the previous mask row (dav2d recon_tmpl.c:4001-4009). For a single
         // superblock-row frame (the M2 clip) sby is always 0 so this is skipped.
-        if sby > 0 {
-            let prev_mask_row = (((sby - 1) >> (2 - sb128)) * sb256w) as usize;
+        if let Some((p_cdef_idx, p_noskip, p_ll_y, p_ll_uv, p_ccso)) = &prev_masks {
             let bp = crate::cdef::CdefBrowParams {
                 bw,
                 bh,
@@ -3544,31 +3561,32 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
                 layout: fp.layout,
                 on_skip_tx: fp.cdef_on_skiptx,
                 cdef_on: inloop & INLOOPFILTER_CDEF != 0,
-                mask_cdef_idx: &collect_cdef_idx(&lf.mask, prev_mask_row, sb256w),
-                mask_noskip: &collect_noskip(&lf.mask, prev_mask_row, sb256w),
+                mask_cdef_idx: p_cdef_idx,
+                mask_noskip: p_noskip,
                 y_strength: &fp.cdef_y_strength,
                 uv_strength: &fp.cdef_uv_strength,
                 any_lossless,
-                mask_ll_y: &collect_ll_y(&lf.mask, prev_mask_row, sb256w),
-                mask_ll_uv: &collect_ll_uv(&lf.mask, prev_mask_row, sb256w),
+                mask_ll_y: p_ll_y,
+                mask_ll_uv: p_ll_uv,
                 ccso: if ccso_on {
                     Some(crate::cdef::CcsoCfg {
                         p: ccso_pcfg,
-                        mask_ccso: &collect_ccso(&lf.mask, prev_mask_row, sb256w),
+                        mask_ccso: p_ccso,
                     })
                 } else {
                     None
                 },
             };
-            crate::cdef::cdef_brow_8bpc(
+            crate::cdef::cdef_brow(
+                bd,
                 dst_y,
                 dst_u,
                 dst_v,
                 &bp,
                 fp.y_stride,
                 fp.uv_stride,
-                &mut lf.cdef_line,
-                &mut lf.cdef_line_toggle,
+                cdef_line,
+                cdef_line_toggle,
                 start - 2,
                 start,
                 sby,
@@ -3584,31 +3602,32 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
             layout: fp.layout,
             on_skip_tx: fp.cdef_on_skiptx,
             cdef_on: inloop & INLOOPFILTER_CDEF != 0,
-            mask_cdef_idx: &collect_cdef_idx(&lf.mask, mask_row, sb256w),
-            mask_noskip: &collect_noskip(&lf.mask, mask_row, sb256w),
+            mask_cdef_idx: &cur_cdef_idx,
+            mask_noskip: &cur_noskip,
             y_strength: &fp.cdef_y_strength,
             uv_strength: &fp.cdef_uv_strength,
             any_lossless,
-            mask_ll_y: &collect_ll_y(&lf.mask, mask_row, sb256w),
-            mask_ll_uv: &collect_ll_uv(&lf.mask, mask_row, sb256w),
+            mask_ll_y: &cur_ll_y,
+            mask_ll_uv: &cur_ll_uv,
             ccso: if ccso_on {
                 Some(crate::cdef::CcsoCfg {
                     p: ccso_pcfg,
-                    mask_ccso: &collect_ccso(&lf.mask, mask_row, sb256w),
+                    mask_ccso: &cur_ccso,
                 })
             } else {
                 None
             },
         };
-        crate::cdef::cdef_brow_8bpc(
+        crate::cdef::cdef_brow(
+            bd,
             dst_y,
             dst_u,
             dst_v,
             &bp,
             fp.y_stride,
             fp.uv_stride,
-            &mut lf.cdef_line,
-            &mut lf.cdef_line_toggle,
+            cdef_line,
+            cdef_line_toggle,
             start,
             end,
             sby,
@@ -3656,8 +3675,8 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
             sbh,
             mask: &lf.mask,
             lr_mask: &lf.lr_mask,
-            lr_db_line: &lf.lr_db_line,
-            lr_cdef_line: &lf.lr_cdef_line,
+            lr_db_line: BD::lr_db_line(lf),
+            lr_cdef_line: BD::lr_cdef_line(lf),
             lf_p_luma: &luma_snapshot,
             base_q: lf.base_q,
             gdf_ref_dst_idx: lf.gdf_ref_dst_idx,
@@ -3670,9 +3689,10 @@ fn filter_sbrow<BD: crate::pixel::BitDepth>(
             cur_stride: [fp.y_stride, fp.uv_stride],
             unit_size: frame_hdr.restoration.unit_size,
             restore_planes: lf.restore_planes,
+            bitdepth: bd.bitdepth() as u32,
         };
-        let mut dst: [&mut [u8]; 3] = [dst_y, dst_u, dst_v];
-        crate::looprestoration::lr_sbrow_8bpc(&ctx, &mut dst, sby);
+        let mut dst: [&mut [BD::Pixel]; 3] = [dst_y, dst_u, dst_v];
+        crate::looprestoration::lr_sbrow_apply(&ctx, &mut dst, sby);
     }
 }
 

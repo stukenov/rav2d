@@ -173,10 +173,58 @@ pub struct LoopFilterState {
     /// `f->lf.cdef_line[2][3]`.
     pub cdef_line: [[Vec<u8>; 3]; 2],
     pub cdef_line_toggle: usize,
+    /// HBD (16-bit sample) counterparts of `lr_db_line` / `lr_cdef_line` /
+    /// `cdef_line`. A decoder instance runs a single bitstream at a single bit
+    /// depth, so only one family is ever allocated; `LfPixelBufs` selects the
+    /// matching family per `BitDepth` instantiation.
+    pub lr_db_line16: [Vec<u16>; 3],
+    pub lr_cdef_line16: [Vec<u16>; 3],
+    pub cdef_line16: [[Vec<u16>; 3]; 2],
     pub p: [Vec<u8>; 3],
     pub ns_subclass_lut: Vec<u8>,
     pub pc_subclass_lut: Vec<u8>,
     pub pc_filters: Vec<[i16; 13]>,
+}
+
+/// Selects the pixel-typed line-buffer family of [`LoopFilterState`] matching a
+/// `BitDepth` instantiation (u8 buffers for 8bpc, u16 for HBD), the Rust
+/// analogue of dav2d's per-bitdepth template instantiation of `f->lf`.
+pub trait LfPixelBufs: crate::pixel::BitDepth {
+    fn lr_db_line(lf: &LoopFilterState) -> &[Vec<Self::Pixel>; 3];
+    fn lr_db_line_mut(lf: &mut LoopFilterState) -> &mut [Vec<Self::Pixel>; 3];
+    fn lr_cdef_line(lf: &LoopFilterState) -> &[Vec<Self::Pixel>; 3];
+    /// The CDEF top-row banks together with the toggle index (one borrow).
+    fn cdef_bufs(lf: &mut LoopFilterState) -> (&mut [[Vec<Self::Pixel>; 3]; 2], &mut usize);
+}
+
+impl LfPixelBufs for crate::pixel::BitDepth8 {
+    fn lr_db_line(lf: &LoopFilterState) -> &[Vec<u8>; 3] {
+        &lf.lr_db_line
+    }
+    fn lr_db_line_mut(lf: &mut LoopFilterState) -> &mut [Vec<u8>; 3] {
+        &mut lf.lr_db_line
+    }
+    fn lr_cdef_line(lf: &LoopFilterState) -> &[Vec<u8>; 3] {
+        &lf.lr_cdef_line
+    }
+    fn cdef_bufs(lf: &mut LoopFilterState) -> (&mut [[Vec<u8>; 3]; 2], &mut usize) {
+        (&mut lf.cdef_line, &mut lf.cdef_line_toggle)
+    }
+}
+
+impl LfPixelBufs for crate::pixel::BitDepth16 {
+    fn lr_db_line(lf: &LoopFilterState) -> &[Vec<u16>; 3] {
+        &lf.lr_db_line16
+    }
+    fn lr_db_line_mut(lf: &mut LoopFilterState) -> &mut [Vec<u16>; 3] {
+        &mut lf.lr_db_line16
+    }
+    fn lr_cdef_line(lf: &LoopFilterState) -> &[Vec<u16>; 3] {
+        &lf.lr_cdef_line16
+    }
+    fn cdef_bufs(lf: &mut LoopFilterState) -> (&mut [[Vec<u16>; 3]; 2], &mut usize) {
+        (&mut lf.cdef_line16, &mut lf.cdef_line_toggle)
+    }
 }
 
 #[derive(Default)]

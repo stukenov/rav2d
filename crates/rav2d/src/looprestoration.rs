@@ -1,5 +1,6 @@
 use crate::gdf_tables::{GDF_ALPHA, GDF_BIAS, GDF_INTER_ERROR, GDF_INTRA_ERROR, GDF_WEIGHT};
 use crate::intops::{apply_sign, iclip, imax, imin};
+use crate::pixel::Pixel;
 use crate::tables::PC_WIENER_LUT_TO_CLASS;
 
 pub const LR_HAVE_LEFT: u8 = 1 << 0;
@@ -20,6 +21,22 @@ static MODE_WEIGHTS: [[i16; 3]; 4] = [
 
 static MODE_OFFSETS: [i16; 4] = [-547, -21565, -573, -680];
 
+/// Reinterpret a pixel slice as bytes. Only valid when `P == u8`
+/// (`P::BITDEPTH == 8`); used to route the 8bpc arm into the u8 SIMD kernels.
+#[inline]
+fn as_u8_slice<P: Pixel>(s: &[P]) -> &[u8] {
+    debug_assert_eq!(P::BITDEPTH, 8);
+    // SAFETY: caller guarantees P::BITDEPTH == 8 => P == u8.
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len()) }
+}
+
+#[inline]
+fn as_u8_slice_mut<P: Pixel>(s: &mut [P]) -> &mut [u8] {
+    debug_assert_eq!(P::BITDEPTH, 8);
+    // SAFETY: caller guarantees P::BITDEPTH == 8 => P == u8.
+    unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut u8, s.len()) }
+}
+
 pub fn get_qval_given_tskip(mut qstep: i32, tskip: i32, i: usize, bitdepth_min_8: i32) -> i32 {
     qstep = (qstep + ((1 << bitdepth_min_8) >> 1)) >> bitdepth_min_8;
     let prod = (tskip * qstep + 128) >> 8;
@@ -34,12 +51,12 @@ pub fn get_qval_given_tskip(mut qstep: i32, tskip: i32, i: usize, bitdepth_min_8
 /// Backup a row with edge extension. `dst` and `src` are indexed with `o` as the
 /// origin (position 0 in C). Left edge fills dst[o-edge_len..o], right fills
 /// dst[o+w..o+w+edge_len].
-pub fn backup_row_8bpc(
-    dst: &mut [u8],
+pub fn backup_row<P: Pixel>(
+    dst: &mut [P],
     o: usize,
-    src: &[u8],
+    src: &[P],
     src_o: usize,
-    left: &[u8],
+    left: &[P],
     left_off: usize,
     w: usize,
     edge_len: usize,
@@ -65,10 +82,10 @@ pub fn backup_row_8bpc(
 /// Backup N pixels per row for U rows, right-aligned in a [u8; 6] buffer.
 /// Copies src[off-n..off] into dst[row][6-n..6] per row, advancing by stride.
 /// Backup a row from LPF buffer with edge extension.
-pub fn backup_row_lpf_8bpc(
-    dst: &mut [u8],
+pub fn backup_row_lpf<P: Pixel>(
+    dst: &mut [P],
     o: usize,
-    src: &[u8],
+    src: &[P],
     src_o: usize,
     w: usize,
     edge_len: usize,
@@ -94,9 +111,9 @@ pub fn backup_row_lpf_8bpc(
 /// Compute 2x2 gradient features for 4 directions.
 /// `rows[row_off]` is the first center row. `col_off` is the column origin
 /// in each row (matching the C convention where row pointers are pre-offset).
-pub fn compute_gradient_row_8bpc(
+pub fn compute_gradient_row<P: Pixel>(
     dst: &mut [[u16; 4]],
-    rows: &[&[u8]],
+    rows: &[&[P]],
     row_off: usize,
     col_off: usize,
     w: usize,
@@ -105,42 +122,49 @@ pub fn compute_gradient_row_8bpc(
     let offs: [[i32; 2]; 4] = [[1, 0], [0, 1], [1, 1], [-1, 1]];
     let ncells = (w + 2 + 1) >> 1; // number of output cells (x1 = 0,2,..,<w+2)
 
-    // SIMD: process full groups of 4 output cells (= 8 input columns) per
-    // direction; the 8-wide load reads columns [col_off+cell*2-1 .. +8], which
-    // stays in-bounds only for full groups, so a partial trailing group falls
-    // back to scalar below.
-    let full_groups = ncells / 4;
-    for g in 0..full_groups {
-        let base_cell = g * 4;
-        let col0 = col_off + base_cell * 2;
-        for d in 0..4 {
-            let dy = offs[d][0];
-            let dx = offs[d][1];
-            let center_rows = [rows[row_off - 1], rows[row_off]];
-            let a_rows = [
-                rows[(row_off as i32 - 1 - dy) as usize],
-                rows[(row_off as i32 - dy) as usize],
-            ];
-            let c_rows = [
-                rows[(row_off as i32 - 1 + dy) as usize],
-                rows[(row_off as i32 + dy) as usize],
-            ];
-            crate::simd::gdf_gradient_group(
-                dst,
-                d,
-                base_cell,
-                4,
-                center_rows,
-                a_rows,
-                c_rows,
-                col0,
-                dx,
-                shift,
-            );
+    // SIMD (8bpc only): process full groups of 4 output cells (= 8 input
+    // columns) per direction; the 8-wide load reads columns
+    // [col_off+cell*2-1 .. +8], which stays in-bounds only for full groups, so
+    // a partial trailing group falls back to scalar below. The HBD arm runs the
+    // scalar loop for all cells.
+    let full_groups = if P::BITDEPTH == 8 { ncells / 4 } else { 0 };
+    if P::BITDEPTH == 8 {
+        for g in 0..full_groups {
+            let base_cell = g * 4;
+            let col0 = col_off + base_cell * 2;
+            for d in 0..4 {
+                let dy = offs[d][0];
+                let dx = offs[d][1];
+                // SAFETY: P::BITDEPTH == 8 => P == u8.
+                let as_u8 = |s: &[P]| unsafe {
+                    std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len())
+                };
+                let center_rows = [as_u8(rows[row_off - 1]), as_u8(rows[row_off])];
+                let a_rows = [
+                    as_u8(rows[(row_off as i32 - 1 - dy) as usize]),
+                    as_u8(rows[(row_off as i32 - dy) as usize]),
+                ];
+                let c_rows = [
+                    as_u8(rows[(row_off as i32 - 1 + dy) as usize]),
+                    as_u8(rows[(row_off as i32 + dy) as usize]),
+                ];
+                crate::simd::gdf_gradient_group(
+                    dst,
+                    d,
+                    base_cell,
+                    4,
+                    center_rows,
+                    a_rows,
+                    c_rows,
+                    col0,
+                    dx,
+                    shift,
+                );
+            }
         }
     }
 
-    // Scalar tail for the remaining < 4 cells.
+    // Scalar tail (8bpc: remaining < 4 cells; HBD: everything).
     let mut x1 = (full_groups * 4) * 2;
     while x1 < w + 2 {
         for d in 0..4 {
@@ -151,11 +175,13 @@ pub fn compute_gradient_row_8bpc(
                     let dy = offs[d][0];
                     let dx = offs[d][1];
                     let ry = row_off + y;
-                    let a = (rows[(ry as i32 - 1 - dy) as usize][(x as i32 - 1 - dx) as usize]
-                        >> shift) as i32;
-                    let b = (rows[ry - 1][x - 1] >> shift) as i32;
-                    let c = (rows[(ry as i32 - 1 + dy) as usize][(x as i32 - 1 + dx) as usize]
-                        >> shift) as i32;
+                    let a = Into::<i32>::into(
+                        rows[(ry as i32 - 1 - dy) as usize][(x as i32 - 1 - dx) as usize],
+                    ) >> shift;
+                    let b = Into::<i32>::into(rows[ry - 1][x - 1]) >> shift;
+                    let c = Into::<i32>::into(
+                        rows[(ry as i32 - 1 + dy) as usize][(x as i32 - 1 + dx) as usize],
+                    ) >> shift;
                     grad += (b * 2 - a - c).abs();
                 }
             }
@@ -166,8 +192,8 @@ pub fn compute_gradient_row_8bpc(
 }
 
 /// Compute PC-Wiener class LUT index from gradient features and skip mask.
-pub fn get_class_lut_idx_8bpc(
-    rows: &[&[u8]],
+pub fn get_class_lut_idx<P: Pixel>(
+    rows: &[&[P]],
     row_center: usize,
     col_off: usize,
     noskip_mask: &[u16],
@@ -175,6 +201,7 @@ pub fn get_class_lut_idx_8bpc(
     bx: usize,
     by: usize,
     bh: usize,
+    bitdepth_min_8: i32,
 ) -> i32 {
     let mut f = [0i32; 3];
     let mut s = 0i32;
@@ -183,17 +210,17 @@ pub fn get_class_lut_idx_8bpc(
         for dx in -1i32..=4 {
             let x = (col_off as i32 + bx as i32 * 4 + dx) as usize;
             let y = (row_center as i32 + dy) as usize;
-            let m = rows[y][x] as i32;
-            let up = rows[y - 1][x] as i32;
-            let down = rows[y + 1][x] as i32;
+            let m = Into::<i32>::into(rows[y][x]);
+            let up = Into::<i32>::into(rows[y - 1][x]);
+            let down = Into::<i32>::into(rows[y + 1][x]);
             let vert = up - 2 * m + down;
 
-            let up_right = rows[y - 1][x + 1] as i32;
-            let down_left = rows[y + 1][x.wrapping_sub(1)] as i32;
+            let up_right = Into::<i32>::into(rows[y - 1][x + 1]);
+            let down_left = Into::<i32>::into(rows[y + 1][x.wrapping_sub(1)]);
             let anti_diag = up_right - 2 * m + down_left;
 
-            let down_right = rows[y + 1][x + 1] as i32;
-            let up_left = rows[y - 1][x.wrapping_sub(1)] as i32;
+            let down_right = Into::<i32>::into(rows[y + 1][x + 1]);
+            let up_left = Into::<i32>::into(rows[y - 1][x.wrapping_sub(1)]);
             let diag = up_left - 2 * m + down_right;
 
             f[0] += vert.abs();
@@ -212,24 +239,31 @@ pub fn get_class_lut_idx_8bpc(
         }
     }
 
+    // The gradient features are computed on raw (bitdepth-wide) samples and
+    // normalized back to the 8-bit domain (looprestoration_tmpl.c:503-506).
+    let rnd = (1 << bitdepth_min_8) >> 1;
     for i in 0..3 {
-        f[i] *= PC_WIENER_NORMALIZER[i] as i32;
+        f[i] = (f[i] * PC_WIENER_NORMALIZER[i] as i32 + rnd) >> bitdepth_min_8;
     }
     s *= PC_WIENER_NORMALIZER[3] as i32;
 
-    let mut qval = (imax(0, get_qval_given_tskip(base_q, s, 0, 0)) + (1 << 13)) >> 14;
+    let mut qval = (imax(0, get_qval_given_tskip(base_q, s, 0, bitdepth_min_8)) + (1 << 13)) >> 14;
     qval = imin(qval, 255) >> 5;
     let mut lut_idx = qval << 9;
     for i in 0..3 {
-        qval = (imax(0, f[i] + get_qval_given_tskip(base_q, s, i + 1, 0)) + (1 << 13)) >> 14;
+        qval = (imax(
+            0,
+            f[i] + get_qval_given_tskip(base_q, s, i + 1, bitdepth_min_8),
+        ) + (1 << 13))
+            >> 14;
         qval = imin(qval, 255) >> 5;
         lut_idx |= qval << (3 * (2 - i));
     }
     lut_idx
 }
 
-pub fn gdf_add_8bpc(
-    p: &mut [u8],
+pub fn gdf_add<P: Pixel>(
+    p: &mut [P],
     stride: usize,
     err: &[i8],
     err_stride: usize,
@@ -237,7 +271,13 @@ pub fn gdf_add_8bpc(
     h: usize,
     scale: i32,
     ll_mask: &[[u16; 4]],
+    bitdepth: u32,
 ) {
+    // GDF error is trained in a 12-bit domain; scale down to the coded depth
+    // (looprestoration_tmpl.c gdf_add_c: shift = 12 - bitdepth).
+    let shift = 12 - bitdepth as i32;
+    let rnd = (1 << shift) >> 1;
+    let bdmax = (1i32 << bitdepth) - 1;
     let bw = w >> 2;
     for by in 0..h >> 2 {
         let skip_mask = ll_mask[by][0];
@@ -256,12 +296,25 @@ pub fn gdf_add_8bpc(
             let x0 = bx_start << 2;
             let n = (bx - bx_start) << 2;
             for y in by * 4..by * 4 + 4 {
-                crate::simd::gdf_add_run(
-                    &mut p[y * stride + x0..],
-                    &err[y * err_stride + x0..],
-                    scale,
-                    n,
-                );
+                if P::BITDEPTH == 8 {
+                    // SAFETY: P::BITDEPTH == 8 => P == u8.
+                    let row = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            p[y * stride + x0..].as_mut_ptr() as *mut u8,
+                            p.len() - (y * stride + x0),
+                        )
+                    };
+                    crate::simd::gdf_add_run(row, &err[y * err_stride + x0..], scale, n);
+                } else {
+                    let po = y * stride + x0;
+                    let eo = y * err_stride + x0;
+                    for i in 0..n {
+                        let diff = err[eo + i] as i32 * scale;
+                        let v = Into::<i32>::into(p[po + i])
+                            + apply_sign((diff.abs() + rnd) >> shift, diff);
+                        p[po + i] = P::from_i32(iclip(v, 0, bdmax));
+                    }
+                }
             }
         }
     }
@@ -344,10 +397,10 @@ pub static WIENER_NS_CONFIG_Y: [[i8; 2]; 16] = [
     [3, -3],
 ];
 
-pub fn backup_row_luma_8bpc(
-    dst: &mut [u8],
+pub fn backup_row_luma<P: Pixel>(
+    dst: &mut [P],
     o: usize,
-    src: &[u8],
+    src: &[P],
     src_o: usize,
     src_stride: usize,
     w: usize,
@@ -357,7 +410,7 @@ pub fn backup_row_luma_8bpc(
     cfl_ds_flt: i32,
 ) {
     if ss_ver == 0 {
-        backup_row_lpf_8bpc(dst, o, src, src_o, w, 4, edges);
+        backup_row_lpf(dst, o, src, src_o, w, 4, edges);
         return;
     }
 
@@ -367,17 +420,21 @@ pub fn backup_row_luma_8bpc(
         0 => {
             let mut x = 0;
             while x < w {
-                dst[o + x] = ((src[src_o + x] as u16
-                    + src[src2_o + x] as u16
-                    + src[src_o + x + 1] as u16
-                    + src[src2_o + x + 1] as u16)
-                    >> 2) as u8;
+                dst[o + x] = P::from_i32(
+                    (Into::<i32>::into(src[src_o + x])
+                        + Into::<i32>::into(src[src2_o + x])
+                        + Into::<i32>::into(src[src_o + x + 1])
+                        + Into::<i32>::into(src[src2_o + x + 1]))
+                        >> 2,
+                );
                 x += 1 + ss_hor;
             }
         }
         1 => {
             for x in 0..w {
-                dst[o + x] = ((src[src_o + x] as u16 + src[src2_o + x] as u16) >> 1) as u8;
+                dst[o + x] = P::from_i32(
+                    (Into::<i32>::into(src[src_o + x]) + Into::<i32>::into(src[src2_o + x])) >> 1,
+                );
             }
         }
         _ => {
@@ -391,17 +448,22 @@ pub fn backup_row_luma_8bpc(
                 for i in 0..4usize {
                     let si = src_o - 4 + i;
                     let s2i = src2_o - 4 + i;
-                    dst[o - 4 + i] = ((src[si] as u16
-                        + src[s2i] as u16
-                        + src[si + 1] as u16
-                        + src[s2i + 1] as u16)
-                        >> 2) as u8;
+                    dst[o - 4 + i] = P::from_i32(
+                        (Into::<i32>::into(src[si])
+                            + Into::<i32>::into(src[s2i])
+                            + Into::<i32>::into(src[si + 1])
+                            + Into::<i32>::into(src[s2i + 1]))
+                            >> 2,
+                    );
                 }
             }
             1 => {
                 for i in 0..4usize {
-                    dst[o - 4 + i] =
-                        ((src[src_o - 4 + i] as u16 + src[src2_o - 4 + i] as u16) >> 1) as u8;
+                    dst[o - 4 + i] = P::from_i32(
+                        (Into::<i32>::into(src[src_o - 4 + i])
+                            + Into::<i32>::into(src[src2_o - 4 + i]))
+                            >> 1,
+                    );
                 }
             }
             _ => {
@@ -421,17 +483,22 @@ pub fn backup_row_luma_8bpc(
                 for i in 0..4usize {
                     let si = src_o + w + i;
                     let s2i = src2_o + w + i;
-                    dst[o + w + i] = ((src[si] as u16
-                        + src[s2i] as u16
-                        + src[si + 1] as u16
-                        + src[s2i + 1] as u16)
-                        >> 2) as u8;
+                    dst[o + w + i] = P::from_i32(
+                        (Into::<i32>::into(src[si])
+                            + Into::<i32>::into(src[s2i])
+                            + Into::<i32>::into(src[si + 1])
+                            + Into::<i32>::into(src[s2i + 1]))
+                            >> 2,
+                    );
                 }
             }
             1 => {
                 for i in 0..4usize {
-                    dst[o + w + i] =
-                        ((src[src_o + w + i] as u16 + src[src2_o + w + i] as u16) >> 1) as u8;
+                    dst[o + w + i] = P::from_i32(
+                        (Into::<i32>::into(src[src_o + w + i])
+                            + Into::<i32>::into(src[src2_o + w + i]))
+                            >> 1,
+                    );
                 }
             }
             _ => {
@@ -446,39 +513,40 @@ pub fn backup_row_luma_8bpc(
     }
 }
 
-pub fn ns_wiener_single_y_8bpc(
-    p: &mut [u8],
+pub fn ns_wiener_single_y<P: Pixel>(
+    p: &mut [P],
     p_off: usize,
     stride: usize,
-    left: &[[u8; 6]],
-    lpf: &[u8],
+    left: &[[P; 6]],
+    lpf: &[P],
     lpf_off: usize,
-    lpf_bottom: &[u8],
+    lpf_bottom: &[P],
     lpf_bottom_off: usize,
     w: usize,
     h: usize,
     filter: &[i8; 16],
     edges: u8,
     ll_mask: &[[u16; 4]],
+    bitdepth: u32,
 ) {
-    let mut row_buffers = [[0u8; REST_UNIT_STRIDE]; 9];
+    let mut row_buffers = [[P::default(); REST_UNIT_STRIDE]; 9];
     let mut ptrs: [usize; 9] = [0; 9];
     let o = ROW_ORIGIN;
 
-    backup_row_8bpc(&mut row_buffers[4], o, &*p, p_off, &left[0], 6, w, 4, edges);
+    backup_row(&mut row_buffers[4], o, &*p, p_off, &left[0], 6, w, 4, edges);
     ptrs[4] = 4;
 
     if edges & LR_HAVE_TOP_INTEGRATED != 0 {
         let mut loff = lpf_off;
         for i in 0..4 {
-            backup_row_lpf_8bpc(&mut row_buffers[i], o, lpf, loff, w, 4, edges);
+            backup_row_lpf(&mut row_buffers[i], o, lpf, loff, w, 4, edges);
             loff += stride;
             ptrs[i] = i;
         }
     } else if edges & LR_HAVE_TOP != 0 {
-        backup_row_lpf_8bpc(&mut row_buffers[2], o, lpf, lpf_off, w, 4, edges);
+        backup_row_lpf(&mut row_buffers[2], o, lpf, lpf_off, w, 4, edges);
         ptrs[2] = 2;
-        backup_row_lpf_8bpc(&mut row_buffers[3], o, lpf, lpf_off + stride, w, 4, edges);
+        backup_row_lpf(&mut row_buffers[3], o, lpf, lpf_off + stride, w, 4, edges);
         ptrs[3] = 3;
         ptrs[0] = 2;
         ptrs[1] = 2;
@@ -489,7 +557,7 @@ pub fn ns_wiener_single_y_8bpc(
         ptrs[3] = 4;
     }
 
-    backup_row_8bpc(
+    backup_row(
         &mut row_buffers[5],
         o,
         &*p,
@@ -501,7 +569,7 @@ pub fn ns_wiener_single_y_8bpc(
         edges,
     );
     ptrs[5] = 5;
-    backup_row_8bpc(
+    backup_row(
         &mut row_buffers[6],
         o,
         &*p,
@@ -513,7 +581,7 @@ pub fn ns_wiener_single_y_8bpc(
         edges,
     );
     ptrs[6] = 6;
-    backup_row_8bpc(
+    backup_row(
         &mut row_buffers[7],
         o,
         &*p,
@@ -530,7 +598,7 @@ pub fn ns_wiener_single_y_8bpc(
 
     for y in 0..h {
         if y + 4 < h {
-            backup_row_8bpc(
+            backup_row(
                 &mut row_buffers[bak_idx],
                 o,
                 &*p,
@@ -543,7 +611,7 @@ pub fn ns_wiener_single_y_8bpc(
             );
             ptrs[8] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[bak_idx],
                 o,
                 &*p,
@@ -555,7 +623,7 @@ pub fn ns_wiener_single_y_8bpc(
             ptrs[8] = bak_idx;
         } else if y + 2 < h && edges & LR_HAVE_BOTTOM != 0 {
             let offset_y = y + 4 - h;
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[bak_idx],
                 o,
                 lpf_bottom,
@@ -574,17 +642,7 @@ pub fn ns_wiener_single_y_8bpc(
             bak_idx = 0;
         }
 
-        let refs: [&[u8]; 9] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
-        let taps: [crate::simd::WienerTap; 16] = core::array::from_fn(|i| {
-            let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
-            let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
-            crate::simd::WienerTap {
-                row_p: refs[(4 + dy) as usize],
-                row_m: refs[(4 - dy) as usize],
-                dx,
-                coef: filter[i] as i32,
-            }
-        });
+        let refs: [&[P]; 9] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[P]);
         let skip_mask = ll_mask[y >> 2][0];
         let dst_row = &mut p[p_off + y * stride..];
         let bw = w >> 2;
@@ -601,7 +659,43 @@ pub fn ns_wiener_single_y_8bpc(
             }
             let x0 = bx_start << 2;
             let n = (bx - bx_start) << 2;
-            crate::simd::ns_wiener_fir_run(&mut dst_row[x0..x0 + n], refs[4], o + x0, &taps, n);
+            if P::BITDEPTH == 8 {
+                let taps: [crate::simd::WienerTap; 16] = core::array::from_fn(|i| {
+                    let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
+                    let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
+                    crate::simd::WienerTap {
+                        row_p: as_u8_slice(refs[(4 + dy) as usize]),
+                        row_m: as_u8_slice(refs[(4 - dy) as usize]),
+                        dx,
+                        coef: filter[i] as i32,
+                    }
+                });
+                crate::simd::ns_wiener_fir_run(
+                    as_u8_slice_mut(&mut dst_row[x0..x0 + n]),
+                    as_u8_slice(refs[4]),
+                    o + x0,
+                    &taps,
+                    n,
+                );
+            } else {
+                // Scalar HBD arm (looprestoration_tmpl.c ns_wiener_single_y_c).
+                let bdmax = (1i32 << bitdepth) - 1;
+                for j in 0..n {
+                    let c = o + x0 + j;
+                    let m = Into::<i32>::into(refs[4][c]);
+                    let mut s = m << 7;
+                    for (i, cfg) in WIENER_NS_CONFIG_Y.iter().enumerate() {
+                        let dy = cfg[0] as i32;
+                        let dx = cfg[1] as i32;
+                        let a =
+                            Into::<i32>::into(refs[(4 + dy) as usize][(c as i32 + dx) as usize]);
+                        let b =
+                            Into::<i32>::into(refs[(4 - dy) as usize][(c as i32 - dx) as usize]);
+                        s += (a + b - 2 * m) * filter[i] as i32;
+                    }
+                    dst_row[x0 + j] = P::from_i32(iclip((s + 64) >> 7, 0, bdmax));
+                }
+            }
         }
 
         for r in 0..8 {
@@ -610,14 +704,14 @@ pub fn ns_wiener_single_y_8bpc(
     }
 }
 
-fn wiener_multi_8bpc(
-    p: &mut [u8],
+fn wiener_multi<P: Pixel>(
+    p: &mut [P],
     p_off: usize,
     stride: usize,
-    left: &[[u8; 6]],
-    lpf: &[u8],
+    left: &[[P; 6]],
+    lpf: &[P],
     lpf_off: usize,
-    lpf_bottom: &[u8],
+    lpf_bottom: &[P],
     lpf_bottom_off: usize,
     w: usize,
     h: usize,
@@ -628,26 +722,27 @@ fn wiener_multi_8bpc(
     base_q: i32,
     edges: u8,
     ll_mask: &[[u16; 4]],
+    bitdepth: u32,
 ) {
     let mut classes = [0u8; 16];
-    let mut row_buffers = [[0u8; REST_UNIT_STRIDE]; 10];
+    let mut row_buffers = [[P::default(); REST_UNIT_STRIDE]; 10];
     let mut ptrs: [usize; 10] = [0; 10];
     let o = ROW_ORIGIN;
 
-    backup_row_8bpc(&mut row_buffers[4], o, &*p, p_off, &left[0], 6, w, 4, edges);
+    backup_row(&mut row_buffers[4], o, &*p, p_off, &left[0], 6, w, 4, edges);
     ptrs[4] = 4;
 
     if edges & LR_HAVE_TOP_INTEGRATED != 0 {
         let mut loff = lpf_off;
         for i in 0..4 {
-            backup_row_lpf_8bpc(&mut row_buffers[i], o, lpf, loff, w, 4, edges);
+            backup_row_lpf(&mut row_buffers[i], o, lpf, loff, w, 4, edges);
             loff += stride;
             ptrs[i] = i;
         }
     } else if edges & LR_HAVE_TOP != 0 {
-        backup_row_lpf_8bpc(&mut row_buffers[2], o, lpf, lpf_off, w, 4, edges);
+        backup_row_lpf(&mut row_buffers[2], o, lpf, lpf_off, w, 4, edges);
         ptrs[2] = 2;
-        backup_row_lpf_8bpc(&mut row_buffers[3], o, lpf, lpf_off + stride, w, 4, edges);
+        backup_row_lpf(&mut row_buffers[3], o, lpf, lpf_off + stride, w, 4, edges);
         ptrs[3] = 3;
         ptrs[0] = 2;
         ptrs[1] = 2;
@@ -658,7 +753,7 @@ fn wiener_multi_8bpc(
         ptrs[3] = 4;
     }
 
-    backup_row_8bpc(
+    backup_row(
         &mut row_buffers[5],
         o,
         &*p,
@@ -670,7 +765,7 @@ fn wiener_multi_8bpc(
         edges,
     );
     ptrs[5] = 5;
-    backup_row_8bpc(
+    backup_row(
         &mut row_buffers[6],
         o,
         &*p,
@@ -682,7 +777,7 @@ fn wiener_multi_8bpc(
         edges,
     );
     ptrs[6] = 6;
-    backup_row_8bpc(
+    backup_row(
         &mut row_buffers[7],
         o,
         &*p,
@@ -703,7 +798,7 @@ fn wiener_multi_8bpc(
         let by4 = by << 2;
 
         if by + 1 < bh {
-            backup_row_8bpc(
+            backup_row(
                 &mut row_buffers[bak_idx],
                 o,
                 &*p,
@@ -715,7 +810,7 @@ fn wiener_multi_8bpc(
                 edges,
             );
             ptrs[8] = bak_idx;
-            backup_row_8bpc(
+            backup_row(
                 &mut row_buffers[9],
                 o,
                 &*p,
@@ -728,7 +823,7 @@ fn wiener_multi_8bpc(
             );
             ptrs[9] = 9;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[bak_idx],
                 o,
                 &*p,
@@ -738,7 +833,7 @@ fn wiener_multi_8bpc(
                 edges,
             );
             ptrs[8] = bak_idx;
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[9],
                 o,
                 &*p,
@@ -749,7 +844,7 @@ fn wiener_multi_8bpc(
             );
             ptrs[9] = 9;
         } else if edges & LR_HAVE_BOTTOM != 0 {
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[bak_idx],
                 o,
                 lpf_bottom,
@@ -759,7 +854,7 @@ fn wiener_multi_8bpc(
                 edges,
             );
             ptrs[8] = bak_idx;
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[9],
                 o,
                 lpf_bottom,
@@ -775,9 +870,19 @@ fn wiener_multi_8bpc(
         }
 
         {
-            let refs: [&[u8]; 10] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
+            let refs: [&[P]; 10] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[P]);
             for bx in 0..bw {
-                let lut_idx = get_class_lut_idx_8bpc(&refs, 4, o, noskip_mask, base_q, bx, by, bh);
+                let lut_idx = get_class_lut_idx(
+                    &refs,
+                    4,
+                    o,
+                    noskip_mask,
+                    base_q,
+                    bx,
+                    by,
+                    bh,
+                    bitdepth as i32 - 8,
+                );
                 let cls = PC_WIENER_LUT_TO_CLASS[lut_idx as usize];
                 classes[bx] = subclass_lut[cls as usize];
             }
@@ -785,7 +890,7 @@ fn wiener_multi_8bpc(
 
         for y in by4..by4 + 4 {
             if y + 4 < h {
-                backup_row_8bpc(
+                backup_row(
                     &mut row_buffers[bak_idx],
                     o,
                     &*p,
@@ -798,7 +903,7 @@ fn wiener_multi_8bpc(
                 );
                 ptrs[8] = bak_idx;
             } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
-                backup_row_lpf_8bpc(
+                backup_row_lpf(
                     &mut row_buffers[bak_idx],
                     o,
                     &*p,
@@ -810,7 +915,7 @@ fn wiener_multi_8bpc(
                 ptrs[8] = bak_idx;
             } else if y + 2 < h && edges & LR_HAVE_BOTTOM != 0 {
                 let offset_y = y + 4 - h;
-                backup_row_lpf_8bpc(
+                backup_row_lpf(
                     &mut row_buffers[bak_idx],
                     o,
                     lpf_bottom,
@@ -831,7 +936,7 @@ fn wiener_multi_8bpc(
 
             // Row references for the FIR taps; immutable borrow of row_buffers
             // (disjoint from the mutable `p` we write).
-            let refs: [&[u8]; 10] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
+            let refs: [&[P]; 10] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[P]);
             let skip_mask = ll_mask[y >> 2][0];
             let dst_row = &mut p[p_off + y * stride..];
 
@@ -856,43 +961,85 @@ fn wiener_multi_8bpc(
 
                 if let Some(fu) = filters_user {
                     let filter = &fu[cls as usize];
-                    let taps: [crate::simd::WienerTap; 16] = core::array::from_fn(|i| {
-                        let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
-                        let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
-                        crate::simd::WienerTap {
-                            row_p: refs[(4 + dy) as usize],
-                            row_m: refs[(4 - dy) as usize],
-                            dx,
-                            coef: filter[i] as i32,
+                    if P::BITDEPTH == 8 {
+                        let taps: [crate::simd::WienerTap; 16] = core::array::from_fn(|i| {
+                            let dy = WIENER_NS_CONFIG_Y[i][0] as i32;
+                            let dx = WIENER_NS_CONFIG_Y[i][1] as i32;
+                            crate::simd::WienerTap {
+                                row_p: as_u8_slice(refs[(4 + dy) as usize]),
+                                row_m: as_u8_slice(refs[(4 - dy) as usize]),
+                                dx,
+                                coef: filter[i] as i32,
+                            }
+                        });
+                        crate::simd::ns_wiener_fir_run(
+                            as_u8_slice_mut(&mut dst_row[x0..x0 + n]),
+                            as_u8_slice(refs[4]),
+                            col0,
+                            &taps,
+                            n,
+                        );
+                    } else {
+                        let bdmax = (1i32 << bitdepth) - 1;
+                        for j in 0..n {
+                            let c = col0 + j;
+                            let m = Into::<i32>::into(refs[4][c]);
+                            let mut s = m << 7;
+                            for (i, cfg) in WIENER_NS_CONFIG_Y.iter().enumerate() {
+                                let dy = cfg[0] as i32;
+                                let dx = cfg[1] as i32;
+                                let a = Into::<i32>::into(
+                                    refs[(4 + dy) as usize][(c as i32 + dx) as usize],
+                                );
+                                let b = Into::<i32>::into(
+                                    refs[(4 - dy) as usize][(c as i32 - dx) as usize],
+                                );
+                                s += (a + b - 2 * m) * filter[i] as i32;
+                            }
+                            dst_row[x0 + j] = P::from_i32(iclip((s + 64) >> 7, 0, bdmax));
                         }
-                    });
-                    crate::simd::ns_wiener_fir_run(
-                        &mut dst_row[x0..x0 + n],
-                        refs[4],
-                        col0,
-                        &taps,
-                        n,
-                    );
+                    }
                 } else if let Some(fp) = filters_pretrained {
                     let filter = &fp[cls as usize];
-                    let taps: [crate::simd::WienerTap; 12] = core::array::from_fn(|i| {
-                        let dy = PC_WIENER_CONFIG[i][0] as i32;
-                        let dx = PC_WIENER_CONFIG[i][1] as i32;
-                        crate::simd::WienerTap {
-                            row_p: refs[(4 + dy) as usize],
-                            row_m: refs[(4 - dy) as usize],
-                            dx,
-                            coef: filter[i] as i32,
+                    if P::BITDEPTH == 8 {
+                        let taps: [crate::simd::WienerTap; 12] = core::array::from_fn(|i| {
+                            let dy = PC_WIENER_CONFIG[i][0] as i32;
+                            let dx = PC_WIENER_CONFIG[i][1] as i32;
+                            crate::simd::WienerTap {
+                                row_p: as_u8_slice(refs[(4 + dy) as usize]),
+                                row_m: as_u8_slice(refs[(4 - dy) as usize]),
+                                dx,
+                                coef: filter[i] as i32,
+                            }
+                        });
+                        crate::simd::pc_wiener_fir_run(
+                            as_u8_slice_mut(&mut dst_row[x0..x0 + n]),
+                            as_u8_slice(refs[4]),
+                            filter[12] as i32,
+                            col0,
+                            &taps,
+                            n,
+                        );
+                    } else {
+                        let bdmax = (1i32 << bitdepth) - 1;
+                        for j in 0..n {
+                            let c = col0 + j;
+                            let m = Into::<i32>::into(refs[4][c]);
+                            let mut s = m * filter[12] as i32;
+                            for (i, cfg) in PC_WIENER_CONFIG.iter().enumerate() {
+                                let dy = cfg[0] as i32;
+                                let dx = cfg[1] as i32;
+                                let a = Into::<i32>::into(
+                                    refs[(4 + dy) as usize][(c as i32 + dx) as usize],
+                                );
+                                let b = Into::<i32>::into(
+                                    refs[(4 - dy) as usize][(c as i32 - dx) as usize],
+                                );
+                                s += (a + b) * filter[i] as i32;
+                            }
+                            dst_row[x0 + j] = P::from_i32(iclip((s + 64) >> 7, 0, bdmax));
                         }
-                    });
-                    crate::simd::pc_wiener_fir_run(
-                        &mut dst_row[x0..x0 + n],
-                        refs[4],
-                        filter[12] as i32,
-                        col0,
-                        &taps,
-                        n,
-                    );
+                    }
                 }
             }
 
@@ -903,14 +1050,14 @@ fn wiener_multi_8bpc(
     }
 }
 
-pub fn ns_wiener_multi_8bpc(
-    p: &mut [u8],
+pub fn ns_wiener_multi<P: Pixel>(
+    p: &mut [P],
     p_off: usize,
     stride: usize,
-    left: &[[u8; 6]],
-    lpf: &[u8],
+    left: &[[P; 6]],
+    lpf: &[P],
     lpf_off: usize,
-    lpf_bottom: &[u8],
+    lpf_bottom: &[P],
     lpf_bottom_off: usize,
     w: usize,
     h: usize,
@@ -920,8 +1067,9 @@ pub fn ns_wiener_multi_8bpc(
     base_q: i32,
     edges: u8,
     ll_mask: &[[u16; 4]],
+    bitdepth: u32,
 ) {
-    wiener_multi_8bpc(
+    wiener_multi(
         p,
         p_off,
         stride,
@@ -939,17 +1087,18 @@ pub fn ns_wiener_multi_8bpc(
         base_q,
         edges,
         ll_mask,
+        bitdepth,
     );
 }
 
-pub fn pc_wiener_8bpc(
-    p: &mut [u8],
+pub fn pc_wiener<P: Pixel>(
+    p: &mut [P],
     p_off: usize,
     stride: usize,
-    left: &[[u8; 6]],
-    lpf: &[u8],
+    left: &[[P; 6]],
+    lpf: &[P],
     lpf_off: usize,
-    lpf_bottom: &[u8],
+    lpf_bottom: &[P],
     lpf_bottom_off: usize,
     w: usize,
     h: usize,
@@ -959,8 +1108,9 @@ pub fn pc_wiener_8bpc(
     base_q: i32,
     edges: u8,
     ll_mask: &[[u16; 4]],
+    bitdepth: u32,
 ) {
-    wiener_multi_8bpc(
+    wiener_multi(
         p,
         p_off,
         stride,
@@ -978,50 +1128,53 @@ pub fn pc_wiener_8bpc(
         base_q,
         edges,
         ll_mask,
+        bitdepth,
     );
 }
 
 const LUMA_BUF_STRIDE: usize = REST_UNIT_STRIDE + 64;
 
-pub fn ns_wiener_single_uv_8bpc(
-    p: &mut [u8],
+pub fn ns_wiener_single_uv<P: Pixel>(
+    p: &mut [P],
     p_off: usize,
     stride: usize,
-    left: &[[u8; 6]],
-    lpf: &[u8],
+    left: &[[P; 6]],
+    lpf: &[P],
     lpf_off: usize,
-    lpf_bottom: &[u8],
+    lpf_bottom: &[P],
     lpf_bottom_off: usize,
     w: usize,
     h: usize,
     filter: &[i8; 18],
-    luma: &[u8],
+    luma: &[P],
     luma_off: usize,
     lstride: usize,
-    luma_top: &[u8],
+    luma_top: &[P],
     luma_top_off: usize,
-    luma_bottom: &[u8],
+    luma_bottom: &[P],
     luma_bottom_off: usize,
     ss_hor: usize,
     ss_ver: usize,
     ds_flt: i32,
     edges: u8,
     ll_mask: &[[u16; 4]],
+    bitdepth: u32,
 ) {
-    let mut c_buffers = [[0u8; REST_UNIT_STRIDE]; 5];
-    let mut l_buffers = [[0u8; LUMA_BUF_STRIDE]; 5];
+    let bdmax = (1i32 << bitdepth) - 1;
+    let mut c_buffers = [[P::default(); REST_UNIT_STRIDE]; 5];
+    let mut l_buffers = [[P::default(); LUMA_BUF_STRIDE]; 5];
     let mut c_ptrs: [usize; 5] = [0; 5];
     let mut l_ptrs: [usize; 5] = [0; 5];
     let o = ROW_ORIGIN;
     let luma_w = w << ss_hor;
 
-    backup_row_8bpc(&mut c_buffers[2], o, &*p, p_off, &left[0], 6, w, 2, edges);
+    backup_row(&mut c_buffers[2], o, &*p, p_off, &left[0], 6, w, 2, edges);
     c_ptrs[2] = 2;
 
     if edges & (LR_HAVE_TOP_INTEGRATED | LR_HAVE_TOP) != 0 {
         let mut loff = lpf_off;
         for i in 0..2 {
-            backup_row_lpf_8bpc(&mut c_buffers[i], o, lpf, loff, w, 2, edges);
+            backup_row_lpf(&mut c_buffers[i], o, lpf, loff, w, 2, edges);
             c_ptrs[i] = i;
             loff += stride;
         }
@@ -1030,7 +1183,7 @@ pub fn ns_wiener_single_uv_8bpc(
         c_ptrs[1] = 2;
     }
 
-    backup_row_8bpc(
+    backup_row(
         &mut c_buffers[3],
         o,
         &*p,
@@ -1044,7 +1197,7 @@ pub fn ns_wiener_single_uv_8bpc(
     c_ptrs[3] = 3;
     let mut bak_idx: usize = 4;
 
-    backup_row_luma_8bpc(
+    backup_row_luma(
         &mut l_buffers[2],
         o,
         luma,
@@ -1059,7 +1212,7 @@ pub fn ns_wiener_single_uv_8bpc(
     l_ptrs[2] = 2;
 
     if edges & LR_HAVE_TOP_INTEGRATED != 0 {
-        backup_row_luma_8bpc(
+        backup_row_luma(
             &mut l_buffers[0],
             o,
             luma,
@@ -1072,7 +1225,7 @@ pub fn ns_wiener_single_uv_8bpc(
             ds_flt,
         );
         l_ptrs[0] = 0;
-        backup_row_luma_8bpc(
+        backup_row_luma(
             &mut l_buffers[1],
             o,
             luma,
@@ -1086,7 +1239,7 @@ pub fn ns_wiener_single_uv_8bpc(
         );
         l_ptrs[1] = 1;
     } else if edges & LR_HAVE_TOP != 0 {
-        backup_row_luma_8bpc(
+        backup_row_luma(
             &mut l_buffers[0],
             o,
             luma_top,
@@ -1099,7 +1252,7 @@ pub fn ns_wiener_single_uv_8bpc(
             ds_flt,
         );
         l_ptrs[0] = 0;
-        backup_row_luma_8bpc(
+        backup_row_luma(
             &mut l_buffers[1],
             o,
             luma_top,
@@ -1117,7 +1270,7 @@ pub fn ns_wiener_single_uv_8bpc(
         l_ptrs[1] = 2;
     }
 
-    backup_row_luma_8bpc(
+    backup_row_luma(
         &mut l_buffers[3],
         o,
         luma,
@@ -1135,7 +1288,7 @@ pub fn ns_wiener_single_uv_8bpc(
 
     for y in 0..h {
         if y + 2 < h {
-            backup_row_8bpc(
+            backup_row(
                 &mut c_buffers[bak_idx],
                 o,
                 &*p,
@@ -1148,7 +1301,7 @@ pub fn ns_wiener_single_uv_8bpc(
             );
             c_ptrs[4] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut c_buffers[bak_idx],
                 o,
                 &*p,
@@ -1160,7 +1313,7 @@ pub fn ns_wiener_single_uv_8bpc(
             c_ptrs[4] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM != 0 {
             let offset_y = y + 2 - h;
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut c_buffers[bak_idx],
                 o,
                 lpf_bottom,
@@ -1181,7 +1334,7 @@ pub fn ns_wiener_single_uv_8bpc(
         if c_ptrs[4] == c_ptrs[3] {
             l_ptrs[4] = l_ptrs[3];
         } else if y + 2 == h && edges & LR_HAVE_BOTTOM_INTEGRATED == 0 {
-            backup_row_luma_8bpc(
+            backup_row_luma(
                 &mut l_buffers[lbak_idx],
                 o,
                 luma_bottom,
@@ -1195,7 +1348,7 @@ pub fn ns_wiener_single_uv_8bpc(
             );
             l_ptrs[4] = lbak_idx;
         } else if y + 1 == h && edges & LR_HAVE_BOTTOM_INTEGRATED == 0 {
-            backup_row_luma_8bpc(
+            backup_row_luma(
                 &mut l_buffers[lbak_idx],
                 o,
                 luma_bottom,
@@ -1209,7 +1362,7 @@ pub fn ns_wiener_single_uv_8bpc(
             );
             l_ptrs[4] = lbak_idx;
         } else {
-            backup_row_luma_8bpc(
+            backup_row_luma(
                 &mut l_buffers[lbak_idx],
                 o,
                 luma,
@@ -1233,26 +1386,28 @@ pub fn ns_wiener_single_uv_8bpc(
                 continue;
             }
             for x in bx * 4..bx * 4 + 4 {
-                let m = c_buffers[c_ptrs[2]][o + x] as i32;
+                let m = Into::<i32>::into(c_buffers[c_ptrs[2]][o + x]);
                 let mut s = m << 7;
                 for i in 0..6 {
                     let dy = WIENER_NS_CONFIG_UV[i][0] as i32;
                     let dx = WIENER_NS_CONFIG_UV[i][1] as i32;
-                    let a = c_buffers[c_ptrs[(2 + dy) as usize]]
-                        [(o as i32 + x as i32 + dx) as usize] as i32;
-                    let b = c_buffers[c_ptrs[(2 - dy) as usize]]
-                        [(o as i32 + x as i32 - dx) as usize] as i32;
+                    let a = Into::<i32>::into(
+                        c_buffers[c_ptrs[(2 + dy) as usize]][(o as i32 + x as i32 + dx) as usize],
+                    );
+                    let b = Into::<i32>::into(
+                        c_buffers[c_ptrs[(2 - dy) as usize]][(o as i32 + x as i32 - dx) as usize],
+                    );
                     s += (a + b - 2 * m) * filter[i] as i32;
                 }
-                let l = l_buffers[l_ptrs[2]][o + (x << ss_hor)] as i32;
+                let l = Into::<i32>::into(l_buffers[l_ptrs[2]][o + (x << ss_hor)]);
                 for i in 0..12 {
                     let dy = WIENER_NS_CONFIG_UV_FROM_Y[i][0] as i32;
                     let dx = WIENER_NS_CONFIG_UV_FROM_Y[i][1] as i32;
                     let lx = (o as i32 + (x as i32 + dx) * (1i32 << ss_hor)) as usize;
-                    let lval = l_buffers[l_ptrs[(2 + dy) as usize]][lx] as i32;
+                    let lval = Into::<i32>::into(l_buffers[l_ptrs[(2 + dy) as usize]][lx]);
                     s += (lval - l) * filter[6 + i] as i32;
                 }
-                p[p_off + y * stride + x] = iclip((s + 64) >> 7, 0, 255) as u8;
+                p[p_off + y * stride + x] = P::from_i32(iclip((s + 64) >> 7, 0, bdmax));
             }
         }
 
@@ -1266,33 +1421,38 @@ pub fn ns_wiener_single_uv_8bpc(
     }
 }
 
-pub fn gdf_prep_8bpc(
+pub fn gdf_prep<P: Pixel>(
     dst: &mut [i8],
     dst_stride: usize,
-    p: &[u8],
+    p: &[P],
     p_off: usize,
     stride: usize,
-    left: &[[u8; 6]],
-    lpf: &[u8],
+    left: &[[P; 6]],
+    lpf: &[P],
     lpf_off: usize,
-    lpf_bottom: &[u8],
+    lpf_bottom: &[P],
     lpf_bottom_off: usize,
     w: usize,
     h: usize,
     ref_dst_idx: usize,
     qp_idx: usize,
     edges: u8,
+    bitdepth: u32,
 ) {
-    let mut row_buffers = [[0u8; REST_UNIT_STRIDE]; 13];
+    // GDF runs in a 10-bit internal domain: 8bpc samples are up-shifted by 2,
+    // 12-bit samples down-shifted by 2 (looprestoration_tmpl.c gdf_prep_c).
+    let down_shift: u32 = if bitdepth == 12 { 2 } else { 0 };
+    let up_shift: u32 = if bitdepth == 8 { 2 } else { 0 };
+    let mut row_buffers = [[P::default(); REST_UNIT_STRIDE]; 13];
     let mut ptrs: [usize; 13] = [0; 13];
     let o = ROW_ORIGIN;
 
-    backup_row_8bpc(&mut row_buffers[6], o, p, p_off, &left[0], 6, w, 6, edges);
+    backup_row(&mut row_buffers[6], o, p, p_off, &left[0], 6, w, 6, edges);
     ptrs[6] = 6;
 
     if edges & LR_HAVE_TOP_INTEGRATED != 0 {
         for n in 0..6 {
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[n],
                 o,
                 lpf,
@@ -1304,9 +1464,9 @@ pub fn gdf_prep_8bpc(
             ptrs[n] = n;
         }
     } else if edges & LR_HAVE_TOP != 0 {
-        backup_row_lpf_8bpc(&mut row_buffers[4], o, lpf, lpf_off, w, 6, edges);
+        backup_row_lpf(&mut row_buffers[4], o, lpf, lpf_off, w, 6, edges);
         ptrs[4] = 4;
-        backup_row_lpf_8bpc(&mut row_buffers[5], o, lpf, lpf_off + stride, w, 6, edges);
+        backup_row_lpf(&mut row_buffers[5], o, lpf, lpf_off + stride, w, 6, edges);
         ptrs[5] = 5;
         ptrs[0] = 4;
         ptrs[1] = 4;
@@ -1320,7 +1480,7 @@ pub fn gdf_prep_8bpc(
 
     let mut bak_idx = 7usize;
     for y in 1..6 {
-        backup_row_8bpc(
+        backup_row(
             &mut row_buffers[bak_idx],
             o,
             p,
@@ -1347,14 +1507,14 @@ pub fn gdf_prep_8bpc(
 
     let mut grad = [[[0u16; 4]; GRADIENT_BUF_STRIDE]; 2];
     {
-        let refs: [&[u8]; 13] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
-        compute_gradient_row_8bpc(&mut grad[0], &refs, 6, o, w, 0);
+        let refs: [&[P]; 13] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[P]);
+        compute_gradient_row(&mut grad[0], &refs, 6, o, w, down_shift);
     }
     let mut grad_bit: usize = 1;
 
     for y in 0..h {
         if y + 6 < h {
-            backup_row_8bpc(
+            backup_row(
                 &mut row_buffers[bak_idx],
                 o,
                 p,
@@ -1367,7 +1527,7 @@ pub fn gdf_prep_8bpc(
             );
             ptrs[12] = bak_idx;
         } else if edges & LR_HAVE_BOTTOM_INTEGRATED != 0 {
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[bak_idx],
                 o,
                 p,
@@ -1379,7 +1539,7 @@ pub fn gdf_prep_8bpc(
             ptrs[12] = bak_idx;
         } else if y + 4 < h && edges & LR_HAVE_BOTTOM != 0 {
             let offset_y = y + 6 - h;
-            backup_row_lpf_8bpc(
+            backup_row_lpf(
                 &mut row_buffers[bak_idx],
                 o,
                 lpf_bottom,
@@ -1398,8 +1558,8 @@ pub fn gdf_prep_8bpc(
         }
 
         if y & 1 == 0 {
-            let refs: [&[u8]; 13] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[u8]);
-            compute_gradient_row_8bpc(&mut grad[grad_bit], &refs, 8, o, w, 0);
+            let refs: [&[P]; 13] = core::array::from_fn(|i| &row_buffers[ptrs[i]] as &[P]);
+            compute_gradient_row(&mut grad[grad_bit], &refs, 8, o, w, down_shift);
             grad_bit ^= 1;
         }
 
@@ -1423,7 +1583,7 @@ pub fn gdf_prep_8bpc(
             for d in 0..4 {
                 let k = d + 18;
                 let alpha = GDF_ALPHA[alpha_base + k * 4 + cls] as i32;
-                let v = imin(grad_sums[d] >> 2, alpha);
+                let v = imin(grad_sums[d] >> (4 - up_shift), alpha);
                 for idx in 0..3 {
                     shared_vals[idx] += v * GDF_WEIGHT[weight_base + idx * 88 + k * 4 + cls] as i32;
                 }
@@ -1432,17 +1592,19 @@ pub fn gdf_prep_8bpc(
             for x2 in 0..2 {
                 let x = x1 + x2;
                 let mut idx_vals = shared_vals;
-                let m = row_buffers[ptrs[6]][o + x] as i32;
+                let m = Into::<i32>::into(row_buffers[ptrs[6]][o + x]) >> down_shift;
                 for k in 0..18 {
                     let alpha = GDF_ALPHA[alpha_base + k * 4 + cls] as i32;
                     let dy = GDF_COORDS[k][0] as i32;
                     let dx = GDF_COORDS[k][1] as i32;
-                    let a = row_buffers[ptrs[(6 - dy) as usize]]
-                        [(o as i32 + x as i32 - dx) as usize] as i32;
-                    let b = row_buffers[ptrs[(6 + dy) as usize]]
-                        [(o as i32 + x as i32 + dx) as usize] as i32;
-                    let above = iclip((a - m) << 2, -alpha, alpha);
-                    let below = iclip((b - m) << 2, -alpha, alpha);
+                    let a = Into::<i32>::into(
+                        row_buffers[ptrs[(6 - dy) as usize]][(o as i32 + x as i32 - dx) as usize],
+                    ) >> down_shift;
+                    let b = Into::<i32>::into(
+                        row_buffers[ptrs[(6 + dy) as usize]][(o as i32 + x as i32 + dx) as usize],
+                    ) >> down_shift;
+                    let above = iclip((a - m) << up_shift, -alpha, alpha);
+                    let below = iclip((b - m) << up_shift, -alpha, alpha);
                     let v = iclip(above + below, -512, 511);
                     for idx in 0..3 {
                         idx_vals[idx] +=
@@ -1612,7 +1774,7 @@ use crate::dsp::LoopRestorationDSPContext;
 use crate::headers::{FhRestorationPlane, PixelLayout};
 use crate::lf_mask::{Av2Filter, Av2Restoration};
 
-pub struct LrContext<'a> {
+pub struct LrContext<'a, P: Pixel> {
     pub dsp_lr: &'a LoopRestorationDSPContext,
     pub restoration_p: &'a [FhRestorationPlane; 3],
     pub gdf_qp_idx: i32,
@@ -1626,12 +1788,12 @@ pub struct LrContext<'a> {
     pub sbh: i32,
     pub mask: &'a [Av2Filter],
     pub lr_mask: &'a [Av2Restoration],
-    pub lr_db_line: &'a [Vec<u8>; 3],
-    pub lr_cdef_line: &'a [Vec<u8>; 3],
+    pub lr_db_line: &'a [Vec<P>; 3],
+    pub lr_cdef_line: &'a [Vec<P>; 3],
     /// Luma plane (read-only) for chroma cross-component single-Wiener; dav2d's
     /// `f->lf.p[0]`. The deferred filter pass processes chroma before luma, so
     /// this is the pre-luma-LR luma for the current sbrow.
-    pub lf_p_luma: &'a [u8],
+    pub lf_p_luma: &'a [P],
     pub base_q: i32,
     pub gdf_ref_dst_idx: i32,
     pub start_of_tile_row: &'a [u8],
@@ -1643,11 +1805,13 @@ pub struct LrContext<'a> {
     pub cur_stride: [isize; 2],
     pub unit_size: [u8; 2],
     pub restore_planes: i32,
+    /// Coded bit depth (8/10/12) for pixel clips and GDF domain shifts.
+    pub bitdepth: u32,
 }
 
-fn backup_nxu(
-    dst: &mut [[u8; 6]],
-    src: &[u8],
+fn backup_nxu<P: Pixel>(
+    dst: &mut [[P; 6]],
+    src: &[P],
     src_off: usize,
     src_stride: isize,
     mut u: i32,
@@ -1666,17 +1830,17 @@ fn backup_nxu(
     }
 }
 
-fn copy_n_lines(dst: &mut [u8], src: &[u8], stride: isize, n: usize) {
+fn copy_n_lines<P: Pixel>(dst: &mut [P], src: &[P], stride: isize, n: usize) {
     let len = stride.unsigned_abs() * n;
     let copy_len = len.min(dst.len()).min(src.len());
     dst[..copy_len].copy_from_slice(&src[..copy_len]);
 }
 
-fn lr_stripe_8bpc(
-    ctx: &LrContext,
-    p: &mut [u8],
+fn lr_stripe<P: Pixel>(
+    ctx: &LrContext<P>,
+    p: &mut [P],
     p_off: usize,
-    left: &[[u8; 6]],
+    left: &[[P; 6]],
     x: i32,
     mut y: i32,
     plane: i32,
@@ -1830,11 +1994,11 @@ fn lr_stripe_8bpc(
 
         // GDF prep: compute the per-pixel error into gdf_err.
         if gdf_enabled {
-            let (top_slice, top_off): (&[u8], usize) = match cdef_top {
+            let (top_slice, top_off): (&[P], usize) = match cdef_top {
                 Some(off) => (&ctx.lr_cdef_line[plane_u], off),
                 None => (&ctx.lr_db_line[plane_u], lpf_off),
             };
-            gdf_prep_8bpc(
+            gdf_prep(
                 &mut gdf_err,
                 64,
                 &*p,
@@ -1850,6 +2014,7 @@ fn lr_stripe_8bpc(
                 ref_dst_idx as usize,
                 qp_idx as usize,
                 edges,
+                ctx.bitdepth,
             );
         }
 
@@ -1901,7 +2066,7 @@ fn lr_stripe_8bpc(
         }
 
         if wkind != WKind::None {
-            let (top_slice, top_off): (&[u8], usize) = match cdef_top {
+            let (top_slice, top_off): (&[P], usize) = match cdef_top {
                 Some(off) => (&ctx.lr_cdef_line[plane_u], off),
                 None => (&ctx.lr_db_line[plane_u], lpf_off),
             };
@@ -1923,11 +2088,11 @@ fn lr_stripe_8bpc(
                     } else {
                         None
                     };
-                    let (ts, to): (&[u8], usize) = match &top_owned {
+                    let (ts, to): (&[P], usize) = match &top_owned {
                         Some(v) => (v, top_off),
                         None => (&db_line, lpf_off),
                     };
-                    ns_wiener_single_y_8bpc(
+                    ns_wiener_single_y(
                         p,
                         cur_off,
                         stride_u,
@@ -1941,6 +2106,7 @@ fn lr_stripe_8bpc(
                         &filter,
                         edges,
                         &ll_mask_buf,
+                        ctx.bitdepth,
                     );
                 }
                 WKind::NsSingle => {
@@ -1960,11 +2126,11 @@ fn lr_stripe_8bpc(
                     } else {
                         None
                     };
-                    let (ts, to): (&[u8], usize) = match &top_owned {
+                    let (ts, to): (&[P], usize) = match &top_owned {
                         Some(v) => (v, top_off),
                         None => (&db_line, lpf_off),
                     };
-                    ns_wiener_single_uv_8bpc(
+                    ns_wiener_single_uv(
                         p,
                         cur_off,
                         stride_u,
@@ -1988,6 +2154,7 @@ fn lr_stripe_8bpc(
                         ctx.cfl_ds_filter_index,
                         edges,
                         &ll_mask_buf,
+                        ctx.bitdepth,
                     );
                 }
                 WKind::NsMulti => {
@@ -2009,11 +2176,11 @@ fn lr_stripe_8bpc(
                     } else {
                         None
                     };
-                    let (ts, to): (&[u8], usize) = match &top_owned {
+                    let (ts, to): (&[P], usize) = match &top_owned {
                         Some(v) => (v, top_off),
                         None => (&db_line, lpf_off),
                     };
-                    ns_wiener_multi_8bpc(
+                    ns_wiener_multi(
                         p,
                         cur_off,
                         stride_u,
@@ -2030,6 +2197,7 @@ fn lr_stripe_8bpc(
                         ctx.base_q,
                         edges,
                         &ll_mask_buf,
+                        ctx.bitdepth,
                     );
                     noskip_offset += (stripe_h >> 2) as usize;
                 }
@@ -2039,11 +2207,11 @@ fn lr_stripe_8bpc(
                     } else {
                         None
                     };
-                    let (ts, to): (&[u8], usize) = match &top_owned {
+                    let (ts, to): (&[P], usize) = match &top_owned {
                         Some(v) => (v, top_off),
                         None => (&db_line, lpf_off),
                     };
-                    pc_wiener_8bpc(
+                    pc_wiener(
                         p,
                         cur_off,
                         stride_u,
@@ -2060,6 +2228,7 @@ fn lr_stripe_8bpc(
                         ctx.base_q,
                         edges,
                         &ll_mask_buf,
+                        ctx.bitdepth,
                     );
                     noskip_offset += (stripe_h >> 2) as usize;
                 }
@@ -2068,7 +2237,7 @@ fn lr_stripe_8bpc(
         }
 
         if gdf_enabled {
-            gdf_add_8bpc(
+            gdf_add(
                 &mut p[cur_off..],
                 stride_u,
                 &gdf_err,
@@ -2077,6 +2246,7 @@ fn lr_stripe_8bpc(
                 stripe_u,
                 gdf_scale,
                 &ll_mask_buf,
+                ctx.bitdepth,
             );
         }
 
@@ -2095,9 +2265,9 @@ fn lr_stripe_8bpc(
     }
 }
 
-fn lr_sbrow(
-    ctx: &LrContext,
-    p: &mut [u8],
+fn lr_sbrow_plane<P: Pixel>(
+    ctx: &LrContext<P>,
+    p: &mut [P],
     p_off: usize,
     y: i32,
     w: i32,
@@ -2120,7 +2290,7 @@ fn lr_sbrow(
     let row_y = y + ((8 >> ss_ver) * (first_sby_in_tile_row != FirstSbInTileRow::None) as i32);
     let shift_hor = 8 - ss_hor;
 
-    let mut pre_lr_border = [[[0u8; 6]; 264]; 2];
+    let mut pre_lr_border = [[[P::default(); 6]; 264]; 2];
 
     let mut aligned_unit_pos = row_y & !(unit_size - 1);
     if aligned_unit_pos != 0 && aligned_unit_pos + half_unit_size > h {
@@ -2171,7 +2341,7 @@ fn lr_sbrow(
         let lr_u = lr_unit_0;
         if lr_sb < ctx.lr_mask.len() && lr_u < ctx.lr_mask[lr_sb].lr[plane as usize].len() {
             let lr_unit = &ctx.lr_mask[lr_sb].lr[plane as usize][lr_u];
-            lr_stripe_8bpc(
+            lr_stripe(
                 ctx,
                 p,
                 cur_p_off,
@@ -2202,7 +2372,7 @@ fn lr_sbrow(
     let lr_u = lr_unit_0;
     if lr_sb < ctx.lr_mask.len() && lr_u < ctx.lr_mask[lr_sb].lr[plane as usize].len() {
         let lr_unit = &ctx.lr_mask[lr_sb].lr[plane as usize][lr_u];
-        lr_stripe_8bpc(
+        lr_stripe(
             ctx,
             p,
             cur_p_off,
@@ -2220,7 +2390,7 @@ fn lr_sbrow(
     }
 }
 
-pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
+pub fn lr_sbrow_apply<P: Pixel>(ctx: &LrContext<P>, dst: &mut [&mut [P]; 3], sby: i32) {
     let dst_stride = ctx.cur_stride;
     // For monochrome frames the chroma destination planes are empty; a malformed
     // stream can still signal chroma restoration, so mask off the U/V restore
@@ -2257,7 +2427,7 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
             };
             if restore_planes & LR_RESTORE_U != 0 {
                 let abs_stride_uv = dst_stride[1].unsigned_abs();
-                lr_sbrow(
+                lr_sbrow_plane(
                     ctx,
                     dst[1],
                     (y_stripe.max(0) as usize) * abs_stride_uv,
@@ -2272,7 +2442,7 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
             }
             if restore_planes & LR_RESTORE_V != 0 {
                 let abs_stride_uv = dst_stride[1].unsigned_abs();
-                lr_sbrow(
+                lr_sbrow_plane(
                     ctx,
                     dst[2],
                     (y_stripe.max(0) as usize) * abs_stride_uv,
@@ -2295,7 +2465,7 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
         };
         if restore_planes & LR_RESTORE_U != 0 {
             let abs_stride_uv = dst_stride[1].unsigned_abs();
-            lr_sbrow(
+            lr_sbrow_plane(
                 ctx,
                 dst[1],
                 (y_stripe.max(0) as usize) * abs_stride_uv,
@@ -2310,7 +2480,7 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
         }
         if restore_planes & LR_RESTORE_V != 0 {
             let abs_stride_uv = dst_stride[1].unsigned_abs();
-            lr_sbrow(
+            lr_sbrow_plane(
                 ctx,
                 dst[2],
                 (y_stripe.max(0) as usize) * abs_stride_uv,
@@ -2335,7 +2505,7 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
 
         if sby != 0 && first_sby_in_tile_row_flag != 0 {
             let abs_stride_y = dst_stride[0].unsigned_abs();
-            lr_sbrow(
+            lr_sbrow_plane(
                 ctx,
                 dst[0],
                 (y_stripe.max(0) as usize) * abs_stride_y,
@@ -2350,7 +2520,7 @@ pub fn lr_sbrow_8bpc(ctx: &LrContext, dst: &mut [&mut [u8]; 3], sby: i32) {
             y_stripe += 8;
         }
         let abs_stride_y = dst_stride[0].unsigned_abs();
-        lr_sbrow(
+        lr_sbrow_plane(
             ctx,
             dst[0],
             (y_stripe.max(0) as usize) * abs_stride_y,
@@ -2419,7 +2589,7 @@ mod tests {
         let left = vec![0u8; 32];
         let mut dst = vec![0u8; 32];
         let o = 6;
-        backup_row_8bpc(&mut dst, o, &src, 0, &left, 0, 16, 6, 0);
+        backup_row(&mut dst, o, &src, 0, &left, 0, 16, 6, 0);
         assert!(dst[0..o].iter().all(|&v| v == 10));
         assert_eq!(&dst[o..o + 16], &src[0..16]);
         assert!(dst[o + 16..o + 16 + 6].iter().all(|&v| v == src[15]));
@@ -2433,7 +2603,7 @@ mod tests {
         let left = vec![20u8; 16];
         let mut dst = vec![0u8; 32];
         let o = 6;
-        backup_row_8bpc(
+        backup_row(
             &mut dst,
             o,
             &src,
@@ -2452,7 +2622,7 @@ mod tests {
         let src = vec![42u8; 32];
         let mut dst = vec![0u8; 32];
         let o = 6;
-        backup_row_lpf_8bpc(&mut dst, o, &src, 0, 16, 6, 0);
+        backup_row_lpf(&mut dst, o, &src, 0, 16, 6, 0);
         assert!(dst[0..o].iter().all(|&v| v == 42));
         assert_eq!(&dst[o..o + 16], &src[0..16]);
         assert!(dst[o + 16..o + 16 + 6].iter().all(|&v| v == src[15]));
@@ -2463,7 +2633,7 @@ mod tests {
         let row = vec![128u8; 32];
         let rows: Vec<&[u8]> = vec![&row; 5];
         let mut dst = [[0u16; 4]; 16];
-        compute_gradient_row_8bpc(&mut dst, &rows, 2, 2, 4, 0);
+        compute_gradient_row(&mut dst, &rows, 2, 2, 4, 0);
         for d in &dst[..3] {
             for &v in d {
                 assert_eq!(v, 0);
@@ -2477,7 +2647,7 @@ mod tests {
         let bright = vec![200u8; 32];
         let rows: Vec<&[u8]> = vec![&flat, &bright, &flat, &bright, &flat];
         let mut dst = [[0u16; 4]; 16];
-        compute_gradient_row_8bpc(&mut dst, &rows, 2, 2, 4, 0);
+        compute_gradient_row(&mut dst, &rows, 2, 2, 4, 0);
         assert!(dst[0][0] > 0);
     }
 
@@ -2486,7 +2656,7 @@ mod tests {
         let mut p = vec![128u8; 64];
         let err = vec![10i8; 64];
         let ll_mask = vec![[0u16; 4]; 2];
-        gdf_add_8bpc(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask);
+        gdf_add(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask, 8);
         assert!(p[0] > 128);
     }
 
@@ -2495,7 +2665,7 @@ mod tests {
         let mut p = vec![128u8; 64];
         let err = vec![10i8; 64];
         let ll_mask = vec![[0xFFFFu16; 4]; 2];
-        gdf_add_8bpc(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask);
+        gdf_add(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask, 8);
         assert!(p.iter().all(|&v| v == 128));
     }
 
@@ -2504,7 +2674,7 @@ mod tests {
         let mut p = vec![128u8; 64];
         let err = vec![-10i8; 64];
         let ll_mask = vec![[0u16; 4]; 2];
-        gdf_add_8bpc(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask);
+        gdf_add(&mut p, 8, &err, 8, 8, 8, 16, &ll_mask, 8);
         assert!(p[0] < 128);
     }
 
@@ -2513,7 +2683,7 @@ mod tests {
         let row = vec![128u8; 64];
         let rows: Vec<&[u8]> = vec![&row; 16];
         let noskip = vec![0xFFFFu16; 16];
-        let idx = get_class_lut_idx_8bpc(&rows, 6, 0, &noskip, 32, 1, 1, 8);
+        let idx = get_class_lut_idx(&rows, 6, 0, &noskip, 32, 1, 1, 8, 0);
         let _ = idx;
     }
 
@@ -2522,7 +2692,7 @@ mod tests {
         let src = vec![42u8; 64];
         let mut dst = vec![0u8; 32];
         let o = 6;
-        backup_row_luma_8bpc(&mut dst, o, &src, 0, 16, 16, 0, 0, 0, 0);
+        backup_row_luma(&mut dst, o, &src, 0, 16, 16, 0, 0, 0, 0);
         assert_eq!(&dst[o..o + 16], &src[0..16]);
         assert!(dst[o - 4..o].iter().all(|&v| v == 42));
     }
@@ -2537,7 +2707,7 @@ mod tests {
         }
         let mut dst = vec![0u8; 32];
         let o = 4;
-        backup_row_luma_8bpc(&mut dst, o, &src, 4, stride, 8, 0, 1, 1, 0);
+        backup_row_luma(&mut dst, o, &src, 4, stride, 8, 0, 1, 1, 0);
         assert_eq!(dst[o], ((100 + 200 + 100 + 200) >> 2) as u8);
     }
 
@@ -2551,7 +2721,7 @@ mod tests {
         }
         let mut dst = vec![0u8; 32];
         let o = 4;
-        backup_row_luma_8bpc(&mut dst, o, &src, 4, stride, 8, 0, 0, 1, 1);
+        backup_row_luma(&mut dst, o, &src, 4, stride, 8, 0, 0, 1, 1);
         for x in 0..8 {
             assert_eq!(dst[o + x], 150);
         }
@@ -2567,7 +2737,7 @@ mod tests {
         }
         let mut dst = vec![0u8; 32];
         let o = 4;
-        backup_row_luma_8bpc(&mut dst, o, &src, 4, stride, 8, 0, 0, 1, 2);
+        backup_row_luma(&mut dst, o, &src, 4, stride, 8, 0, 0, 1, 2);
         for x in 0..8 {
             assert_eq!(dst[o + x], 100);
         }
@@ -2579,7 +2749,7 @@ mod tests {
         let src = vec![80u8; stride * 2 + 16];
         let mut dst = vec![0u8; 32];
         let o = 6;
-        backup_row_luma_8bpc(
+        backup_row_luma(
             &mut dst,
             o,
             &src,
@@ -2614,7 +2784,7 @@ mod tests {
         let filter = [0i8; 16];
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
-        ns_wiener_single_y_8bpc(
+        ns_wiener_single_y(
             &mut p,
             p_off,
             stride,
@@ -2628,6 +2798,7 @@ mod tests {
             &filter,
             edges,
             &ll_mask,
+            8,
         );
         for y in 0..h {
             for x in 0..w {
@@ -2655,7 +2826,7 @@ mod tests {
         let filter = [4i8; 16];
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
-        ns_wiener_single_y_8bpc(
+        ns_wiener_single_y(
             &mut p,
             p_off,
             stride,
@@ -2669,6 +2840,7 @@ mod tests {
             &filter,
             edges,
             &ll_mask,
+            8,
         );
         for y in 0..h {
             for x in 0..w {
@@ -2695,7 +2867,7 @@ mod tests {
         let filter = [8i8, 6, 4, 3, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0];
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
-        ns_wiener_single_y_8bpc(
+        ns_wiener_single_y(
             &mut p,
             p_off,
             stride,
@@ -2709,6 +2881,7 @@ mod tests {
             &filter,
             edges,
             &ll_mask,
+            8,
         );
         let filtered = p[p_off + 4 * stride + 4];
         assert!(
@@ -2785,7 +2958,7 @@ mod tests {
         let filters_user = [[0i8; 18]; 1];
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
 
-        ns_wiener_multi_8bpc(
+        ns_wiener_multi(
             &mut p,
             p_off,
             stride,
@@ -2802,6 +2975,7 @@ mod tests {
             32,
             edges,
             &ll_mask,
+            8,
         );
 
         for y in 0..h {
@@ -2823,7 +2997,7 @@ mod tests {
         filters_pt[0][12] = 128;
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
 
-        pc_wiener_8bpc(
+        pc_wiener(
             &mut p,
             p_off,
             stride,
@@ -2840,6 +3014,7 @@ mod tests {
             32,
             edges,
             &ll_mask,
+            8,
         );
 
         for y in 0..h {
@@ -2864,7 +3039,7 @@ mod tests {
         let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
 
-        ns_wiener_multi_8bpc(
+        ns_wiener_multi(
             &mut p,
             p_off,
             stride,
@@ -2881,6 +3056,7 @@ mod tests {
             32,
             edges,
             &ll_mask,
+            8,
         );
 
         for y in 0..h {
@@ -2913,7 +3089,7 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
 
-        ns_wiener_single_uv_8bpc(
+        ns_wiener_single_uv(
             &mut p,
             p_off,
             stride,
@@ -2937,6 +3113,7 @@ mod tests {
             2,
             edges,
             &ll_mask,
+            8,
         );
 
         for y in 0..h {
@@ -2965,7 +3142,7 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0u16; 4]; (h >> 2) + 1];
 
-        ns_wiener_single_uv_8bpc(
+        ns_wiener_single_uv(
             &mut p,
             p_off,
             stride,
@@ -2989,6 +3166,7 @@ mod tests {
             2,
             edges,
             &ll_mask,
+            8,
         );
 
         for y in 0..h {
@@ -3017,7 +3195,7 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];
 
-        ns_wiener_single_uv_8bpc(
+        ns_wiener_single_uv(
             &mut p,
             p_off,
             stride,
@@ -3041,6 +3219,7 @@ mod tests {
             2,
             edges,
             &ll_mask,
+            8,
         );
 
         for y in 0..h {
@@ -3070,7 +3249,7 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let mut dst = vec![0i8; h * w];
 
-        gdf_prep_8bpc(
+        gdf_prep(
             &mut dst,
             w,
             &p,
@@ -3086,6 +3265,7 @@ mod tests {
             0,
             0,
             edges,
+            8,
         );
 
         for y in 0..h {
@@ -3108,7 +3288,7 @@ mod tests {
         let edges = LR_HAVE_TOP | LR_HAVE_BOTTOM | LR_HAVE_LEFT | LR_HAVE_RIGHT;
         let mut dst = vec![0i8; h * w];
 
-        gdf_prep_8bpc(
+        gdf_prep(
             &mut dst,
             w,
             &p,
@@ -3124,6 +3304,7 @@ mod tests {
             1,
             0,
             edges,
+            8,
         );
 
         for y in 0..h {

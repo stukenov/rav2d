@@ -2286,6 +2286,109 @@ fn bit_exact_hbd_sweep() {
     }
 }
 
+/// Bit-exact HBD reconstruction with a SINGLE in-loop filter enabled on both
+/// decoders, once per filter. Slices the HBD filter port so each ported stage
+/// is validated in isolation against dav2d at 10-bit. On the staged vectors
+/// CDEF, CCSO and GDF actually engage; deblock and Wiener are no-ops there
+/// (levels off in the streams) but still assert the stages do not corrupt.
+#[test]
+fn bit_exact_hbd_perfilter_sweep() {
+    let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
+    // (dav2d DAV2D_INLOOPFILTER_* bit, matching rav2d setting)
+    let filters = [
+        ("deblock", 1u32, rav2d::InloopFilterType::Deblock),
+        ("cdef", 2, rav2d::InloopFilterType::Cdef),
+        ("ccso", 4, rav2d::InloopFilterType::Restoration),
+        ("wiener", 8, rav2d::InloopFilterType::Wiener),
+        ("gdf", 16, rav2d::InloopFilterType::Gdf),
+    ];
+    let mut all = Vec::new();
+    for clip in clips {
+        let path = data(clip);
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            continue;
+        }
+        for (name, dav_mask, rav_filter) in filters {
+            let reference = dav2d_decode_filters_invisible(&path, dav_mask);
+            let got = rav2d_decode_filters(&path, rav_filter);
+            assert!(!reference.is_empty(), "{clip}: dav2d produced no frames");
+
+            if got.len() != reference.len() {
+                all.push(format!(
+                    "{clip} [{name}]: frame count mismatch (dav2d={}, rav2d={})",
+                    reference.len(),
+                    got.len()
+                ));
+                continue;
+            }
+            for (fi, (r, g)) in reference.iter().zip(got.iter()).enumerate() {
+                if let Some((pl, idx, rv, gv)) = first_hbd_divergence(r, g) {
+                    all.push(format!(
+                        "{clip} [{name}] frame {fi}: first diff plane {pl} sample {idx} dav2d={rv} rav2d={gv}"
+                    ));
+                }
+            }
+        }
+    }
+    if !all.is_empty() {
+        panic!(
+            "HBD per-filter sweep not bit-exact:\n  {}",
+            all.join("\n  ")
+        );
+    }
+}
+
+/// Bit-exact reconstruction for 10-bit (HBD) streams with the full in-loop
+/// filter pipeline ON (film grain off). The HBD analogue of
+/// `bit_exact_full_clip_filtered_sweep`: proves deblock/CDEF/CCSO/LR run for
+/// `BitDepth16` and match dav2d byte-for-byte.
+#[test]
+fn bit_exact_hbd_filtered_sweep() {
+    let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
+    let mut all = Vec::new();
+    for clip in clips {
+        let path = data(clip);
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            continue;
+        }
+        let reference = dav2d_decode_filters_invisible(&path, DAV2D_INLOOPFILTER_ALL);
+        let got = rav2d_decode_filters(&path, rav2d::InloopFilterType::All);
+        assert!(!reference.is_empty(), "{clip}: dav2d produced no frames");
+        assert_eq!(reference[0].bpc, 10, "{clip}: expected 10-bit dav2d output");
+
+        if got.len() != reference.len() {
+            all.push(format!(
+                "{clip}: frame count mismatch (dav2d={}, rav2d={})",
+                reference.len(),
+                got.len()
+            ));
+            continue;
+        }
+        let mut clip_ok = true;
+        for (fi, (r, g)) in reference.iter().zip(got.iter()).enumerate() {
+            if (r.w, r.h, r.bpc, r.layout) != (g.w, g.h, g.bpc, g.layout) {
+                all.push(format!("{clip} frame {fi}: dims/bpc mismatch"));
+                clip_ok = false;
+                continue;
+            }
+            if let Some((pl, idx, rv, gv)) = first_hbd_divergence(r, g) {
+                all.push(format!(
+                    "{clip} frame {fi}: first diff plane {pl} sample {idx} dav2d={rv} rav2d={gv}"
+                ));
+                clip_ok = false;
+            }
+        }
+        if clip_ok {
+            eprintln!("{clip}: HBD filtered bit-exact ({} frames)", got.len());
+        }
+    }
+    if !all.is_empty() {
+        panic!("HBD filtered sweep not bit-exact:\n  {}", all.join("\n  "));
+    }
+}
+
 /// Smoke test: rav2d must *decode* the 10-bit vectors (produce 10-bit output of
 /// the right geometry) without panicking, even before the pixels are bit-exact.
 /// Unlike the bit-exact oracle this is not `#[ignore]`d, so it guards the HBD
