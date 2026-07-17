@@ -1,5 +1,6 @@
 use crate::headers::FilmGrainData;
 use crate::intops::iclip;
+use crate::pixel::Pixel;
 use crate::tables::GAUSSIAN_SEQUENCE;
 
 pub const GRAIN_WIDTH: usize = 82;
@@ -104,9 +105,11 @@ pub fn generate_grain_y(
     buf: &mut [[i16; GRAIN_WIDTH]; GRAIN_HEIGHT],
     data: &FilmGrainData,
     mut seed: u32,
+    bitdepth: u32,
 ) {
-    let shift = 4 + data.grain_scale_shift;
-    let grain_ctr = 128;
+    let bitdepth_min_8 = bitdepth as i32 - 8;
+    let shift = 4 - bitdepth_min_8 + data.grain_scale_shift;
+    let grain_ctr = 128 << bitdepth_min_8;
     let grain_min = -grain_ctr;
     let grain_max = grain_ctr - 1;
 
@@ -151,10 +154,12 @@ pub fn generate_grain_uv(
     uv: usize,
     subx: bool,
     suby: bool,
+    bitdepth: u32,
 ) {
     seed ^= if uv != 0 { 0x49d8 } else { 0xb524 };
-    let shift = 4 + data.grain_scale_shift;
-    let grain_ctr = 128;
+    let bitdepth_min_8 = bitdepth as i32 - 8;
+    let shift = 4 - bitdepth_min_8 + data.grain_scale_shift;
+    let grain_ctr = 128 << bitdepth_min_8;
     let grain_min = -grain_ctr;
     let grain_max = grain_ctr - 1;
 
@@ -229,28 +234,30 @@ pub fn sample_lut(
     grain_lut[offy + y + (bs >> suby) * by][offx + x + (bs >> subx) * bx]
 }
 
-pub fn fgy_32x32xn_8bpc(
-    dst: &mut [u8],
-    src: &[u8],
+pub fn fgy_32x32xn<P: Pixel>(
+    dst: &mut [P],
+    src: &[P],
     stride: usize,
     data: &FilmGrainData,
     in_seed: u32,
     pw: usize,
-    scaling: &[u8; 256],
+    scaling: &[u8],
     grain_lut: &[[i16; GRAIN_WIDTH]],
     bh: i32,
     row_num: i32,
+    bitdepth: u32,
 ) {
     let rows = 1 + (data.overlap_flag && row_num > 0) as usize;
-    let grain_ctr = 128;
+    let bitdepth_min_8 = bitdepth as i32 - 8;
+    let grain_ctr = 128 << bitdepth_min_8;
     let grain_min = -grain_ctr;
     let grain_max = grain_ctr - 1;
     let bs = (16 << data.block_size) as usize;
 
     let (min_value, max_value) = if data.clip_to_restricted_range {
-        (16i32, 235i32)
+        (16i32 << bitdepth_min_8, 235i32 << bitdepth_min_8)
     } else {
-        (0, 255)
+        (0, (1i32 << bitdepth) - 1)
     };
 
     let mut seed = [0u32; 2];
@@ -302,11 +309,12 @@ pub fn fgy_32x32xn_8bpc(
                 let grain =
                     sample_lut(grain_lut, bs, &offsets, 0, 0, 0, 0, x as usize, y as usize) as i32;
                 let si = y as usize * stride + x as usize + bx;
+                let sv = Into::<i32>::into(src[si]);
                 let noise = round2(
-                    scaling[src[si] as usize] as i32 * grain,
+                    scaling[sv as usize] as i32 * grain,
                     data.scaling_shift as u32,
                 );
-                dst[si] = iclip(src[si] as i32 + noise, min_value, max_value) as u8;
+                dst[si] = P::from_i32(iclip(sv + noise, min_value, max_value));
             }
             for x in 0..xstart {
                 let grain =
@@ -319,11 +327,12 @@ pub fn fgy_32x32xn_8bpc(
                     grain_max,
                 );
                 let si = y as usize * stride + x as usize + bx;
+                let sv = Into::<i32>::into(src[si]);
                 let noise = round2(
-                    scaling[src[si] as usize] as i32 * grain,
+                    scaling[sv as usize] as i32 * grain,
                     data.scaling_shift as u32,
                 );
-                dst[si] = iclip(src[si] as i32 + noise, min_value, max_value) as u8;
+                dst[si] = P::from_i32(iclip(sv + noise, min_value, max_value));
             }
         }
 
@@ -339,11 +348,12 @@ pub fn fgy_32x32xn_8bpc(
                     grain_max,
                 );
                 let si = y as usize * stride + x as usize + bx;
+                let sv = Into::<i32>::into(src[si]);
                 let noise = round2(
-                    scaling[src[si] as usize] as i32 * grain,
+                    scaling[sv as usize] as i32 * grain,
                     data.scaling_shift as u32,
                 );
-                dst[si] = iclip(src[si] as i32 + noise, min_value, max_value) as u8;
+                dst[si] = P::from_i32(iclip(sv + noise, min_value, max_value));
             }
             for x in 0..xstart {
                 let mut top =
@@ -372,11 +382,12 @@ pub fn fgy_32x32xn_8bpc(
                     grain_max,
                 );
                 let si = y as usize * stride + x as usize + bx;
+                let sv = Into::<i32>::into(src[si]);
                 let noise = round2(
-                    scaling[src[si] as usize] as i32 * grain,
+                    scaling[sv as usize] as i32 * grain,
                     data.scaling_shift as u32,
                 );
-                dst[si] = iclip(src[si] as i32 + noise, min_value, max_value) as u8;
+                dst[si] = P::from_i32(iclip(sv + noise, min_value, max_value));
             }
         }
 
@@ -384,34 +395,39 @@ pub fn fgy_32x32xn_8bpc(
     }
 }
 
-pub fn fguv_32x32xn_8bpc(
-    dst: &mut [u8],
-    src: &[u8],
+pub fn fguv_32x32xn<P: Pixel>(
+    dst: &mut [P],
+    src: &[P],
     stride: usize,
     data: &FilmGrainData,
     in_seed: u32,
     pw: usize,
-    scaling: &[u8; 256],
+    scaling: &[u8],
     grain_lut: &[[i16; GRAIN_WIDTH]],
     bh: i32,
     row_num: i32,
-    luma_row: &[u8],
+    luma_row: &[P],
     luma_stride: usize,
     uv: usize,
     is_id: bool,
     sx: usize,
     sy: usize,
+    bitdepth: u32,
 ) {
     let rows = 1 + (data.overlap_flag && row_num > 0) as usize;
-    let grain_ctr = 128;
+    let bitdepth_min_8 = bitdepth as i32 - 8;
+    let grain_ctr = 128 << bitdepth_min_8;
     let grain_min = -grain_ctr;
     let grain_max = grain_ctr - 1;
     let bs = (16 << data.block_size) as usize;
 
     let (min_value, max_value) = if data.clip_to_restricted_range {
-        (16i32, if is_id { 235 } else { 240 })
+        (
+            16i32 << bitdepth_min_8,
+            (if is_id { 235i32 } else { 240 }) << bitdepth_min_8,
+        )
     } else {
-        (0, 255)
+        (0, (1i32 << bitdepth) - 1)
     };
 
     let mut seed = [0u32; 2];
@@ -462,22 +478,26 @@ pub fn fguv_32x32xn_8bpc(
             ($x:expr, $y:expr, $grain:expr) => {{
                 let lx = (bx + $x as usize) << sx;
                 let ly = ($y as usize) << sy;
-                let luma = luma_row[ly * luma_stride + lx];
-                let avg: u8 = if sx != 0 {
-                    ((luma as u16 + luma_row[ly * luma_stride + lx + 1] as u16 + 1) >> 1) as u8
+                let luma = Into::<i32>::into(luma_row[ly * luma_stride + lx]);
+                let avg: i32 = if sx != 0 {
+                    (luma + Into::<i32>::into(luma_row[ly * luma_stride + lx + 1]) + 1) >> 1
                 } else {
                     luma
                 };
                 let si = $y as usize * stride + bx + $x as usize;
+                let sv = Into::<i32>::into(src[si]);
                 let val = if !data.chroma_scaling_from_luma {
-                    let combined =
-                        avg as i32 * data.uv_luma_mult[uv] + src[si] as i32 * data.uv_mult[uv];
-                    iclip((combined >> 6) + data.uv_offset[uv], 0, 255) as usize
+                    let combined = avg * data.uv_luma_mult[uv] + sv * data.uv_mult[uv];
+                    iclip(
+                        (combined >> 6) + data.uv_offset[uv] * (1 << bitdepth_min_8),
+                        0,
+                        (1i32 << bitdepth) - 1,
+                    ) as usize
                 } else {
                     avg as usize
                 };
                 let noise = round2(scaling[val] as i32 * $grain, data.scaling_shift as u32);
-                dst[si] = iclip(src[si] as i32 + noise, min_value, max_value) as u8;
+                dst[si] = P::from_i32(iclip(sv + noise, min_value, max_value));
             }};
         }
 
@@ -583,43 +603,70 @@ impl Default for GrainLut {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn prep_grain_8bpc(
+pub fn prep_grain(
     fgd: &FilmGrainData,
     grain_lut: &mut GrainLut,
     scaling: &mut [Vec<u8>; 3],
     seed: u32,
     ss_x: bool,
     ss_y: bool,
+    bitdepth: u32,
 ) {
     // Generate grain LUTs as needed (dav2d_prep_grain, fg_apply_tmpl.c). The Y
     // LUT is ALWAYS generated: the chroma LUTs derive from it. The chroma LUTs
     // are generated with the plane's subsampling so the sub-grid dimensions
     // match the picture layout (dav2d selects generate_grain_uv[layout-1]).
-    generate_grain_y(&mut grain_lut.y, fgd, seed);
+    generate_grain_y(&mut grain_lut.y, fgd, seed, bitdepth);
 
     if fgd.num_points[1] > 0 || fgd.chroma_scaling_from_luma {
-        generate_grain_uv(&mut grain_lut.u, &grain_lut.y, fgd, seed, 0, ss_x, ss_y);
+        generate_grain_uv(
+            &mut grain_lut.u,
+            &grain_lut.y,
+            fgd,
+            seed,
+            0,
+            ss_x,
+            ss_y,
+            bitdepth,
+        );
     }
     if fgd.num_points[2] > 0 || fgd.chroma_scaling_from_luma {
-        generate_grain_uv(&mut grain_lut.v, &grain_lut.y, fgd, seed, 1, ss_x, ss_y);
+        generate_grain_uv(
+            &mut grain_lut.v,
+            &grain_lut.y,
+            fgd,
+            seed,
+            1,
+            ss_x,
+            ss_y,
+            bitdepth,
+        );
     }
 
-    // Scaling LUTs (dav2d generates one per plane with scaling points).
+    // Scaling LUTs (dav2d generates one per plane with scaling points). The
+    // table is indexed by pixel value, so its size is `1 << bitdepth`.
+    let scaling_size = 1usize << bitdepth;
+    let gen_lut = |dst: &mut Vec<u8>, points: &[[u8; 2]]| {
+        dst.resize(scaling_size, 0);
+        if bitdepth == 8 {
+            generate_scaling_8bpc(points, dst.as_mut_slice().try_into().unwrap());
+        } else {
+            generate_scaling_hbd(bitdepth, points, dst.as_mut_slice());
+        }
+    };
     if fgd.num_points[0] > 0 {
-        scaling[0].resize(256, 0);
-        generate_scaling_8bpc(
+        gen_lut(
+            &mut scaling[0],
             &fgd.points[0][..fgd.num_points[0] as usize],
-            scaling[0].as_mut_slice().try_into().unwrap(),
         );
     }
 
     if !fgd.chroma_scaling_from_luma {
         for uv in 0..2 {
             if fgd.num_points[uv + 1] > 0 {
-                scaling[uv + 1].resize(256, 0);
-                generate_scaling_8bpc(
+                gen_lut(
+                    &mut scaling[uv + 1],
                     &fgd.points[uv + 1][..fgd.num_points[uv + 1] as usize],
-                    scaling[uv + 1].as_mut_slice().try_into().unwrap(),
                 );
             }
         }
@@ -627,13 +674,13 @@ pub fn prep_grain_8bpc(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn apply_grain_row_8bpc(
-    dst_y: &mut [u8],
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
-    src_y: &[u8],
-    src_u: &[u8],
-    src_v: &[u8],
+pub fn apply_grain_row<P: Pixel>(
+    dst_y: &mut [P],
+    dst_u: &mut [P],
+    dst_v: &mut [P],
+    src_y: &[P],
+    src_u: &[P],
+    src_v: &[P],
     y_stride: isize,
     uv_stride: isize,
     fgd: &FilmGrainData,
@@ -645,6 +692,7 @@ pub fn apply_grain_row_8bpc(
     seed: u32,
     ss_x: bool,
     ss_y: bool,
+    bitdepth: u32,
 ) {
     // Grain block height in luma rows: 16 or 32 per `block_size` (dav2d
     // dav2d_apply_grain_row, fg_apply_tmpl.c: `bs = 16 << data->block_size`).
@@ -667,17 +715,18 @@ pub fn apply_grain_row_8bpc(
             return;
         };
 
-        fgy_32x32xn_8bpc(
+        fgy_32x32xn(
             dst_slice,
             src_slice,
             y_stride.unsigned_abs(),
             fgd,
             seed,
             w,
-            scaling[0].as_slice().try_into().unwrap(),
+            scaling[0].as_slice(),
             &grain_lut.y,
             bh as i32,
             row as i32,
+            bitdepth,
         );
     }
 
@@ -693,8 +742,8 @@ pub fn apply_grain_row_8bpc(
     let luma_off = row_start * y_stride.unsigned_abs();
 
     if has_uv(0) && uv_off < src_u.len() && uv_off < dst_u.len() {
-        let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 0).try_into().unwrap();
-        fguv_32x32xn_8bpc(
+        let uv_scaling: &[u8] = scaling_for_uv(scaling, fgd, 0);
+        fguv_32x32xn(
             &mut dst_u[uv_off..],
             &src_u[uv_off..],
             uv_stride.unsigned_abs(),
@@ -711,12 +760,13 @@ pub fn apply_grain_row_8bpc(
             fgd.mc_identity,
             ss_x as usize,
             ss_y as usize,
+            bitdepth,
         );
     }
 
     if has_uv(1) && uv_off < src_v.len() && uv_off < dst_v.len() {
-        let uv_scaling: &[u8; 256] = scaling_for_uv(scaling, fgd, 1).try_into().unwrap();
-        fguv_32x32xn_8bpc(
+        let uv_scaling: &[u8] = scaling_for_uv(scaling, fgd, 1);
+        fguv_32x32xn(
             &mut dst_v[uv_off..],
             &src_v[uv_off..],
             uv_stride.unsigned_abs(),
@@ -733,6 +783,7 @@ pub fn apply_grain_row_8bpc(
             fgd.mc_identity,
             ss_x as usize,
             ss_y as usize,
+            bitdepth,
         );
     }
 }
@@ -746,13 +797,13 @@ fn scaling_for_uv<'a>(scaling: &'a [Vec<u8>; 3], fgd: &FilmGrainData, uv: usize)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn apply_grain_8bpc(
-    dst_y: &mut [u8],
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
-    src_y: &[u8],
-    src_u: &[u8],
-    src_v: &[u8],
+pub fn apply_grain<P: Pixel>(
+    dst_y: &mut [P],
+    dst_u: &mut [P],
+    dst_v: &mut [P],
+    src_y: &[P],
+    src_u: &[P],
+    src_v: &[P],
     y_stride: isize,
     uv_stride: isize,
     fgd: &FilmGrainData,
@@ -761,10 +812,11 @@ pub fn apply_grain_8bpc(
     seed: u32,
     ss_x: bool,
     ss_y: bool,
+    bitdepth: u32,
 ) {
-    apply_grain_8bpc_mt(
+    apply_grain_mt(
         dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, w, h, seed, ss_x, ss_y,
-        1,
+        bitdepth, 1,
     );
 }
 
@@ -781,13 +833,13 @@ pub fn apply_grain_8bpc(
 /// `n_threads <= 1` runs the exact sequential loop (single-thread path
 /// unchanged).
 #[allow(clippy::too_many_arguments)]
-pub fn apply_grain_8bpc_mt(
-    dst_y: &mut [u8],
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
-    src_y: &[u8],
-    src_u: &[u8],
-    src_v: &[u8],
+pub fn apply_grain_mt<P: Pixel>(
+    dst_y: &mut [P],
+    dst_u: &mut [P],
+    dst_v: &mut [P],
+    src_y: &[P],
+    src_u: &[P],
+    src_v: &[P],
     y_stride: isize,
     uv_stride: isize,
     fgd: &FilmGrainData,
@@ -796,12 +848,21 @@ pub fn apply_grain_8bpc_mt(
     seed: u32,
     ss_x: bool,
     ss_y: bool,
+    bitdepth: u32,
     n_threads: u32,
 ) {
     let mut grain_lut = GrainLut::new();
     let mut scaling = [Vec::new(), Vec::new(), Vec::new()];
 
-    prep_grain_8bpc(fgd, &mut grain_lut, &mut scaling, seed, ss_x, ss_y);
+    prep_grain(
+        fgd,
+        &mut grain_lut,
+        &mut scaling,
+        seed,
+        ss_x,
+        ss_y,
+        bitdepth,
+    );
 
     // Row tiling matches dav2d_apply_grain: `bs = 16 << block_size`,
     // `rows = (h + bs - 1) / bs` (fg_apply_tmpl.c).
@@ -810,9 +871,9 @@ pub fn apply_grain_8bpc_mt(
 
     if n_threads <= 1 || rows <= 1 {
         for row in 0..rows {
-            apply_grain_row_8bpc(
+            apply_grain_row(
                 dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, &grain_lut,
-                &scaling, w, h, row, seed, ss_x, ss_y,
+                &scaling, w, h, row, seed, ss_x, ss_y, bitdepth,
             );
         }
         return;
@@ -822,19 +883,19 @@ pub fn apply_grain_8bpc_mt(
     // (verified above), so the raw destination pointers are split across jobs
     // without aliasing. Pointers are wrapped in a Send marker because each band's
     // writes stay within its own row range.
-    struct DstPtrs {
-        y: *mut u8,
+    struct DstPtrs<P> {
+        y: *mut P,
         y_len: usize,
-        u: *mut u8,
+        u: *mut P,
         u_len: usize,
-        v: *mut u8,
+        v: *mut P,
         v_len: usize,
     }
     // SAFETY: each row band writes only its disjoint output rows; the pointers
     // are never used to access another band's memory, so sharing them across
     // threads introduces no data race.
-    unsafe impl Send for DstPtrs {}
-    unsafe impl Sync for DstPtrs {}
+    unsafe impl<P> Send for DstPtrs<P> {}
+    unsafe impl<P> Sync for DstPtrs<P> {}
     let dst = DstPtrs {
         y: dst_y.as_mut_ptr(),
         y_len: dst_y.len(),
@@ -857,9 +918,9 @@ pub fn apply_grain_8bpc_mt(
                 let dst_y = unsafe { std::slice::from_raw_parts_mut(dst.y, dst.y_len) };
                 let dst_u = unsafe { std::slice::from_raw_parts_mut(dst.u, dst.u_len) };
                 let dst_v = unsafe { std::slice::from_raw_parts_mut(dst.v, dst.v_len) };
-                apply_grain_row_8bpc(
+                apply_grain_row(
                     dst_y, dst_u, dst_v, src_y, src_u, src_v, y_stride, uv_stride, fgd, grain_lut,
-                    scaling, w, h, row, seed, ss_x, ss_y,
+                    scaling, w, h, row, seed, ss_x, ss_y, bitdepth,
                 );
             }) as Box<dyn FnOnce() + Send + '_>
         })
@@ -948,7 +1009,7 @@ mod tests {
     fn test_generate_grain_y_no_ar() {
         let mut buf = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data = make_grain_data(0, 0);
-        generate_grain_y(&mut buf, &data, 1234);
+        generate_grain_y(&mut buf, &data, 1234, 8);
         let nonzero = buf.iter().flat_map(|r| r.iter()).any(|&v| v != 0);
         assert!(nonzero);
     }
@@ -957,7 +1018,7 @@ mod tests {
     fn test_generate_grain_y_bounded() {
         let mut buf = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data = make_grain_data(0, 0);
-        generate_grain_y(&mut buf, &data, 5678);
+        generate_grain_y(&mut buf, &data, 5678, 8);
         for row in &buf {
             for &v in row.iter() {
                 assert!(v >= -128 && v <= 127, "grain value {} out of 8bpc range", v);
@@ -970,8 +1031,8 @@ mod tests {
         let mut buf1 = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let mut buf2 = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data = make_grain_data(1, 0);
-        generate_grain_y(&mut buf1, &data, 42);
-        generate_grain_y(&mut buf2, &data, 42);
+        generate_grain_y(&mut buf1, &data, 42, 8);
+        generate_grain_y(&mut buf2, &data, 42, 8);
         assert_eq!(buf1, buf2);
     }
 
@@ -982,7 +1043,7 @@ mod tests {
         data.ar_coeffs[0][0] = 10;
         data.ar_coeffs[0][1] = -5;
         data.ar_coeffs[0][2] = 3;
-        generate_grain_y(&mut buf, &data, 999);
+        generate_grain_y(&mut buf, &data, 999, 8);
         for row in &buf {
             for &v in row.iter() {
                 assert!(v >= -128 && v <= 127);
@@ -995,7 +1056,7 @@ mod tests {
         let mut buf = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let buf_y = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data = make_grain_data(0, 0);
-        generate_grain_uv(&mut buf, &buf_y, &data, 100, 0, false, false);
+        generate_grain_uv(&mut buf, &buf_y, &data, 100, 0, false, false, 8);
         let nonzero = buf.iter().flat_map(|r| r.iter()).any(|&v| v != 0);
         assert!(nonzero);
     }
@@ -1005,7 +1066,7 @@ mod tests {
         let mut buf = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let buf_y = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data = make_grain_data(0, 0);
-        generate_grain_uv(&mut buf, &buf_y, &data, 100, 0, true, true);
+        generate_grain_uv(&mut buf, &buf_y, &data, 100, 0, true, true, 8);
         for y in 0..SUB_GRAIN_HEIGHT {
             for x in 0..SUB_GRAIN_WIDTH {
                 assert!(buf[y][x] >= -128 && buf[y][x] <= 127);
@@ -1019,8 +1080,8 @@ mod tests {
         let mut buf_v = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let buf_y = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data = make_grain_data(0, 0);
-        generate_grain_uv(&mut buf_u, &buf_y, &data, 100, 0, false, false);
-        generate_grain_uv(&mut buf_v, &buf_y, &data, 100, 1, false, false);
+        generate_grain_uv(&mut buf_u, &buf_y, &data, 100, 0, false, false, 8);
+        generate_grain_uv(&mut buf_v, &buf_y, &data, 100, 1, false, false, 8);
         assert_ne!(buf_u[0][0], buf_v[0][0]);
     }
 
@@ -1033,7 +1094,7 @@ mod tests {
         data.ar_coeffs[1][0] = 5;
         data.ar_coeffs[1][1] = -3;
         data.ar_coeffs[1][2] = 2;
-        generate_grain_uv(&mut buf, &buf_y, &data, 42, 0, false, false);
+        generate_grain_uv(&mut buf, &buf_y, &data, 42, 0, false, false, 8);
         for row in &buf[..GRAIN_HEIGHT] {
             for &v in row[..GRAIN_WIDTH].iter() {
                 assert!(v >= -128 && v <= 127);
@@ -1070,10 +1131,10 @@ mod tests {
         scaling[128] = 64;
         let mut grain_lut = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data_gen = make_grain_data(0, 0);
-        generate_grain_y(&mut grain_lut, &data_gen, 42);
+        generate_grain_y(&mut grain_lut, &data_gen, 42, 8);
         let data = make_fgy_data();
-        fgy_32x32xn_8bpc(
-            &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0,
+        fgy_32x32xn(
+            &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0, 8,
         );
         let modified = dst.iter().zip(src.iter()).any(|(&d, &s)| d != s);
         assert!(modified);
@@ -1094,10 +1155,10 @@ mod tests {
         }
         let mut grain_lut = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data_gen = make_grain_data(0, 0);
-        generate_grain_y(&mut grain_lut, &data_gen, 7777);
+        generate_grain_y(&mut grain_lut, &data_gen, 7777, 8);
         let data = make_fgy_data();
-        fgy_32x32xn_8bpc(
-            &mut dst, &src, stride, &data, 200, pw, &scaling, &grain_lut, bh, 0,
+        fgy_32x32xn(
+            &mut dst, &src, stride, &data, 200, pw, &scaling, &grain_lut, bh, 0, 8,
         );
         let has_variety = dst.windows(2).any(|w| w[0] != w[1]);
         assert!(has_variety);
@@ -1113,11 +1174,11 @@ mod tests {
         let scaling = [255u8; 256];
         let mut grain_lut = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data_gen = make_grain_data(0, 0);
-        generate_grain_y(&mut grain_lut, &data_gen, 42);
+        generate_grain_y(&mut grain_lut, &data_gen, 42, 8);
         let mut data = make_fgy_data();
         data.clip_to_restricted_range = true;
-        fgy_32x32xn_8bpc(
-            &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0,
+        fgy_32x32xn(
+            &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0, 8,
         );
         for &v in &dst {
             assert!(v >= 16 && v <= 235, "restricted range violated: {}", v);
@@ -1135,13 +1196,13 @@ mod tests {
         let scaling = [50u8; 256];
         let mut grain_lut = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data_gen = make_grain_data(0, 0);
-        generate_grain_y(&mut grain_lut, &data_gen, 42);
+        generate_grain_y(&mut grain_lut, &data_gen, 42, 8);
         let data = make_fgy_data();
-        fgy_32x32xn_8bpc(
-            &mut dst1, &src, stride, &data, 999, pw, &scaling, &grain_lut, bh, 0,
+        fgy_32x32xn(
+            &mut dst1, &src, stride, &data, 999, pw, &scaling, &grain_lut, bh, 0, 8,
         );
-        fgy_32x32xn_8bpc(
-            &mut dst2, &src, stride, &data, 999, pw, &scaling, &grain_lut, bh, 0,
+        fgy_32x32xn(
+            &mut dst2, &src, stride, &data, 999, pw, &scaling, &grain_lut, bh, 0, 8,
         );
         assert_eq!(dst1, dst2);
     }
@@ -1156,8 +1217,8 @@ mod tests {
         let scaling = [0u8; 256];
         let grain_lut = [[50i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data = make_fgy_data();
-        fgy_32x32xn_8bpc(
-            &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0,
+        fgy_32x32xn(
+            &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0, 8,
         );
         assert!(dst.iter().all(|&v| v == 128));
     }
@@ -1174,12 +1235,12 @@ mod tests {
         scaling[128] = 64;
         let mut grain_lut = [[0i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let data_gen = make_grain_data(0, 0);
-        generate_grain_y(&mut grain_lut, &data_gen, 42);
+        generate_grain_y(&mut grain_lut, &data_gen, 42, 8);
         let mut data = make_fgy_data();
         data.uv_mult = [0; 2];
         data.uv_luma_mult = [64; 2];
         data.uv_offset = [0; 2];
-        fguv_32x32xn_8bpc(
+        fguv_32x32xn(
             &mut dst,
             &src,
             stride,
@@ -1196,6 +1257,7 @@ mod tests {
             false,
             1,
             1,
+            8,
         );
         let modified = dst.iter().zip(src.iter()).any(|(&d, &s)| d != s);
         assert!(modified);
@@ -1214,9 +1276,9 @@ mod tests {
         let grain_lut = [[50i16; GRAIN_WIDTH]; GRAIN_HEIGHT];
         let mut data = make_fgy_data();
         data.chroma_scaling_from_luma = true;
-        fguv_32x32xn_8bpc(
+        fguv_32x32xn(
             &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0, &luma, pw, 0,
-            true, 0, 0,
+            true, 0, 0, 8,
         );
         let modified = dst.iter().zip(src.iter()).any(|(&d, &s)| d != s);
         assert!(modified);

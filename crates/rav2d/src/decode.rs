@@ -4286,12 +4286,6 @@ pub(crate) fn apply_grain_to_picture_mt(
         Some(f) => f,
         None => return clone_picture_mt(src, n_threads),
     };
-    if src.p.bpc != 8 {
-        // Only 8bpc grain kernels are ported; higher bit depths fall back to a
-        // plain copy (no clip corpus exercises >8bpc grain yet).
-        return clone_picture_mt(src, n_threads);
-    }
-
     let dst = clone_picture_mt(src, n_threads);
     let seed = src
         .frame_hdr
@@ -4315,38 +4309,74 @@ pub(crate) fn apply_grain_to_picture_mt(
     // SAFETY: every plane allocation spans `stride * aligned_h` (chroma
     // `>> ss_ver`) bytes (DefaultPicAllocator); the grain kernels index within
     // `row * 32 * stride` for `h` rows, which stays inside that span. `src` and
-    // `dst` are distinct allocations so the slices never alias.
-    unsafe {
-        let src_y = std::slice::from_raw_parts(src.data[0].unwrap().as_ptr(), y_sz);
-        let dst_y = std::slice::from_raw_parts_mut(dst.data[0].unwrap().as_ptr(), y_sz);
-        let (src_u, src_v, dst_u, dst_v): (&[u8], &[u8], &mut [u8], &mut [u8]) = if has_chroma {
-            (
-                std::slice::from_raw_parts(src.data[1].unwrap().as_ptr(), uv_sz),
-                std::slice::from_raw_parts(src.data[2].unwrap().as_ptr(), uv_sz),
-                std::slice::from_raw_parts_mut(dst.data[1].unwrap().as_ptr(), uv_sz),
-                std::slice::from_raw_parts_mut(dst.data[2].unwrap().as_ptr(), uv_sz),
-            )
-        } else {
-            (&[], &[], &mut [], &mut [])
-        };
+    // `dst` are distinct allocations so the slices never alias. For HBD the
+    // byte allocation is reinterpreted as `u16` samples and all strides/sizes
+    // are converted from bytes to samples.
+    macro_rules! run_apply_grain {
+        ($Pixel:ty) => {{
+            let bps = std::mem::size_of::<$Pixel>();
+            unsafe {
+                let src_y = std::slice::from_raw_parts(
+                    src.data[0].unwrap().as_ptr() as *const $Pixel,
+                    y_sz / bps,
+                );
+                let dst_y = std::slice::from_raw_parts_mut(
+                    dst.data[0].unwrap().as_ptr() as *mut $Pixel,
+                    y_sz / bps,
+                );
+                let (src_u, src_v, dst_u, dst_v): (
+                    &[$Pixel],
+                    &[$Pixel],
+                    &mut [$Pixel],
+                    &mut [$Pixel],
+                ) = if has_chroma {
+                    (
+                        std::slice::from_raw_parts(
+                            src.data[1].unwrap().as_ptr() as *const $Pixel,
+                            uv_sz / bps,
+                        ),
+                        std::slice::from_raw_parts(
+                            src.data[2].unwrap().as_ptr() as *const $Pixel,
+                            uv_sz / bps,
+                        ),
+                        std::slice::from_raw_parts_mut(
+                            dst.data[1].unwrap().as_ptr() as *mut $Pixel,
+                            uv_sz / bps,
+                        ),
+                        std::slice::from_raw_parts_mut(
+                            dst.data[2].unwrap().as_ptr() as *mut $Pixel,
+                            uv_sz / bps,
+                        ),
+                    )
+                } else {
+                    (&[], &[], &mut [], &mut [])
+                };
 
-        crate::filmgrain::apply_grain_8bpc_mt(
-            dst_y,
-            dst_u,
-            dst_v,
-            src_y,
-            src_u,
-            src_v,
-            y_stride,
-            uv_stride,
-            &fgd,
-            src.p.w as usize,
-            src.p.h as usize,
-            seed,
-            ss_hor,
-            ss_ver,
-            n_threads,
-        );
+                crate::filmgrain::apply_grain_mt(
+                    dst_y,
+                    dst_u,
+                    dst_v,
+                    src_y,
+                    src_u,
+                    src_v,
+                    y_stride / bps as isize,
+                    uv_stride / bps as isize,
+                    &fgd,
+                    src.p.w as usize,
+                    src.p.h as usize,
+                    seed,
+                    ss_hor,
+                    ss_ver,
+                    src.p.bpc as u32,
+                    n_threads,
+                );
+            }
+        }};
+    }
+    if src.p.bpc > 8 {
+        run_apply_grain!(u16);
+    } else {
+        run_apply_grain!(u8);
     }
 
     dst
