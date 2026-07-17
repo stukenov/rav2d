@@ -2242,7 +2242,14 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
 /// frame is byte-identical — the 16bpc analogue of the 8bpc full-clip sweep.
 #[test]
 fn bit_exact_hbd_sweep() {
-    let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
+    // hbd-10bit-128x128-filters.obu is staged but NOT swept yet: it carries two
+    // GOPs and rav2d currently fails on the second one (state not fully reset
+    // across the second keyframe) — tracked as the multi-GOP decode bug.
+    let clips = [
+        "hbd-10bit-128x128-intra.obu",
+        "hbd-10bit-128x128-8f.obu",
+        "hbd-10bit-128x128-grain.obu",
+    ];
     let mut all = Vec::new();
     for clip in clips {
         let path = data(clip);
@@ -2293,7 +2300,14 @@ fn bit_exact_hbd_sweep() {
 /// (levels off in the streams) but still assert the stages do not corrupt.
 #[test]
 fn bit_exact_hbd_perfilter_sweep() {
-    let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
+    // hbd-10bit-128x128-filters.obu is staged but NOT swept yet: it carries two
+    // GOPs and rav2d currently fails on the second one (state not fully reset
+    // across the second keyframe) — tracked as the multi-GOP decode bug.
+    let clips = [
+        "hbd-10bit-128x128-intra.obu",
+        "hbd-10bit-128x128-8f.obu",
+        "hbd-10bit-128x128-grain.obu",
+    ];
     // (dav2d DAV2D_INLOOPFILTER_* bit, matching rav2d setting)
     let filters = [
         ("deblock", 1u32, rav2d::InloopFilterType::Deblock),
@@ -2345,7 +2359,14 @@ fn bit_exact_hbd_perfilter_sweep() {
 /// `BitDepth16` and match dav2d byte-for-byte.
 #[test]
 fn bit_exact_hbd_filtered_sweep() {
-    let clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
+    // hbd-10bit-128x128-filters.obu is staged but NOT swept yet: it carries two
+    // GOPs and rav2d currently fails on the second one (state not fully reset
+    // across the second keyframe) — tracked as the multi-GOP decode bug.
+    let clips = [
+        "hbd-10bit-128x128-intra.obu",
+        "hbd-10bit-128x128-8f.obu",
+        "hbd-10bit-128x128-grain.obu",
+    ];
     let mut all = Vec::new();
     for clip in clips {
         let path = data(clip);
@@ -2386,6 +2407,42 @@ fn bit_exact_hbd_filtered_sweep() {
     }
     if !all.is_empty() {
         panic!("HBD filtered sweep not bit-exact:\n  {}", all.join("\n  "));
+    }
+}
+
+/// Film-grain application at 10-bit: decode the avm-encoded grain vector with
+/// grain synthesis ON in both decoders (plus full in-loop filters) and require
+/// byte-identical output. End-to-end gate for the HBD grain kernels
+/// (generate_grain, scaling LUT sized 1<<bitdepth, fgy/fguv at depth).
+#[test]
+fn bit_exact_hbd_grain_applied() {
+    let clip = "hbd-10bit-128x128-grain.obu";
+    let path = data(clip);
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode_grain(&path);
+    let got = rav2d_decode_grain(&path);
+    assert!(!reference.is_empty(), "{clip}: dav2d produced no frames");
+    assert_eq!(reference[0].bpc, 10, "{clip}: expected 10-bit dav2d output");
+    assert_eq!(
+        got.len(),
+        reference.len(),
+        "{clip}: frame count mismatch (dav2d={}, rav2d={})",
+        reference.len(),
+        got.len()
+    );
+    let mut all = Vec::new();
+    for (fi, (r, g)) in reference.iter().zip(got.iter()).enumerate() {
+        if let Some((pl, idx, rv, gv)) = first_hbd_divergence(r, g) {
+            all.push(format!(
+                "{clip} frame {fi}: first diff plane {pl} sample {idx} dav2d={rv} rav2d={gv}"
+            ));
+        }
+    }
+    if !all.is_empty() {
+        panic!("HBD grain-applied not bit-exact:\n  {}", all.join("\n  "));
     }
 }
 
