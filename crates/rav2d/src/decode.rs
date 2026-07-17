@@ -2721,6 +2721,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 &mut ts.cdf.m,
+                &mut ts.cdf.mv,
                 &mut ts.cdf.dmv,
                 &mut recon,
                 part_w,
@@ -4459,6 +4460,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     l: &mut BlockContext,
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
+    cdf_mv: &mut CdfMvContext,
     cdf_dmv: &mut CdfMvContext,
     recon: &mut ReconCtx<BD>,
     lbs: BlockSize,
@@ -6411,7 +6413,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                     let mv = if amvd_val != 0 {
                         read_amvd(msac, cdf_m)
                     } else {
-                        read_mv_full(msac, cdf_dmv, mv_prec)
+                        read_mv_full(msac, cdf_mv, mv_prec)
                     };
                     unsafe {
                         b.data.inter.mv[n].c.x = mv.c.x;
@@ -7096,7 +7098,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 let mv = if amvd_val != 0 {
                     read_amvd(msac, cdf_m)
                 } else {
-                    read_mv_full(msac, cdf_dmv, mv_prec)
+                    read_mv_full(msac, cdf_mv, mv_prec)
                 };
                 unsafe {
                     b.data.inter.mv[0].c.x = mv.c.x;
@@ -16314,6 +16316,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
     l: &mut BlockContext,
     msac: &mut MsacContext,
     cdf_m: &mut CdfModeContext,
+    cdf_mv: &mut CdfMvContext,
     cdf_dmv: &mut CdfMvContext,
     recon: &mut ReconCtx<BD>,
     part_w: &mut Vec<u8>,
@@ -16371,6 +16374,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
             l,
             msac,
             cdf_m,
+            cdf_mv,
             cdf_dmv,
             recon,
             part_w,
@@ -16394,6 +16398,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
             l,
             msac,
             cdf_m,
+            cdf_mv,
             cdf_dmv,
             recon,
             part_w,
@@ -16678,6 +16683,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 lbs,
@@ -16726,6 +16732,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -16757,6 +16764,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                     l,
                     msac,
                     cdf_m,
+                    cdf_mv,
                     cdf_dmv,
                     recon,
                     part_w,
@@ -16797,6 +16805,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -16828,6 +16837,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                     l,
                     msac,
                     cdf_m,
+                    cdf_mv,
                     cdf_dmv,
                     recon,
                     part_w,
@@ -16864,6 +16874,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -16888,6 +16899,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -16913,6 +16925,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -16937,6 +16950,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -16972,6 +16986,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -17003,6 +17018,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                     l,
                     msac,
                     cdf_m,
+                    cdf_mv,
                     cdf_dmv,
                     recon,
                     part_w,
@@ -17035,6 +17051,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                         l,
                         msac,
                         cdf_m,
+                        cdf_mv,
                         cdf_dmv,
                         recon,
                         part_w,
@@ -17065,6 +17082,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                         l,
                         msac,
                         cdf_m,
+                        cdf_mv,
                         cdf_dmv,
                         recon,
                         part_w,
@@ -17101,6 +17119,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -17132,6 +17151,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                     l,
                     msac,
                     cdf_m,
+                    cdf_mv,
                     cdf_dmv,
                     recon,
                     part_w,
@@ -17164,6 +17184,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                         l,
                         msac,
                         cdf_m,
+                        cdf_mv,
                         cdf_dmv,
                         recon,
                         part_w,
@@ -17194,6 +17215,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                         l,
                         msac,
                         cdf_m,
+                        cdf_mv,
                         cdf_dmv,
                         recon,
                         part_w,
@@ -17234,6 +17256,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -17260,6 +17283,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                     l,
                     msac,
                     cdf_m,
+                    cdf_mv,
                     cdf_dmv,
                     recon,
                     part_w,
@@ -17289,6 +17313,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                         l,
                         msac,
                         cdf_m,
+                        cdf_mv,
                         cdf_dmv,
                         recon,
                         part_w,
@@ -17316,6 +17341,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                             l,
                             msac,
                             cdf_m,
+                            cdf_mv,
                             cdf_dmv,
                             recon,
                             part_w,
@@ -17357,6 +17383,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 l,
                 msac,
                 cdf_m,
+                cdf_mv,
                 cdf_dmv,
                 recon,
                 part_w,
@@ -17383,6 +17410,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                     l,
                     msac,
                     cdf_m,
+                    cdf_mv,
                     cdf_dmv,
                     recon,
                     part_w,
@@ -17412,6 +17440,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                         l,
                         msac,
                         cdf_m,
+                        cdf_mv,
                         cdf_dmv,
                         recon,
                         part_w,
@@ -17439,6 +17468,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                             l,
                             msac,
                             cdf_m,
+                            cdf_mv,
                             cdf_dmv,
                             recon,
                             part_w,
@@ -17475,6 +17505,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
             l,
             msac,
             cdf_m,
+            cdf_mv,
             cdf_dmv,
             recon,
             BlockSize::Invalid,
@@ -19132,6 +19163,7 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, false);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19162,6 +19194,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             &mut part_w,
@@ -19243,6 +19276,7 @@ mod tests {
         let data = vec![0xFF; 256];
         let mut msac = MsacContext::new(&data, false);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19273,6 +19307,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             &mut part_w,
@@ -19356,6 +19391,7 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19374,6 +19410,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -19455,6 +19492,7 @@ mod tests {
         let data = vec![0x00; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19473,6 +19511,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -19552,6 +19591,7 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19570,6 +19610,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -19648,6 +19689,7 @@ mod tests {
         let data = vec![0x80; 128];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19666,6 +19708,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -19746,6 +19789,7 @@ mod tests {
         let data = vec![0xAA; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19767,6 +19811,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -19846,6 +19891,7 @@ mod tests {
         let data = vec![0x55; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19864,6 +19910,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -19947,6 +19994,7 @@ mod tests {
         let data = vec![0xAA; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -19966,6 +20014,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -20055,6 +20104,7 @@ mod tests {
         let data = vec![0xFF; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -20073,6 +20123,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs4x4,
@@ -20157,6 +20208,7 @@ mod tests {
         let data = vec![0x40; 256];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -20176,6 +20228,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -20269,6 +20322,7 @@ mod tests {
         let data = vec![0x80; 512];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -20287,6 +20341,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
@@ -20389,6 +20444,7 @@ mod tests {
         let data = vec![0xFF; 512];
         let mut msac = MsacContext::new(&data, true);
         let mut cdf_m = CdfModeContext::default();
+        let mut cdf_mv = CdfMvContext::default();
         let mut cdf_dmv = CdfMvContext::default();
         let mut a = BlockContext::default();
         let mut l = BlockContext::default();
@@ -20407,6 +20463,7 @@ mod tests {
             &mut l,
             &mut msac,
             &mut cdf_m,
+            &mut cdf_mv,
             &mut cdf_dmv,
             &mut _recon,
             BlockSize::Bs8x8,
