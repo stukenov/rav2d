@@ -2236,6 +2236,49 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
     None
 }
 
+/// Scaled reference motion compensation gate. `resize-10bit-superres.obu` codes
+/// a 128x128 keyframe then a run of 64x64 inter frames that reference it, so
+/// every inter block motion-compensates from a larger reference through the
+/// scaled-MC path (svc scale/step != 0). `#[ignore]`d until that path is ported;
+/// un-ignore once the scaled 8-tap kernel lands and this must be bit-exact.
+#[test]
+#[ignore = "scaled reference MC not yet ported (resolution-switching streams)"]
+fn bit_exact_scaled_ref_sweep() {
+    let path = data("resize-10bit-superres.obu");
+    if !path.exists() {
+        eprintln!("skip: {path:?} not found");
+        return;
+    }
+    let reference = dav2d_decode_invisible(&path);
+    let got = rav2d_decode(&path);
+    assert!(!reference.is_empty(), "dav2d produced no frames");
+    assert_eq!(
+        got.len(),
+        reference.len(),
+        "frame count mismatch (dav2d={}, rav2d={})",
+        reference.len(),
+        got.len()
+    );
+    let mut all = Vec::new();
+    for (fi, (r, g)) in reference.iter().zip(got.iter()).enumerate() {
+        if (r.w, r.h) != (g.w, g.h) {
+            all.push(format!(
+                "frame {fi}: dims {}x{} vs {}x{}",
+                r.w, r.h, g.w, g.h
+            ));
+            continue;
+        }
+        if let Some((pl, idx, rv, gv)) = first_hbd_divergence(r, g) {
+            all.push(format!(
+                "frame {fi}: first diff plane {pl} sample {idx} dav2d={rv} rav2d={gv}"
+            ));
+        }
+    }
+    if !all.is_empty() {
+        panic!("scaled-ref sweep not bit-exact:\n  {}", all.join("\n  "));
+    }
+}
+
 /// Bit-exact reconstruction for 10-bit (HBD) streams. Decodes the locally-staged
 /// 10-bit vectors with both dav2d and rav2d (in-loop filters and film grain off,
 /// invisible frames emitted in coding order) and asserts every plane of every
