@@ -3159,7 +3159,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     ) = if two_pass {
         let n_b4 = (b4_stride_v as usize) * (bh as usize);
         (
-            vec![0i32; (bw as usize * 4) * (bh as usize * 4) * 3],
+            vec![0i32; (bw as usize * 4) * (bh as usize * 4) * 4],
             vec![Default::default(); n_b4],
             // Two block planes: SDP decodes a luma-only and a chroma-only tree
             // over the SAME positions; they must not overwrite each other.
@@ -10383,6 +10383,9 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
         // Second pass: consume the entropy pass's staged cf/cbi (no msac reads).
         let cbi = recon.ft_cbi[by as usize * recon.ft_b4_stride + bx as usize];
         let raw = cbi.txtp[pl];
+        if recon.ft_cf_off + cf_n > recon.ft_cf.len() {
+            return Err(());
+        }
         recon.cf[..cf_n].copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + cf_n]);
         recon.ft_cf_off += cf_n;
         (cbi.eob[pl] as i32, (raw >> 8) as i32, (raw & 0xff) as u32)
@@ -10810,6 +10813,9 @@ fn inter_chroma_residual_8bpc<BD: crate::pixel::BitDepth>(
     if recon.coef_source == CoefSource::ParseStage {
         if phase != ChromaPhase::ReconOnly {
             let need = n_tu * 32;
+            if recon.ft_cf_off + need > recon.ft_cf.len() {
+                return Err(());
+            }
             recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16].copy_from_slice(cf_u);
             recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need].copy_from_slice(cf_v);
             recon.ft_cf_off += need;
@@ -10833,6 +10839,9 @@ fn inter_chroma_residual_8bpc<BD: crate::pixel::BitDepth>(
     }
     if recon.coef_source == CoefSource::Consume && phase != ChromaPhase::ReconOnly {
         let need = n_tu * 32;
+        if recon.ft_cf_off + need > recon.ft_cf.len() {
+            return Err(());
+        }
         cf_u.copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16]);
         cf_v.copy_from_slice(&recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need]);
         recon.ft_cf_off += need;
@@ -15642,6 +15651,9 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
     if recon.coef_source == CoefSource::ParseStage {
         if phase != ChromaPhase::ReconOnly && !chroma_skip_txfm {
             let need = n_tu * 32;
+            if recon.ft_cf_off + need > recon.ft_cf.len() {
+                return Err(());
+            }
             recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16].copy_from_slice(cf_u);
             recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need].copy_from_slice(cf_v);
             recon.ft_cf_off += need;
@@ -15666,6 +15678,9 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
     if recon.coef_source == CoefSource::Consume {
         if !chroma_skip_txfm && phase != ChromaPhase::ReconOnly {
             let need = n_tu * 32;
+            if recon.ft_cf_off + need > recon.ft_cf.len() {
+                return Err(());
+            }
             cf_u.copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16]);
             cf_v.copy_from_slice(&recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need]);
             recon.ft_cf_off += need;
@@ -16294,6 +16309,9 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
         // staged by the entropy pass (dav2d PASS_RECON reading f->frame_thread).
         let cbi = recon.ft_cbi[by as usize * recon.ft_b4_stride + bx as usize];
         let raw = cbi.txtp[0];
+        if recon.ft_cf_off + cf_n > recon.ft_cf.len() {
+            return Err(());
+        }
         recon.cf[..cf_n].copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + cf_n]);
         recon.ft_cf_off += cf_n;
         (cbi.eob[0] as i32, (raw >> 8) as i32, (raw & 0xff) as u32)
