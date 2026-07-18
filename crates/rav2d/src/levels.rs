@@ -197,10 +197,16 @@ pub const N_PARTITIONS: usize = 10;
 
 impl BlockPartition {
     /// # Safety
-    /// `val` must be in range -1..=9 (Invalid..Split).
+    /// `val` should be in range -1..=9 (Invalid..Split). Debug builds assert
+    /// this; release builds saturate an out-of-range value to `Invalid` rather
+    /// than transmuting it into an invalid discriminant (which would be UB).
     pub unsafe fn from_raw(val: i8) -> Self {
         debug_assert!((-1..=9).contains(&val), "invalid BlockPartition: {val}");
-        unsafe { std::mem::transmute(val) }
+        if (-1..=9).contains(&val) {
+            unsafe { std::mem::transmute::<i8, Self>(val) }
+        } else {
+            Self::Invalid
+        }
     }
 }
 
@@ -219,10 +225,16 @@ pub enum TxPartition {
 
 impl TxPartition {
     /// # Safety
-    /// `val` must be in range 0..=7 (None..V5).
+    /// `val` should be in range 0..=7 (None..V5). Debug builds assert this;
+    /// release builds saturate an out-of-range value to `None` rather than
+    /// transmuting it into an invalid discriminant (which would be UB).
     pub unsafe fn from_raw(val: u8) -> Self {
         debug_assert!(val <= 7, "invalid TxPartition: {val}");
-        unsafe { std::mem::transmute(val) }
+        if val <= 7 {
+            unsafe { std::mem::transmute::<u8, Self>(val) }
+        } else {
+            Self::None
+        }
     }
 }
 
@@ -267,10 +279,16 @@ pub const N_BS_SIZES: usize = 31;
 
 impl BlockSize {
     /// # Safety
-    /// `val` must be in range -1..=30 (Invalid..Bs4x4).
+    /// `val` should be in range -1..=30 (Invalid..Bs4x4). Debug builds assert
+    /// this; release builds saturate an out-of-range value to `Invalid` rather
+    /// than transmuting it into an invalid discriminant (which would be UB).
     pub unsafe fn from_raw(val: i8) -> Self {
         debug_assert!((-1..=30).contains(&val), "invalid BlockSize: {val}");
-        unsafe { std::mem::transmute(val) }
+        if (-1..=30).contains(&val) {
+            unsafe { std::mem::transmute::<i8, Self>(val) }
+        } else {
+            Self::Invalid
+        }
     }
 }
 

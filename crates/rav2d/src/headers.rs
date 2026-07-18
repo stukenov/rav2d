@@ -94,10 +94,16 @@ pub enum WarpedMotionType {
 
 impl WarpedMotionType {
     /// # Safety
-    /// `val` must be in range -1..=3 (Invalid..Affine).
+    /// `val` should be in range -1..=3 (Invalid..Affine). Debug builds assert
+    /// this; release builds saturate an out-of-range value to `Invalid` rather
+    /// than transmuting it into an invalid discriminant (which would be UB).
     pub unsafe fn from_raw(val: i8) -> Self {
         debug_assert!((-1..=3).contains(&val), "invalid WarpedMotionType: {val}");
-        unsafe { std::mem::transmute(val) }
+        if (-1..=3).contains(&val) {
+            unsafe { std::mem::transmute::<i8, Self>(val) }
+        } else {
+            Self::Invalid
+        }
     }
 }
 
