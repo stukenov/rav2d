@@ -9347,6 +9347,10 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
         } else {
             n_left_l2
         };
+    // BAWP least-squares accumulators. C keeps these as plain int (recon_tmpl.c:
+    // 2761) so the products/sums wrap on overflow; a malformed stream can leave
+    // out-of-range values in the HBD sample buffer, overflowing x*x. Use wrapping
+    // ops below to match C rather than panic; valid samples stay in i32 range.
     let mut sum_x: i32 = 0;
     let mut sum_y: i32 = 0;
     let mut sum_xy: i32 = 0;
@@ -9362,10 +9366,10 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
         while i < bw {
             let x: i32 = ref_base[ref_off - ref_stride + i as usize].into();
             let y: i32 = dst_ro[top_off + i as usize].into();
-            sum_x += x;
-            sum_y += y;
-            sum_xy += x * y;
-            sum_x2 += x * x;
+            sum_x = sum_x.wrapping_add(x);
+            sum_y = sum_y.wrapping_add(y);
+            sum_xy = sum_xy.wrapping_add(x.wrapping_mul(y));
+            sum_x2 = sum_x2.wrapping_add(x.wrapping_mul(x));
             i += step;
         }
     }
@@ -9378,10 +9382,10 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
             let x: i32 = ref_base[ref_off + (i as usize) * ref_stride - 1].into();
             let y: i32 =
                 dst_ro[(dst_off as isize + (i as isize) * stride as isize - 1) as usize].into();
-            sum_x += x;
-            sum_y += y;
-            sum_xy += x * y;
-            sum_x2 += x * x;
+            sum_x = sum_x.wrapping_add(x);
+            sum_y = sum_y.wrapping_add(y);
+            sum_xy = sum_xy.wrapping_add(x.wrapping_mul(y));
+            sum_x2 = sum_x2.wrapping_add(x.wrapping_mul(x));
             i += step;
         }
     }
