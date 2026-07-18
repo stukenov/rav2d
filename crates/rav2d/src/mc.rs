@@ -1362,7 +1362,9 @@ pub fn put_8tap_scaled<BD: BitDepth>(
                 let fh = get_h_filter(imx >> 6, filter_type, w);
                 mid[row][x] = if let Some(ref f) = fh {
                     let c = src_p + ioff;
-                    (filter_8tap_px(src, c, f, 1) >> (6 - intermediate_bits)) as i16
+                    let sh = 6 - intermediate_bits;
+                    // dav2d DAV2D_FILTER_8TAP_RND rounds before the shift.
+                    ((filter_8tap_px(src, c, f, 1) + ((1 << sh) >> 1)) >> sh) as i16
                 } else {
                     (Into::<i32>::into(src[src_p + ioff]) << intermediate_bits) as i16
                 };
@@ -1468,7 +1470,9 @@ pub fn prep_8tap_scaled<BD: BitDepth>(
                 let fh = get_h_filter(imx >> 6, filter_type, w);
                 mid[row][x] = if let Some(ref f) = fh {
                     let c = src_p + ioff;
-                    (filter_8tap_px(src, c, f, 1) >> (6 - intermediate_bits)) as i16
+                    let sh = 6 - intermediate_bits;
+                    // dav2d DAV2D_FILTER_8TAP_RND rounds before the shift.
+                    ((filter_8tap_px(src, c, f, 1) + ((1 << sh) >> 1)) >> sh) as i16
                 } else {
                     (Into::<i32>::into(src[src_p + ioff]) << intermediate_bits) as i16
                 };
