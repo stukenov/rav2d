@@ -36,7 +36,14 @@ pub fn generate_scaling_8bpc(points: &[[u8; 2]], scaling: &mut [u8; 256]) {
         let ey = points[i + 1][1] as i32;
         let dx = ex - bx;
         let dy = ey - by;
-        debug_assert!(dx > 0);
+        // The bitstream delta-codes point x-values and only bounds them to
+        // <= 255 (obu.c:2068), so a malformed stream can repeat or decrease an
+        // x-value, giving `dx <= 0`. dav2d's `dy * (0x10000 / dx)` would divide
+        // by zero there (UB); skip the degenerate segment instead. No-op for
+        // valid input, where points strictly increase.
+        if dx <= 0 {
+            continue;
+        }
         let delta = dy * ((0x10000 + (dx >> 1)) / dx);
         let mut d = 0x8000i32;
         for x in 0..dx as usize {
@@ -69,7 +76,11 @@ pub fn generate_scaling_hbd(bitdepth: u32, points: &[[u8; 2]], scaling: &mut [u8
         let ey = points[i + 1][1] as i32;
         let dx = ex - bx;
         let dy = ey - by;
-        debug_assert!(dx > 0);
+        // Malformed streams can repeat/decrease a delta-coded point x-value
+        // (dx <= 0); skip the degenerate segment to avoid the divide-by-zero.
+        if dx <= 0 {
+            continue;
+        }
         let delta = dy * ((0x10000 + (dx >> 1)) / dx);
         let mut d = 0x8000i32;
         for x in 0..dx {
