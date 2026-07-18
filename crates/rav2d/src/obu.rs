@@ -1604,7 +1604,15 @@ pub fn parse_frame_hdr(
                     } else if r < n_classes + grp_cnt[1] as usize {
                         ref_filters[r - n_classes]
                     } else {
-                        let idx = SHUFFLED_INDEX[r - n_classes - grp_cnt[1] as usize] as usize;
+                        // For a well-formed stream the filter groups partition the
+                        // n_filters (<= 64) filters, so this index is always < 64.
+                        // A malformed stream can produce an out-of-range reference
+                        // r (C reads it out of bounds — UB, obu.c:1803); reject it.
+                        let si = r - n_classes - grp_cnt[1] as usize;
+                        if si >= SHUFFLED_INDEX.len() {
+                            return Err(Rav2dError::InvalidData);
+                        }
+                        let idx = SHUFFLED_INDEX[si] as usize;
                         let mut tmp = [0i8; 18];
                         tmp[..16].copy_from_slice(&WIENER_NS_FILTERS[idx]);
                         tmp
