@@ -51,6 +51,10 @@ fn decode_catch(bytes: Vec<u8>) -> Result<(), String> {
         s.n_threads = 1;
         s.apply_grain = false;
         s.run_decode = true;
+        // Match the fuzz target: cap frame size so a malformed stream declaring
+        // an enormous frame is rejected (FrameTooLarge) rather than allocating
+        // gigabytes. This is what a memory-conscious application does.
+        s.frame_size_limit = 8192 * 8192;
         let mut dec = match Decoder::open(&s) {
             Ok(d) => d,
             Err(_) => return,
