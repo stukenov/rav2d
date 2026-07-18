@@ -1536,7 +1536,10 @@ pub fn ipred_dip<BD: BitDepth>(
             let idx = if trans { ix * 8 + iy } else { iy * 8 + ix };
             let mut s = 0i32;
             for i in 0..11 {
-                s += DIP_WEIGHTS[m][idx][i] as i32 * inp[i];
+                // C accumulates uint16_t * int in an int (ipred_tmpl.c:1629), which
+                // wraps on overflow. A malformed block geometry can leave the input
+                // samples un-normalized and large; match C's wrap rather than panic.
+                s = s.wrapping_add((DIP_WEIGHTS[m][idx][i] as i32).wrapping_mul(inp[i]));
             }
             dst[y * stride + x] = bd.pixel_clip(((s + 2048) >> 12) - in_sum);
             x += step_x;
