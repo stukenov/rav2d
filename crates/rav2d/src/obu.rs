@@ -1532,7 +1532,15 @@ pub fn parse_frame_hdr(
                 let mut grp_ref_cnt = [0u8; 3];
                 grp_cnt[0] = n_classes as u8;
                 grp_cnt[1] = i as u8;
-                grp_cnt[2] = (n_filters - n_classes - i) as u8;
+                // C computes this in int and stores into uint8_t (obu.c:1759),
+                // using the already-truncated grp_cnt[0]/grp_cnt[1]. A malformed
+                // stream can make n_classes + i exceed n_filters (e.g. n_filters
+                // is 16 while the temporal predicted-filter count pushes i up),
+                // which underflows unsigned arithmetic. Match C: subtract in i32
+                // and truncate, yielding a defined (garbage) count instead of a
+                // panic. Valid streams keep the difference non-negative, so the
+                // result is unchanged.
+                grp_cnt[2] = (n_filters as i32 - (grp_cnt[0] as i32 + grp_cnt[1] as i32)) as u8;
                 let mut filter_refs = [0u8; 64];
                 let mut pred_grp: usize = 2 - (grp_cnt[1] > 2) as usize;
                 let nnz_grps = 1 + (grp_cnt[1] != 0) as i32 + (grp_cnt[2] != 0) as i32;
