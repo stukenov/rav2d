@@ -235,7 +235,12 @@ pub fn ccso_add<BD: BitDepth>(
                         let i = idx_buf[y * idx_stride + x];
                         let byte_idx = (i >> 1) as usize;
                         let half_idx = (i & 1) as usize;
-                        let offset_idx = (7 & (offset_idxs[byte_idx] >> (4 * half_idx))) as usize;
+                        // `idx_buf` packs (class<<5 | class<<3 | band) from ccso_prep;
+                        // on a malformed stream the band/class can exceed the LUT
+                        // extent, so read defensively (0 = no offset). No-op for
+                        // valid input where the index is always in range.
+                        let packed = offset_idxs.get(byte_idx).copied().unwrap_or(0);
+                        let offset_idx = (7 & (packed >> (4 * half_idx))) as usize;
                         let cur: i32 = dst[y * dst_stride + x].into();
                         dst[y * dst_stride + x] =
                             bd.pixel_clip(cur + offset_lut[offset_idx] as i32);
