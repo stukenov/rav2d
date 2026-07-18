@@ -7286,7 +7286,14 @@ fn decode_b<BD: crate::pixel::BitDepth>(
 
             if !is_tip && inter_mode <= InterPredMode::NewMv as u8 {
                 // --- BAWP (block-adaptive weighted prediction) ---
-                if fi.bawp && inter_mode != InterPredMode::GlobalMv as u8 && imin(bw4, bh4) >= 2 {
+                // BAWP is disabled for scaled references (decode.c:3011
+                // `!f->svc[ref][0].scale`); without this the extra bawp symbol
+                // desyncs the parse on resolution-switching frames.
+                if fi.bawp
+                    && inter_mode != InterPredMode::GlobalMv as u8
+                    && imin(bw4, bh4) >= 2
+                    && recon.svc[ref0 as usize][0].scale == 0
+                {
                     let bawp0 = msac.decode_bool_adapt(cdf_m.bawp(0)) as u8;
                     if bawp0 != 0 {
                         let ctx = if inter_mode == InterPredMode::NewMv as u8 {
