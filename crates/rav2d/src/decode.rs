@@ -2299,8 +2299,44 @@ impl Default for ReconScratch {
 
 /// Mutable reconstruction borrows bundled so only one new param threads through
 /// decode_sb's recursion (Rust auto-reborrows &mut ReconCtx at each call).
+/// Where a tx block's coefficients (and recon inputs) come from, the Rust
+/// analogue of dav2d's frame-thread pass split (decode.c `t->frame_thread.pass`,
+/// recon_tmpl.c `dav2d_read_coef_blocks`):
+/// - `ParseRecon`: fused single-pass decode (parse symbols and reconstruct).
+/// - `ParseStage`: entropy pass — parse symbols, stage cf/cbi (and blocks) into
+///   `FrameThread` storage, skip reconstruction.
+/// - `Consume`: reconstruction pass — no symbol reads; consume staged data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CoefSource {
+    ParseRecon,
+    ParseStage,
+    Consume,
+}
+
 pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
     pub bd: BD,
+    /// Coefficient/recon data source for the current pass (two-pass decode).
+    pub coef_source: CoefSource,
+    /// Frame-thread coefficient staging (dav2d `ts->frame_thread[p].cf`):
+    /// `ParseStage` appends each tx block's coefficients here; `Consume` reads
+    /// them back at the same running offset. Empty in single-pass decode.
+    pub ft_cf: &'a mut [i32],
+    /// Running offset into `ft_cf` for the current tile (both passes traverse
+    /// blocks in the same order, so one cursor stays in sync).
+    pub ft_cf_off: usize,
+    /// Per-4x4-position coded-block info (dav2d `f->frame_thread.cbi`),
+    /// indexed `by * b4_stride + bx`. Empty in single-pass decode.
+    pub ft_cbi: &'a mut [crate::internal::CodedBlockInfo],
+    /// Row stride (in 4x4 units) of `ft_cbi`.
+    pub ft_b4_stride: usize,
+    /// Per-4x4-position staged blocks (dav2d `f->frame_thread.b`): the entropy
+    /// pass stores each fully-parsed `Av2Block` at its top-left position; the
+    /// consume pass reconstructs from them without touching the bitstream.
+    pub ft_b: &'a mut [Av2Block],
+    /// Per-4x4-position staged warp models: `recon.warpmv` is derived during
+    /// the parse (MV-resolution) step and consumed by warp MC in recon, so the
+    /// consume pass must restore it per block alongside `ft_b`.
+    pub ft_warp: &'a mut [[crate::headers::WarpedMotionParams; 2]],
     pub dst_y: &'a mut [BD::Pixel],
     pub dst_u: &'a mut [BD::Pixel],
     pub dst_v: &'a mut [BD::Pixel],
@@ -2435,6 +2471,18 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
     seq_hdr: &crate::headers::SequenceHeader,
     frm_hdr: &crate::headers::FrameHeader,
     masks: &crate::wedge::Masks,
+    pass_bits: u8,
+    coef_source: CoefSource,
+    ft_cf: &mut [i32],
+    ft_cf_off: &mut usize,
+    ft_cbi: &mut [crate::internal::CodedBlockInfo],
+    ft_b: &mut [Av2Block],
+    ft_b4_stride: usize,
+    ft_warp: &mut [[crate::headers::WarpedMotionParams; 2]],
+    ft_q: &mut Vec<(i32, [[[u32; 2]; 3]; crate::headers::MAX_SEGMENTS])>,
+    ft_q_idx: &mut usize,
+    part_w_idx: &mut usize,
+    part_r_idx: &mut usize,
 ) -> Result<(), ()> {
     let sb_step = fi.sb_step;
     let sb256y = by >> 6;
@@ -2489,8 +2537,10 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
 
         // Reset the reference-MV `r` grid for this superblock (decode.c
         // reset_context path); marks all 4x4 units intra (invalid mv) so that
-        // not-yet-decoded neighbours are skipped by refmvs_find.
-        if refmvs_active {
+        // not-yet-decoded neighbours are skipped by refmvs_find. MV-resolution
+        // work only: the consume pass must keep the grids the entropy pass
+        // splatted (sub-8x8 chroma MC and OBMC read them during recon).
+        if refmvs_active && pass_bits & (Pass::MvRes as u8) != 0 {
             let ra_snapshot = rt.ra.clone();
             crate::refmvs::reset_sb(
                 rt,
@@ -2511,7 +2561,8 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
         let is_tip_frame = frm_hdr.tip.frame_mode == 2;
 
         // Reset CDEF indices for this superblock's coverage in the lf mask.
-        if !is_tip_frame {
+        // (entropy-pass work: masks are built once, in the parse pass)
+        if !is_tip_frame && pass_bits & (Pass::Entropy as u8) != 0 {
             match root_bs {
                 BlockSize::Bs64x64 => {
                     let idx = (((bx & 0x30) >> 4) + ((by & 0x30) >> 2)) as usize;
@@ -2533,9 +2584,9 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
             }
         }
 
-        // Per-plane loop-restoration unit info.
+        // Per-plane loop-restoration unit info (symbol reads: entropy pass only).
         let sbsz = sb_step * 4;
-        if !is_tip_frame {
+        if !is_tip_frame && pass_bits & (Pass::Entropy as u8) != 0 {
             for p in 0..3 {
                 let (ss_ver, ss_hor) = if p == 0 {
                     (0, 0)
@@ -2623,11 +2674,21 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
         let mut by_m = by;
         let mut cbx = bx;
         let mut cby = by;
-        let mut part_w_idx = 0usize;
-        let mut part_r_idx = 0usize;
+        // Partition-tape cursors persist across superblocks/sbrows (params).
 
         // Active dequant tables for this superblock: frame-wide unless a prior
         // delta-q has shifted the running qindex away from `quant.yac`.
+        // Two-pass delta-q state: the per-SB (last_qidx, dqmem) chain is parse
+        // state consumed by reconstruction-side dequant selection; stage it per
+        // superblock and replay it in the consume pass.
+        if coef_source == CoefSource::ParseStage {
+            ft_q.push((sb_last_qidx, sb_dqmem));
+        } else if coef_source == CoefSource::Consume {
+            let (q, m) = ft_q[*ft_q_idx];
+            sb_last_qidx = q;
+            sb_dqmem = m;
+            *ft_q_idx += 1;
+        }
         let dq_active_init = if sb_last_qidx == fi.quant_yac {
             *recon_frame.dq
         } else {
@@ -2635,6 +2696,13 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
         };
 
         let mut recon = ReconCtx {
+            coef_source,
+            ft_cf: &mut *ft_cf,
+            ft_cf_off: *ft_cf_off,
+            ft_cbi: &mut *ft_cbi,
+            ft_b4_stride,
+            ft_b: &mut *ft_b,
+            ft_warp: &mut *ft_warp,
             bd,
             dst_y: &mut *dst_y,
             dst_u: &mut *dst_u,
@@ -2716,7 +2784,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
                 &mut cby,
                 &mut intra_region,
                 &mut sdp_cfl_disallowed,
-                crate::internal::PASS_ALL,
+                pass_bits,
                 &mut a_arr[a_idx],
                 l,
                 msac,
@@ -2725,9 +2793,9 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
                 &mut ts.cdf.dmv,
                 &mut recon,
                 part_w,
-                &mut part_w_idx,
+                part_w_idx,
                 part_r,
-                &mut part_r_idx,
+                part_r_idx,
                 root_bs,
                 c_root_bs,
                 &mut dir,
@@ -2745,7 +2813,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
         // range so that `ra_tl` captures the correct per-SB top-left value; a
         // once-per-row save would leave `ra_tl` reflecting only the row's far
         // right edge and corrupt the SB-boundary top-left MV candidate.
-        if refmvs_active {
+        if refmvs_active && pass_bits & (Pass::MvRes as u8) != 0 {
             let crate::refmvs::Tile {
                 r,
                 ra,
@@ -2766,6 +2834,9 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
             );
         }
 
+        // Persist the frame-thread coefficient cursor across superblocks/sbrows.
+        *ft_cf_off = recon.ft_cf_off;
+
         bx += sb_step;
     }
 
@@ -2785,7 +2856,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
     // carry no entropy data — their (empty) symbol decoder is never advanced, so
     // the overread sentinel is expected and must not abort the frame (dav2d skips
     // the entropy pass entirely for these, decode.c:4447).
-    if frm_hdr.tip.frame_mode != 2 && msac.cnt() <= -15 {
+    if pass_bits & (Pass::Entropy as u8) != 0 && frm_hdr.tip.frame_mode != 2 && msac.cnt() <= -15 {
         if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
             eprintln!(
                 "decode_tile_sbrow_entropy: msac overread cnt={}",
@@ -3071,6 +3142,34 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     lf.cdef_line_toggle = 0;
     let sb128 = frame_hdr.sb128 as i32;
 
+    // ---- Two-pass frame-thread staging buffers (dav2d f->frame_thread) ------
+    // Sized for the whole frame: blocks + coded-block info per 4x4 position,
+    // coefficients bounded by 3x the luma sample count (covers 4:4:4 and the
+    // chroma per-TU padding). Only allocated when a two-pass decode runs.
+    let two_pass = n_passes > 1 && frame_hdr.tip.frame_mode != 2;
+    let mut ft_warp: Vec<[crate::headers::WarpedMotionParams; 2]> = if two_pass {
+        vec![Default::default(); (b4_stride_v as usize) * (bh as usize)]
+    } else {
+        Vec::new()
+    };
+    let (mut ft_cf, mut ft_cbi, mut ft_b): (
+        Vec<i32>,
+        Vec<crate::internal::CodedBlockInfo>,
+        Vec<Av2Block>,
+    ) = if two_pass {
+        let n_b4 = (b4_stride_v as usize) * (bh as usize);
+        (
+            vec![0i32; (bw as usize * 4) * (bh as usize * 4) * 3],
+            vec![Default::default(); n_b4],
+            // Two block planes: SDP decodes a luma-only and a chroma-only tree
+            // over the SAME positions; they must not overwrite each other.
+            vec![Av2Block::default(); n_b4 * 2],
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+    let mut ft_cf_off = 0usize;
+
     // dav2d (decode.c:5144-5164) is per-tile-row: PHASE A decodes ALL tile-cols
     // for every superblock-row in the tile row, THEN PHASE B runs the deferred
     // filter pass `for sby: filter_sbrow(sby)`. Filters must run only after a
@@ -3106,6 +3205,20 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                 },
                 None => &mut [],
             };
+            // Two-pass: the entropy pass runs the recon walk for its symbol
+            // side effects only; its pixel writes go to this throwaway sink so
+            // recon paths that read current-frame pixels (refine-mv templates,
+            // IntraBC, CfL) see pristine planes in the reconstruction pass.
+            let (mut sink_y, mut sink_u, mut sink_v): (Vec<$Pixel>, Vec<$Pixel>, Vec<$Pixel>) =
+                if two_pass {
+                    (
+                        vec![Default::default(); y_stride_px * y_h],
+                        vec![Default::default(); uv_stride_px * uv_h],
+                        vec![Default::default(); uv_stride_px * uv_h],
+                    )
+                } else {
+                    (Vec::new(), Vec::new(), Vec::new())
+                };
             for tr in 0..rows {
                 // Collect per-tile-col MSAC state that must stay live across the sby
                 // loop (each tile-col's symbol decoder advances one sbrow at a time but
@@ -3150,83 +3263,331 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     .collect();
                 let mut part_ws: Vec<Vec<u8>> = (0..cols).map(|_| Vec::new()).collect();
                 let part_r: Vec<u8> = Vec::new();
+                let mut part_w_idxs: Vec<usize> = vec![0; cols as usize];
+                let mut part_r_idxs: Vec<usize> = vec![0; cols as usize];
+                let mut ft_q_sp: Vec<(i32, [[[u32; 2]; 3]; crate::headers::MAX_SEGMENTS])> =
+                    Vec::new();
+                let mut ft_q_idx_sp = 0usize;
 
                 // The tile row spans the same block-row range for every tile-col (only
                 // the column range differs), so derive the sbrow loop from tile-col 0.
                 let (row_rs, row_re) = ranges[0];
 
-                // PHASE A: decode every superblock-row across all tile-cols.
-                let mut by = row_rs;
-                while by < row_re {
-                    // Project reference temporal MVs into the rolling-window `rf.rp_proj`
-                    // for this superblock row (dav2d_refmvs_load_tmvs, decode.c:5151).
-                    // Run once per sbrow over the full block-row width, before any
-                    // tile-col reads it, so the inter tmvp candidates and frame_mode=2
-                    // whole-frame TIP recon see this row's projection.
-                    if need_load_tmvs {
-                        let by_end = (by + sb_step) >> 1;
-                        refmvs::load_tmvs(
-                            rf,
-                            tr,
-                            0,
-                            bw >> 1,
-                            by >> 1,
-                            by_end,
-                            seq_hdr.mv_traj,
-                            frame_hdr.tip.frame_mode,
-                            seq_hdr.tip_hole_fill,
-                            frame_hdr.tmvp_sample_step as i32,
-                            frame_hdr.n_ref_frames as i32,
-                        );
-                    }
-                    let rf_ref: &refmvs::Frame = &*rf;
-                    for tc in 0..cols as usize {
-                        let ts_idx = ts_base + tc;
-                        let (rs, re) = ranges[tc];
-                        if by < rs || by >= re {
-                            continue;
+                if two_pass {
+                    // ---- Two-pass decode (dav2d n_passes==2): PASS 1 parses all
+                    // symbols and stages blocks/coefficients + the partition tape;
+                    // PASS 2 replays the walk from the tape and reconstructs
+                    // without touching the bitstream. ----
+                    let row_cf_off = ft_cf_off;
+                    let mut ft_rt: Vec<crate::refmvs::Block> = Vec::new();
+                    let mut ft_rt_off = 0usize;
+                    let mut ft_q: Vec<(i32, [[[u32; 2]; 3]; crate::headers::MAX_SEGMENTS])> =
+                        Vec::new();
+                    let mut ft_q_idx = 0usize;
+                    let mut ft_ra: Vec<(Vec<crate::refmvs::Block>, crate::refmvs::Block)> =
+                        Vec::new();
+                    let mut ft_ra_off = 0usize;
+                    // PHASE A: decode every superblock-row across all tile-cols.
+                    let mut by = row_rs;
+                    while by < row_re {
+                        // Project reference temporal MVs into the rolling-window `rf.rp_proj`
+                        // for this superblock row (dav2d_refmvs_load_tmvs, decode.c:5151).
+                        // Run once per sbrow over the full block-row width, before any
+                        // tile-col reads it, so the inter tmvp candidates and frame_mode=2
+                        // whole-frame TIP recon see this row's projection.
+                        // Snapshot the above-row refmvs state as of this sbrow's
+                        // start: the consume pass's gathers must see their own
+                        // predecessor row, not the final row's save.
+                        ft_ra.push((rt.ra.clone(), rt.ra_tl));
+                        if need_load_tmvs && true {
+                            let by_end = (by + sb_step) >> 1;
+                            refmvs::load_tmvs(
+                                rf,
+                                tr,
+                                0,
+                                bw >> 1,
+                                by >> 1,
+                                by_end,
+                                seq_hdr.mv_traj,
+                                frame_hdr.tip.frame_mode,
+                                seq_hdr.tip_hole_fill,
+                                frame_hdr.tmvp_sample_step as i32,
+                                frame_hdr.n_ref_frames as i32,
+                            );
                         }
-                        reset_context(&mut l, keyframe, is_tip);
-                        decode_tile_sbrow_entropy(
-                            bd_local,
-                            &fis[tc],
-                            frame_hdr,
-                            &mut ts[ts_idx],
-                            &mut msacs[tc],
-                            a,
-                            &mut lf.mask,
-                            &mut lf.lr_mask,
-                            &mut l,
-                            &mut *dst_y,
-                            &mut *dst_u,
-                            &mut *dst_v,
-                            &mut cf,
-                            &recon_frame,
-                            &mut cur_segmap[..],
-                            prev_segmap_ref,
-                            &mut lf.segmap_uv,
-                            lf.uv_segmap_stride,
-                            &mut cur_ccsomap[..],
-                            prev_ccsomap_ref,
-                            &mut part_ws[tc],
-                            &part_r,
-                            by,
-                            sb256w,
-                            root_bs,
-                            c_root_bs,
-                            &mut rt,
-                            rf_ref,
-                            &mut cur_mvs,
-                            &refp_pics,
-                            &svc_v,
-                            seq_hdr,
-                            frame_hdr,
-                            &masks,
-                        )?;
+                        let rf_ref: &refmvs::Frame = &*rf;
+                        for tc in 0..cols as usize {
+                            let ts_idx = ts_base + tc;
+                            let (rs, re) = ranges[tc];
+                            if by < rs || by >= re {
+                                continue;
+                            }
+                            reset_context(&mut l, keyframe, is_tip);
+                            decode_tile_sbrow_entropy(
+                                bd_local,
+                                &fis[tc],
+                                frame_hdr,
+                                &mut ts[ts_idx],
+                                &mut msacs[tc],
+                                a,
+                                &mut lf.mask,
+                                &mut lf.lr_mask,
+                                &mut l,
+                                &mut sink_y[..],
+                                &mut sink_u[..],
+                                &mut sink_v[..],
+                                &mut cf,
+                                &recon_frame,
+                                &mut cur_segmap[..],
+                                prev_segmap_ref,
+                                &mut lf.segmap_uv,
+                                lf.uv_segmap_stride,
+                                &mut cur_ccsomap[..],
+                                prev_ccsomap_ref,
+                                &mut part_ws[tc],
+                                &part_r,
+                                by,
+                                sb256w,
+                                root_bs,
+                                c_root_bs,
+                                &mut rt,
+                                rf_ref,
+                                &mut cur_mvs,
+                                &refp_pics,
+                                &svc_v,
+                                seq_hdr,
+                                frame_hdr,
+                                &masks,
+                                crate::internal::Pass::Entropy as u8
+                                    | crate::internal::Pass::MvRes as u8,
+                                CoefSource::ParseStage,
+                                &mut ft_cf[..],
+                                &mut ft_cf_off,
+                                &mut ft_cbi[..],
+                                &mut ft_b[..],
+                                b4_stride_v as usize,
+                                &mut ft_warp[..],
+                                &mut ft_q,
+                                &mut ft_q_idx,
+                                &mut part_w_idxs[tc],
+                                &mut part_r_idxs[tc],
+                            )?;
+                        }
+                        // Snapshot this sbrow's refmvs `r` rows: the 64-row window is
+                        // reused by later sbrows, and the consume pass needs each
+                        // sbrow's end-state for sub-8x8 chroma / OBMC gathers.
+                        {
+                            let rs = ((by & 63) as usize) * 128;
+                            let n = (sb_step as usize) * 128;
+                            ft_rt.extend_from_slice(&rt.r[rs..rs + n]);
+                        }
+                        by += sb_step;
                     }
-                    by += sb_step;
-                }
 
+                    // Hand the partition tapes to the consume pass and rewind
+                    // the coefficient cursor to this tile row's start.
+                    let part_rs: Vec<Vec<u8>> = std::mem::take(&mut part_ws);
+                    let mut part_w_dummy: Vec<u8> = Vec::new();
+                    for i in part_r_idxs.iter_mut() {
+                        *i = 0;
+                    }
+                    ft_cf_off = row_cf_off;
+                    // Reset this tile row's above contexts so the consume pass
+                    // walks with the same neighbour state the entropy pass saw
+                    // (`a` feeds the per-SB caches the inter recon reads). The
+                    // refmvs tile state is deliberately NOT reset: it holds the
+                    // grids the entropy pass splatted.
+                    {
+                        let base = (tr * sb256w) as usize;
+                        let n = sb256w as usize;
+                        for ctx in a.iter_mut().skip(base).take(n) {
+                            reset_context(ctx, keyframe, is_tip);
+                        }
+                    }
+                    // PHASE A: decode every superblock-row across all tile-cols.
+                    let mut by = row_rs;
+                    while by < row_re {
+                        // Restore the entropy pass's end-of-sbrow refmvs rows and
+                        // the start-of-sbrow above-row state.
+                        {
+                            let rs = ((by & 63) as usize) * 128;
+                            let n = (sb_step as usize) * 128;
+                            rt.r[rs..rs + n].copy_from_slice(&ft_rt[ft_rt_off..ft_rt_off + n]);
+                            ft_rt_off += n;
+                            let (ra_snap, ra_tl_snap) = &ft_ra[ft_ra_off];
+                            rt.ra.copy_from_slice(ra_snap);
+                            rt.ra_tl = *ra_tl_snap;
+                            ft_ra_off += 1;
+                        }
+                        // Project reference temporal MVs into the rolling-window `rf.rp_proj`
+                        // for this superblock row (dav2d_refmvs_load_tmvs, decode.c:5151).
+                        // Run once per sbrow over the full block-row width, before any
+                        // tile-col reads it, so the inter tmvp candidates and frame_mode=2
+                        // whole-frame TIP recon see this row's projection.
+                        // load_tmvs derives the temporal-MV projection from
+                        // reference state only (no symbol reads) and its rolling
+                        // window is consumed by TIP reconstruction — re-run it in
+                        // the consume pass so each sbrow sees its own projection.
+                        if need_load_tmvs && true {
+                            let by_end = (by + sb_step) >> 1;
+                            refmvs::load_tmvs(
+                                rf,
+                                tr,
+                                0,
+                                bw >> 1,
+                                by >> 1,
+                                by_end,
+                                seq_hdr.mv_traj,
+                                frame_hdr.tip.frame_mode,
+                                seq_hdr.tip_hole_fill,
+                                frame_hdr.tmvp_sample_step as i32,
+                                frame_hdr.n_ref_frames as i32,
+                            );
+                        }
+                        let rf_ref: &refmvs::Frame = &*rf;
+                        for tc in 0..cols as usize {
+                            let ts_idx = ts_base + tc;
+                            let (rs, re) = ranges[tc];
+                            if by < rs || by >= re {
+                                continue;
+                            }
+                            reset_context(&mut l, keyframe, is_tip);
+                            decode_tile_sbrow_entropy(
+                                bd_local,
+                                &fis[tc],
+                                frame_hdr,
+                                &mut ts[ts_idx],
+                                &mut msacs[tc],
+                                a,
+                                &mut lf.mask,
+                                &mut lf.lr_mask,
+                                &mut l,
+                                &mut *dst_y,
+                                &mut *dst_u,
+                                &mut *dst_v,
+                                &mut cf,
+                                &recon_frame,
+                                &mut cur_segmap[..],
+                                prev_segmap_ref,
+                                &mut lf.segmap_uv,
+                                lf.uv_segmap_stride,
+                                &mut cur_ccsomap[..],
+                                prev_ccsomap_ref,
+                                &mut part_w_dummy,
+                                &part_rs[tc],
+                                by,
+                                sb256w,
+                                root_bs,
+                                c_root_bs,
+                                &mut rt,
+                                rf_ref,
+                                &mut cur_mvs,
+                                &refp_pics,
+                                &svc_v,
+                                seq_hdr,
+                                frame_hdr,
+                                &masks,
+                                crate::internal::Pass::Recon as u8,
+                                CoefSource::Consume,
+                                &mut ft_cf[..],
+                                &mut ft_cf_off,
+                                &mut ft_cbi[..],
+                                &mut ft_b[..],
+                                b4_stride_v as usize,
+                                &mut ft_warp[..],
+                                &mut ft_q,
+                                &mut ft_q_idx,
+                                &mut part_w_idxs[tc],
+                                &mut part_r_idxs[tc],
+                            )?;
+                        }
+                        by += sb_step;
+                    }
+                } else {
+                    // PHASE A: decode every superblock-row across all tile-cols.
+                    let mut by = row_rs;
+                    while by < row_re {
+                        // Project reference temporal MVs into the rolling-window `rf.rp_proj`
+                        // for this superblock row (dav2d_refmvs_load_tmvs, decode.c:5151).
+                        // Run once per sbrow over the full block-row width, before any
+                        // tile-col reads it, so the inter tmvp candidates and frame_mode=2
+                        // whole-frame TIP recon see this row's projection.
+                        if need_load_tmvs {
+                            let by_end = (by + sb_step) >> 1;
+                            refmvs::load_tmvs(
+                                rf,
+                                tr,
+                                0,
+                                bw >> 1,
+                                by >> 1,
+                                by_end,
+                                seq_hdr.mv_traj,
+                                frame_hdr.tip.frame_mode,
+                                seq_hdr.tip_hole_fill,
+                                frame_hdr.tmvp_sample_step as i32,
+                                frame_hdr.n_ref_frames as i32,
+                            );
+                        }
+                        let rf_ref: &refmvs::Frame = &*rf;
+                        for tc in 0..cols as usize {
+                            let ts_idx = ts_base + tc;
+                            let (rs, re) = ranges[tc];
+                            if by < rs || by >= re {
+                                continue;
+                            }
+                            reset_context(&mut l, keyframe, is_tip);
+                            decode_tile_sbrow_entropy(
+                                bd_local,
+                                &fis[tc],
+                                frame_hdr,
+                                &mut ts[ts_idx],
+                                &mut msacs[tc],
+                                a,
+                                &mut lf.mask,
+                                &mut lf.lr_mask,
+                                &mut l,
+                                &mut *dst_y,
+                                &mut *dst_u,
+                                &mut *dst_v,
+                                &mut cf,
+                                &recon_frame,
+                                &mut cur_segmap[..],
+                                prev_segmap_ref,
+                                &mut lf.segmap_uv,
+                                lf.uv_segmap_stride,
+                                &mut cur_ccsomap[..],
+                                prev_ccsomap_ref,
+                                &mut part_ws[tc],
+                                &part_r,
+                                by,
+                                sb256w,
+                                root_bs,
+                                c_root_bs,
+                                &mut rt,
+                                rf_ref,
+                                &mut cur_mvs,
+                                &refp_pics,
+                                &svc_v,
+                                seq_hdr,
+                                frame_hdr,
+                                &masks,
+                                crate::internal::PASS_ALL,
+                                CoefSource::ParseRecon,
+                                &mut [],
+                                &mut 0usize,
+                                &mut [],
+                                &mut [],
+                                0,
+                                &mut [],
+                                &mut ft_q_sp,
+                                &mut ft_q_idx_sp,
+                                &mut part_w_idxs[tc],
+                                &mut part_r_idxs[tc],
+                            )?;
+                        }
+                        by += sb_step;
+                    }
+                }
                 // Return the MSAC buffers to the tile states.
                 drop(msacs);
                 for (tc, buf) in bufs.into_iter().enumerate() {
@@ -4124,7 +4485,12 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
 
     // ---- decode -----------------------------------------------------------
     let in_cdf_ref = fc.in_cdf.take();
-    decode_frame(&mut fc, n_tc, 1, in_cdf_ref.as_ref(), qcat)?;
+    // Multi-threaded settings run the two-pass decode (entropy pass staging
+    // blocks/coefficients, then a bitstream-free reconstruction pass) — the
+    // foundation the sbrow pipeline schedules across; single-threaded settings
+    // keep the fused single pass.
+    let n_passes = if n_tc > 1 { 2 } else { 1 };
+    decode_frame(&mut fc, n_tc, n_passes, in_cdf_ref.as_ref(), qcat)?;
 
     // ---- Reference-list + CDF update per refresh_frame_flags (decode.c:5694) ----
     // dav2d performs this UNCONDITIONALLY before launching decode and rolls back
@@ -4492,6 +4858,45 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     }
     if has_chroma {
         b.cbs = cbs as i8;
+    }
+
+    // Second pass of a two-pass decode: the block was fully parsed and staged
+    // by the entropy pass; reconstruct straight from it. rav2d's recon path is
+    // self-contained given `b` + per-SB scratch (neighbour-derived state such
+    // as is_sm is hoisted into the block at parse time), so no entropy-context
+    // maintenance happens here (dav2d PASS-2 decode_b equivalent).
+    if recon.coef_source == CoefSource::Consume {
+        let tree_off = if has_luma { 0 } else { recon.ft_b.len() / 2 };
+        b = recon.ft_b[tree_off + by as usize * recon.ft_b4_stride + bx as usize];
+        if has_luma {
+            recon.warpmv = recon.ft_warp[by as usize * recon.ft_b4_stride + bx as usize];
+        }
+        let intrabc = b.intrabc != 0;
+        if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
+            recon_b_intra(
+                recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
+            )?;
+        } else if pass & (Pass::Recon as u8) != 0 && b.is_intra == 0 && !intrabc {
+            recon_b_inter(
+                recon,
+                msac,
+                cdf_m,
+                a,
+                l,
+                &b,
+                bx,
+                by,
+                cbx,
+                cby,
+                lbs,
+                cbs,
+                has_luma,
+                has_chroma,
+                ChromaPhase::Both,
+                fi,
+            )?;
+        }
+        return Ok(b);
     }
 
     if std::env::var("RAV2D_TRACE").is_ok() {
@@ -8414,7 +8819,22 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             msac.dbg_rng()
         );
     }
-    if pass & (Pass::Recon as u8) != 0 && b.is_intra != 0 {
+    // Entropy pass of a two-pass decode: stage the fully-parsed block for the
+    // reconstruction pass (dav2d `f->frame_thread.b`).
+    if recon.coef_source == CoefSource::ParseStage {
+        let tree_off = if has_luma { 0 } else { recon.ft_b.len() / 2 };
+        recon.ft_b[tree_off + by as usize * recon.ft_b4_stride + bx as usize] = b;
+        if has_luma {
+            recon.ft_warp[by as usize * recon.ft_b4_stride + bx as usize] = recon.warpmv;
+        }
+    }
+
+    // The coefficient symbols are parsed inside the recon walk (fused design),
+    // so the entropy pass of a two-pass decode must enter it too; the leaves
+    // stage the coefficients and return before any pixel work.
+    let enter_recon =
+        pass & (Pass::Recon as u8) != 0 || recon.coef_source == CoefSource::ParseStage;
+    if enter_recon && b.is_intra != 0 {
         recon_b_intra(
             recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
         )?;
@@ -8435,7 +8855,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         if trace_blk {
             eprintln!("  CK post_chroma_recon rng={}", msac.dbg_rng());
         }
-    } else if pass & (Pass::Recon as u8) != 0 && b.is_intra == 0 && !intrabc {
+    } else if enter_recon && b.is_intra == 0 && !intrabc {
         recon_b_inter(
             recon,
             msac,
@@ -9952,12 +10372,20 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
 
     let cf_n = tw * th;
     recon.cf[..cf_n].fill(0);
+    let consume = recon.coef_source == CoefSource::Consume;
 
     let mut txtp: u16 = txtp_seed;
     let mut res_ctx: u8 = 0;
     let (mut eob, stx, mut txtp) = if b.skip_txfm != 0 {
         res_ctx = 0x40;
         (-1i32, 0i32, crate::levels::txtp::DCT_DCT as u32)
+    } else if consume {
+        // Second pass: consume the entropy pass's staged cf/cbi (no msac reads).
+        let cbi = recon.ft_cbi[by as usize * recon.ft_b4_stride + bx as usize];
+        let raw = cbi.txtp[pl];
+        recon.cf[..cf_n].copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + cf_n]);
+        recon.ft_cf_off += cf_n;
+        (cbi.eob[pl] as i32, (raw >> 8) as i32, (raw & 0xff) as u32)
     } else {
         let dq_tbl = recon.dq_active[seg_id][pl];
         let qm_ref: Option<&[u8]> = recon.frame.qm[tx][pl].as_deref();
@@ -10058,22 +10486,24 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
         recon.scratch_u_has_cf = (eob >= 0) as i32;
     }
 
-    // context fill
-    let aw = imin(tw4, (fi.bw >> ss_hor) - (bx >> ss_hor)).max(0) as usize;
-    let lh = imin(th4, (fi.bh >> ss_ver) - (by >> ss_ver)).max(0) as usize;
-    if pl == 0 {
-        if aw > 0 {
-            a.lcoef[bx4..bx4 + aw].fill(res_ctx);
-        }
-        if lh > 0 {
-            l.lcoef[by4..by4 + lh].fill(res_ctx);
-        }
-    } else {
-        if aw > 0 {
-            a.ccoef[pl - 1][bx4..bx4 + aw].fill(res_ctx);
-        }
-        if lh > 0 {
-            l.ccoef[pl - 1][by4..by4 + lh].fill(res_ctx);
+    // context fill (entropy-pass state; dead in the consume pass)
+    if !consume {
+        let aw = imin(tw4, (fi.bw >> ss_hor) - (bx >> ss_hor)).max(0) as usize;
+        let lh = imin(th4, (fi.bh >> ss_ver) - (by >> ss_ver)).max(0) as usize;
+        if pl == 0 {
+            if aw > 0 {
+                a.lcoef[bx4..bx4 + aw].fill(res_ctx);
+            }
+            if lh > 0 {
+                l.lcoef[by4..by4 + lh].fill(res_ctx);
+            }
+        } else {
+            if aw > 0 {
+                a.ccoef[pl - 1][bx4..bx4 + aw].fill(res_ctx);
+            }
+            if lh > 0 {
+                l.ccoef[pl - 1][by4..by4 + lh].fill(res_ctx);
+            }
         }
     }
 
@@ -10113,6 +10543,18 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
                 recon.scratch.is_coded[1][row] |= mask;
             }
         }
+    }
+
+    // Entropy pass: stage this tx block's outcome and stop before recon.
+    if recon.coef_source == CoefSource::ParseStage {
+        if b.skip_txfm == 0 {
+            let idx = by as usize * recon.ft_b4_stride + bx as usize;
+            recon.ft_cbi[idx].eob[pl] = eob as i16;
+            recon.ft_cbi[idx].txtp[pl] = (txtp as u16) | ((stx as u16) << 8);
+            recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + cf_n].copy_from_slice(&recon.cf[..cf_n]);
+            recon.ft_cf_off += cf_n;
+        }
+        return Ok(());
     }
 
     if eob == -1 {
@@ -10242,7 +10684,7 @@ fn inter_chroma_residual_8bpc<BD: crate::pixel::BitDepth>(
     // residual is applied with the last luma sub-block (`ReconOnly`) once the
     // intervening luma blocks have splatted their MVs into the spatial refmvs
     // grid (so OPFL/refine-mv/BACP chroma prediction sees the final state).
-    if phase != ChromaPhase::ReconOnly {
+    if phase != ChromaPhase::ReconOnly && recon.coef_source != CoefSource::Consume {
         // Decode all U TUs then all V TUs (entropy order).
         recon.scratch_u_has_cf = 0;
         for pl in 0..2usize {
@@ -10363,6 +10805,53 @@ fn inter_chroma_residual_8bpc<BD: crate::pixel::BitDepth>(
             }
         }
     } // end coef-read phase
+
+    // Two-pass staging (dav2d read_coef_blocks chroma / PASS_RECON consume).
+    if recon.coef_source == CoefSource::ParseStage {
+        if phase != ChromaPhase::ReconOnly {
+            let need = n_tu * 32;
+            recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16].copy_from_slice(cf_u);
+            recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need].copy_from_slice(cf_v);
+            recon.ft_cf_off += need;
+            let mut y = 0;
+            while y < ch4ss {
+                let mut x = 0;
+                while x < cw4ss {
+                    let i = (y * cbw4ss + x) as usize;
+                    let idx = (cby + (y << ss_ver)) as usize * recon.ft_b4_stride
+                        + (cbx + (x << ss_hor)) as usize;
+                    for pl in 0..2 {
+                        recon.ft_cbi[idx].eob[1 + pl] = tu_eob[i][pl] as i16;
+                        recon.ft_cbi[idx].txtp[1 + pl] = tu_txtp[i][pl];
+                    }
+                    x += txw;
+                }
+                y += txh;
+            }
+        }
+        return Ok(());
+    }
+    if recon.coef_source == CoefSource::Consume && phase != ChromaPhase::ReconOnly {
+        let need = n_tu * 32;
+        cf_u.copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16]);
+        cf_v.copy_from_slice(&recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need]);
+        recon.ft_cf_off += need;
+        let mut y = 0;
+        while y < ch4ss {
+            let mut x = 0;
+            while x < cw4ss {
+                let i = (y * cbw4ss + x) as usize;
+                let idx = (cby + (y << ss_ver)) as usize * recon.ft_b4_stride
+                    + (cbx + (x << ss_hor)) as usize;
+                for pl in 0..2 {
+                    tu_eob[i][pl] = recon.ft_cbi[idx].eob[1 + pl] as i32;
+                    tu_txtp[i][pl] = recon.ft_cbi[idx].txtp[1 + pl];
+                }
+                x += txw;
+            }
+            y += txh;
+        }
+    }
 
     // Stash the decoded coefficients for the deferred recon phase, or restore
     // them (recon_tmpl.c `cbs_stage`: read with the first luma sub-block, apply
@@ -14889,7 +15378,7 @@ fn recon_b_intra_luma_geom<BD: crate::pixel::BitDepth>(
 /// with the first sub-block and the pixel reconstruction with the last, so the
 /// MSAC ordering matches `dav2d_recon_b`'s `cbs_stage` mechanism. For ordinary
 /// (<=64px) blocks both phases run in a single `Both` call.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ChromaPhase {
     Both,
     ReadOnly,
@@ -15023,8 +15512,10 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
 
     // ---- decode coefficients for both planes (recon_tmpl.c:3543-3580) -------
     let mut u_has_cf = 0i32;
+    // Two-pass: the consume pass reads no symbols (staged by the entropy pass).
+    let reading = phase != ChromaPhase::ReconOnly && recon.coef_source != CoefSource::Consume;
     if chroma_skip_txfm {
-        if phase != ChromaPhase::ReconOnly {
+        if reading {
             for pl in 0..2 {
                 let aw = imin(cw4ss, 64 - cbx4 as i32).max(0) as usize;
                 let lh = imin(ch4ss, 64 - cby4 as i32).max(0) as usize;
@@ -15036,7 +15527,7 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                 }
             }
         }
-    } else if phase != ChromaPhase::ReconOnly {
+    } else if reading {
         for pl in 0..2 {
             let cf = if pl == 0 { &mut *cf_u } else { &mut *cf_v };
             let mut y = 0;
@@ -15142,6 +15633,59 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
             }
         }
     } // end coef-read phase
+
+    // Two-pass staging (dav2d read_coef_blocks chroma / PASS_RECON consume).
+    // Entropy pass: append both planes' TU coefficients + per-TU cbi to the
+    // frame-thread store at the read point, then stop before recon. Consume
+    // pass: reload them at the recon point; the ReadOnly leg of an SDP walk
+    // has nothing to do in the consume pass (coefs load at its ReconOnly leg).
+    if recon.coef_source == CoefSource::ParseStage {
+        if phase != ChromaPhase::ReconOnly && !chroma_skip_txfm {
+            let need = n_tu * 32;
+            recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16].copy_from_slice(cf_u);
+            recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need].copy_from_slice(cf_v);
+            recon.ft_cf_off += need;
+            let mut y = 0;
+            while y < ch4ss {
+                let mut x = 0;
+                while x < cw4ss {
+                    let i = (y * cbw4ss as i32 + x) as usize;
+                    let idx = (cby + (y << ss_ver)) as usize * recon.ft_b4_stride
+                        + (cbx + (x << ss_hor)) as usize;
+                    for pl in 0..2 {
+                        recon.ft_cbi[idx].eob[1 + pl] = tu_eob[i][pl];
+                        recon.ft_cbi[idx].txtp[1 + pl] = tu_txtp[i][pl];
+                    }
+                    x += txw;
+                }
+                y += txh;
+            }
+        }
+        return Ok(());
+    }
+    if recon.coef_source == CoefSource::Consume {
+        if !chroma_skip_txfm && phase != ChromaPhase::ReconOnly {
+            let need = n_tu * 32;
+            cf_u.copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + n_tu * 16]);
+            cf_v.copy_from_slice(&recon.ft_cf[recon.ft_cf_off + n_tu * 16..recon.ft_cf_off + need]);
+            recon.ft_cf_off += need;
+            let mut y = 0;
+            while y < ch4ss {
+                let mut x = 0;
+                while x < cw4ss {
+                    let i = (y * cbw4ss as i32 + x) as usize;
+                    let idx = (cby + (y << ss_ver)) as usize * recon.ft_b4_stride
+                        + (cbx + (x << ss_hor)) as usize;
+                    for pl in 0..2 {
+                        tu_eob[i][pl] = recon.ft_cbi[idx].eob[1 + pl];
+                        tu_txtp[i][pl] = recon.ft_cbi[idx].txtp[1 + pl];
+                    }
+                    x += txw;
+                }
+                y += txh;
+            }
+        }
+    }
 
     // Stash decoded coefficients for the deferred recon phase, or restore them.
     if phase == ChromaPhase::ReadOnly {
@@ -15737,6 +16281,7 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
     // Zero the tx coefficient region; decode_coefs may not fully initialise it.
     let cf_n = tw * th;
     recon.cf[..cf_n].fill(0);
+    let consume = recon.coef_source == CoefSource::Consume;
 
     // IntraBC blocks may set skip_txfm (intra/non-IntraBC blocks force it to 0).
     // When set, no coefficients are coded: eob=-1, txtp=DCT_DCT, stx=0, and the
@@ -15744,6 +16289,14 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
     let (mut eob, stx, mut txtp) = if b.skip_txfm != 0 {
         res_ctx = 0x40;
         (-1i32, 0i32, crate::levels::txtp::DCT_DCT as u32)
+    } else if consume {
+        // Second pass: no symbol reads — take eob/txtp/stx and the coefficients
+        // staged by the entropy pass (dav2d PASS_RECON reading f->frame_thread).
+        let cbi = recon.ft_cbi[by as usize * recon.ft_b4_stride + bx as usize];
+        let raw = cbi.txtp[0];
+        recon.cf[..cf_n].copy_from_slice(&recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + cf_n]);
+        recon.ft_cf_off += cf_n;
+        (cbi.eob[0] as i32, (raw >> 8) as i32, (raw & 0xff) as u32)
     } else {
         let dq_seg = b.seg_id as usize;
         let dq_tbl = recon.dq_active[dq_seg][0]; // plane 0 (luma)
@@ -15800,13 +16353,29 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
     };
 
     // dav2d_memset_likely_pow2 of the lcoef context (recon_tmpl.c:2497-2500).
-    let aw = imin(tw4, fi.bw - bx).max(0) as usize;
-    let lh = imin(th4, fi.bh - by).max(0) as usize;
-    if aw > 0 {
-        a.lcoef[bx4..bx4 + aw].fill(res_ctx);
+    // The consume pass reads no symbols, so the entropy contexts are dead.
+    if !consume {
+        let aw = imin(tw4, fi.bw - bx).max(0) as usize;
+        let lh = imin(th4, fi.bh - by).max(0) as usize;
+        if aw > 0 {
+            a.lcoef[bx4..bx4 + aw].fill(res_ctx);
+        }
+        if lh > 0 {
+            l.lcoef[by4..by4 + lh].fill(res_ctx);
+        }
     }
-    if lh > 0 {
-        l.lcoef[by4..by4 + lh].fill(res_ctx);
+
+    // Entropy pass: stage this tx block's outcome and stop before recon
+    // (dav2d read_luma_tx_cf, recon_tmpl.c read_coef_blocks path).
+    if recon.coef_source == CoefSource::ParseStage {
+        if b.skip_txfm == 0 {
+            let idx = by as usize * recon.ft_b4_stride + bx as usize;
+            recon.ft_cbi[idx].eob[0] = eob as i16;
+            recon.ft_cbi[idx].txtp[0] = (txtp as u16) | ((stx as u16) << 8);
+            recon.ft_cf[recon.ft_cf_off..recon.ft_cf_off + cf_n].copy_from_slice(&recon.cf[..cf_n]);
+            recon.ft_cf_off += cf_n;
+        }
+        return Ok(());
     }
 
     // dst origin for this tx block.
@@ -16668,7 +17237,12 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
             }
         }
         if fi.n_passes > 1 {
-            part_w[*part_w_idx] = bp as u8 | ((unmix_bit as u8) << 7);
+            let v = bp as u8 | ((unmix_bit as u8) << 7);
+            if *part_w_idx == part_w.len() {
+                part_w.push(v);
+            } else {
+                part_w[*part_w_idx] = v;
+            }
             *part_w_idx += 1;
         }
     } else {
@@ -17621,6 +18195,13 @@ mod tests {
             let __svc = [[crate::internal::ScalableMotionParams::default(); 2]; 7];
             let __masks = crate::wedge::init_masks();
             let mut $recon = ReconCtx {
+                coef_source: CoefSource::ParseRecon,
+                ft_cf: &mut [],
+                ft_cf_off: 0,
+                ft_cbi: &mut [],
+                ft_b4_stride: 0,
+                ft_b: &mut [],
+                ft_warp: &mut [],
                 bd: crate::pixel::BitDepth8,
                 dst_y: &mut __ty,
                 dst_u: &mut __tu,
