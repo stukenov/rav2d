@@ -9431,6 +9431,7 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     cur_bw: i32,
     cur_bh: i32,
+    svc: [ScalableMotionParams; 2],
 ) {
     let plss_ver = if pl != 0 { ss_ver } else { 0 };
     let plss_hor = if pl != 0 { ss_hor } else { 0 };
@@ -9438,6 +9439,15 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     let v_mul = 4 >> plss_ver;
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
+    // Scaled reference: the reference plane differs in size, so the source
+    // sampling position advances by fractional steps (recon_tmpl.c:1611).
+    if svc[0].scale != 0 || svc[1].scale != 0 {
+        inter_mc_plane_scaled(
+            bd, dst, dst_stride, ref_pic, pl, bx, by, bw4, bh4, mvx, mvy, filter, ss_hor, ss_ver,
+            svc,
+        );
+        return;
+    }
     let ref_data: (&[BD::Pixel], i32, i32) = match ref_pic.data[pl] {
         Some(p) => {
             let pw = if pl == 0 {
@@ -9589,6 +9599,121 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
             filter as i32,
         );
     }
+}
+
+/// Scaled-reference motion compensation for one plane (put path). Port of the
+/// `refp != &f->cur` branch of dav2d's `mc()` (recon_tmpl.c:1611-1670): computes
+/// the scaled source window, emulates the edge into a scratch buffer when it
+/// overhangs the reference, then runs the fractional-step 8-tap kernel.
+#[allow(clippy::too_many_arguments)]
+fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
+    bd: BD,
+    dst: &mut [BD::Pixel],
+    dst_stride: usize,
+    ref_pic: &crate::picture::Picture,
+    pl: usize,
+    bx: i32,
+    by: i32,
+    bw4: i32,
+    bh4: i32,
+    mvx: i32,
+    mvy: i32,
+    filter: u8,
+    ss_hor: i32,
+    ss_ver: i32,
+    svc: [ScalableMotionParams; 2],
+) {
+    let plss_ver = if pl != 0 { ss_ver } else { 0 };
+    let plss_hor = if pl != 0 { ss_hor } else { 0 };
+    let h_mul = 4 >> plss_hor;
+    let v_mul = 4 >> plss_ver;
+    let ref_stride =
+        ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
+    let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
+        Some(p) => {
+            let ph = if pl == 0 {
+                ref_pic.p.h
+            } else {
+                (ref_pic.p.h + ss_ver) >> ss_ver
+            };
+            // SAFETY: ref_pic owns a stride*height allocation for this plane.
+            unsafe {
+                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
+            }
+        }
+        None => return,
+    };
+
+    let ss_hor_pl = plss_hor;
+    let ss_ver_pl = plss_ver;
+    let orig_pos_x = (bx * h_mul << 4) + mvx * (1 << (ss_hor_pl == 0) as i32);
+    let orig_pos_y = (by * v_mul << 4) + mvy * (1 << (ss_ver_pl == 0) as i32);
+    let scale_mv = |val: i32, scale: i32| -> i32 {
+        let tmp = val as i64 * scale as i64 + (scale as i64 - 0x4000) * 8;
+        crate::intops::apply_sign64((tmp.abs() + 128) >> 8, tmp) + 32
+    };
+    let pos_x = scale_mv(orig_pos_x, svc[0].scale);
+    let pos_y = scale_mv(orig_pos_y, svc[1].scale);
+    let step_x = svc[0].step;
+    let step_y = svc[1].step;
+
+    let left = pos_x >> 10;
+    let top = pos_y >> 10;
+    let right = ((pos_x + (bw4 * h_mul - 1) * step_x) >> 10) + 1;
+    let bottom = ((pos_y + (bh4 * v_mul - 1) * step_y) >> 10) + 1;
+
+    let rw = (ref_pic.p.w + ss_hor) >> ss_hor_pl;
+    let rh = (ref_pic.p.h + ss_ver) >> ss_ver_pl;
+    let w = (bw4 * h_mul) as usize;
+    let h = (bh4 * v_mul) as usize;
+
+    // dav2d b->filter: 0=REGULAR,1=SMOOTH,2=SHARP -> 8tap; 3=BILINEAR. The scaled
+    // path uses the 8-tap kernel for all (bilin-scaled is unused by AVM streams
+    // seen so far; fall back to REGULAR 8-tap if a bilinear block appears).
+    let filter_type = if filter == 3 { 0 } else { filter as i32 };
+
+    // The scaled window is [left-3, top-3] .. spanning (right-left+7)x(bottom-top+7).
+    let win_w = (right - left + 7) as usize;
+    let win_h = (bottom - top + 7) as usize;
+    let need_emu = left < 3 || top < 3 || right + 4 > rw || bottom + 4 > rh;
+
+    let emu_stride = 320usize;
+    let mut emu_buf;
+    let (src, src_off, src_stride) = if need_emu {
+        emu_buf = vec![BD::Pixel::default(); emu_stride * win_h.max(1)];
+        inter_emu_edge_8bpc::<BD>(
+            &mut emu_buf,
+            emu_stride,
+            ref_data,
+            ref_stride,
+            win_w,
+            win_h,
+            rw as usize,
+            rh as usize,
+            left - 3,
+            top - 3,
+        );
+        (&emu_buf[..], emu_stride * 3 + 3, emu_stride)
+    } else {
+        let off = (top as usize) * ref_stride + left as usize;
+        (ref_data, off, ref_stride)
+    };
+
+    crate::mc::put_8tap_scaled(
+        bd,
+        dst,
+        dst_stride,
+        src,
+        src_off,
+        src_stride as isize,
+        w,
+        h,
+        pos_x & 0x3ff,
+        pos_y & 0x3ff,
+        step_x,
+        step_y,
+        filter_type,
+    );
 }
 
 /// Translational MC into an intermediate i16 `tmp` buffer (recon_tmpl.c `mc`
@@ -11882,8 +12007,23 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                             &mut recon.dst_v[dst_off..]
                         };
                         inter_mc_plane_8bpc(
-                            bd, dst, uv_stride, &s_refp, pl, s_cbx, s_cby, s_bw4, s_bh4, s_mv.x,
-                            s_mv.y, s_filter, ss_hor, ss_ver, fi.bw, fi.bh,
+                            bd,
+                            dst,
+                            uv_stride,
+                            &s_refp,
+                            pl,
+                            s_cbx,
+                            s_cby,
+                            s_bw4,
+                            s_bh4,
+                            s_mv.x,
+                            s_mv.y,
+                            s_filter,
+                            ss_hor,
+                            ss_ver,
+                            fi.bw,
+                            fi.bh,
+                            recon.svc[s_ref0 as usize],
                         );
                     }
                 }
@@ -14086,7 +14226,6 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
     if ref0 < 0 || ref0 as usize >= 7 {
         return Ok(());
     }
-
     // Blocks larger than 64px in either dimension are not reconstructed as a
     // single unit (the MC kernels cap at 64px wide): they are split into 64x64
     // (or 128x128 for 256px) sub-blocks, mirroring `dav2d_recon_b`
@@ -14259,6 +14398,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                 ss_ver,
                 fi.bw,
                 fi.bh,
+                recon.svc[ref0 as usize],
             );
         }
 
@@ -14412,8 +14552,23 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                             &mut recon.dst_v[dst_off..]
                         };
                         inter_mc_plane_8bpc(
-                            bd, dst, uv_stride, &s_refp, pl, s_cbx, s_cby, s_bw4, s_bh4, s_mv.x,
-                            s_mv.y, s_filter, ss_hor, ss_ver, fi.bw, fi.bh,
+                            bd,
+                            dst,
+                            uv_stride,
+                            &s_refp,
+                            pl,
+                            s_cbx,
+                            s_cby,
+                            s_bw4,
+                            s_bh4,
+                            s_mv.x,
+                            s_mv.y,
+                            s_filter,
+                            ss_hor,
+                            ss_ver,
+                            fi.bw,
+                            fi.bh,
+                            recon.svc[s_ref0 as usize],
                         );
                     }
                 }
@@ -14449,8 +14604,23 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                 }
             } else {
                 inter_mc_plane_8bpc(
-                    bd, dst, uv_stride, &refp, pl, cbx, cby, cbw4, cbh4, mv.x, mv.y, filter,
-                    ss_hor, ss_ver, fi.bw, fi.bh,
+                    bd,
+                    dst,
+                    uv_stride,
+                    &refp,
+                    pl,
+                    cbx,
+                    cby,
+                    cbw4,
+                    cbh4,
+                    mv.x,
+                    mv.y,
+                    filter,
+                    ss_hor,
+                    ss_ver,
+                    fi.bw,
+                    fi.bh,
+                    recon.svc[ref0 as usize],
                 );
             }
         }
