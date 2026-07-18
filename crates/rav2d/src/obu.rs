@@ -1635,13 +1635,15 @@ pub fn parse_frame_hdr(
                     for ii in 0..n_feat {
                         if m & 1 != 0 {
                             let nbits = cf_range[ii][0] as i32;
-                            hdr.restoration.p[p].ns.filter[n][ii] = gb.get_bits_subexp_u(
-                                (ref_filter[ii] - cf_range[ii][1]) as u32,
-                                1 << nbits,
-                                nbits - 3,
-                            )
-                                as i8
-                                + cf_range[ii][1];
+                            // C promotes these int8_t operands to int and stores the
+                            // sum back into an int8_t (obu.c:1820-1823). Do the
+                            // arithmetic in i32 and truncate on store so a malformed
+                            // reference filter can't overflow narrow i8 arithmetic;
+                            // valid streams stay in range, so the result is unchanged.
+                            let ref_off = (ref_filter[ii] as i32 - cf_range[ii][1] as i32) as u32;
+                            let coef = gb.get_bits_subexp_u(ref_off, 1 << nbits, nbits - 3) as i32
+                                + cf_range[ii][1] as i32;
+                            hdr.restoration.p[p].ns.filter[n][ii] = coef as i8;
                         }
                         m >>= 1;
                     }
