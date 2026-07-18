@@ -173,3 +173,30 @@ fn fuzz_mutated_streams_no_panic() {
         }
     }
 }
+
+/// Replay every fuzzer-discovered crashing input (checked into
+/// `tests/data/fuzz-regressions/`). Each was a real panic on malformed input
+/// that has since been fixed; this guards against reintroducing any of them.
+#[test]
+fn fuzz_regression_corpus_no_panic() {
+    let dir = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/fuzz-regressions"
+    ));
+    let entries =
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    let mut n = 0;
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        if let Err(msg) = decode_catch(bytes) {
+            panic!("regression: {} still panics: {msg}", path.display());
+        }
+        n += 1;
+    }
+    assert!(n > 0, "no regression inputs found in {}", dir.display());
+    eprintln!("fuzz_regression_corpus_no_panic: {n} inputs replayed cleanly");
+}

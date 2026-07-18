@@ -79,6 +79,16 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
 
+      # Replay every fuzzer-discovered crashing input to guard against
+      # regressing a previously-fixed malformed-input panic. Only the fast
+      # regression test runs here; the exhaustive random/mutated fuzz sweeps
+      # (tests/fuzz.rs) are too slow for CI and run out of band.
+      - name: cargo test (fuzz regression corpus)
+        run: cargo test -p rav2d --test fuzz fuzz_regression_corpus_no_panic
+        env:
+          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
       - name: cargo build --release
         run: cargo build --release --workspace
         env:
