@@ -243,7 +243,15 @@ pub fn get_class_lut_idx<P: Pixel>(
     // normalized back to the 8-bit domain (looprestoration_tmpl.c:503-506).
     let rnd = (1 << bitdepth_min_8) >> 1;
     for i in 0..3 {
-        f[i] = (f[i] * PC_WIENER_NORMALIZER[i] as i32 + rnd) >> bitdepth_min_8;
+        // C computes this as `int * int` (looprestoration_tmpl.c:505). Valid
+        // samples keep `f[i] * normalizer` inside i32 (max ~1.1e9 at 12-bit),
+        // but a malformed stream can leave out-of-range values in the HBD sample
+        // buffer, overflowing the multiply. Wrap to match C's signed-overflow
+        // behaviour (a defined, if garbage, class index) instead of panicking.
+        f[i] = f[i]
+            .wrapping_mul(PC_WIENER_NORMALIZER[i] as i32)
+            .wrapping_add(rnd)
+            >> bitdepth_min_8;
     }
     s *= PC_WIENER_NORMALIZER[3] as i32;
 
