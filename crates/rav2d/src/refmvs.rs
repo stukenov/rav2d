@@ -2461,7 +2461,7 @@ pub fn refmvs_find(
     }
 
     if let Some(ref w) = warp
-        && std::env::var("RAV2D_WARP_TRACE").is_ok()
+        && env_flag!("RAV2D_WARP_TRACE")
     {
         eprintln!(
             "WTRACE by4={} bx4={} ref0={} ref1={} warp_cnt={}",

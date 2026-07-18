@@ -46,6 +46,18 @@
 #![allow(clippy::doc_lazy_continuation)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
+/// Cache a rarely-set debug/trace environment flag so the hot decode path pays
+/// the `getenv` cost — a process-global lock (`__findenv_locked`) plus a `String`
+/// allocation — exactly once instead of on every block. The value is sampled on
+/// first use, mirroring how `RAV2D_NEON_OFF` is handled in `simd.rs`. This keeps
+/// the porting-era trace tooling available while removing it from the profile.
+macro_rules! env_flag {
+    ($name:literal) => {{
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var($name).is_ok())
+    }};
+}
+
 pub(crate) mod ccso;
 pub(crate) mod cdef;
 pub(crate) mod cdf;

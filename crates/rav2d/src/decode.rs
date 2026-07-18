@@ -2846,7 +2846,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
 
     // Abort the frame on an out-of-range segment id (C `return -1`).
     if sb_seg_err {
-        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+        if env_flag!("RAV2D_SUBMIT_ERR") {
             eprintln!("decode_tile_sbrow_entropy: seg_id_err");
         }
         return Err(());
@@ -2857,7 +2857,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
     // the overread sentinel is expected and must not abort the frame (dav2d skips
     // the entropy pass entirely for these, decode.c:4447).
     if pass_bits & (Pass::Entropy as u8) != 0 && frm_hdr.tip.frame_mode != 2 && msac.cnt() <= -15 {
-        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+        if env_flag!("RAV2D_SUBMIT_ERR") {
             eprintln!(
                 "decode_tile_sbrow_entropy: msac overread cnt={}",
                 msac.cnt()
@@ -4185,7 +4185,7 @@ pub fn decode_frame(
             &mut fc.frame_thread.tile_start_off,
         )
         .inspect_err(|_| {
-            if std::env::var("RAV2D_TRACE_ERR").is_ok() {
+            if env_flag!("RAV2D_TRACE_ERR") {
                 eprintln!("TRACE_ERR: decode_frame_init_cdf failed");
             }
         })?;
@@ -4194,7 +4194,7 @@ pub fn decode_frame(
     }
 
     decode_frame_main(fc, n_passes).inspect_err(|_| {
-        if std::env::var("RAV2D_TRACE_ERR").is_ok() {
+        if env_flag!("RAV2D_TRACE_ERR") {
             eprintln!("TRACE_ERR: decode_frame_main failed");
         }
     })?;
@@ -4286,7 +4286,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     let is_inter_or_switch = frame_hdr.is_inter_or_switch();
     let allow_intrabc = frame_hdr.allow_intrabc != 0;
 
-    if std::env::var("RAV2D_FINFO").is_ok() {
+    if env_flag!("RAV2D_FINFO") {
         eprintln!(
             "FINFO type={:?} poc={} pri_ref={} n_ref={} refidx={:?} use_rfm={} refresh={:#x} switchable_comp={} skip_mode={} warp={} masked_comp={} motion_modes={:#x} tip={} show_imm={} disable_cdf={} subpel={:?}",
             frame_hdr.frame_type,
@@ -4330,7 +4330,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
                     && bpc == p.p.bpc
             });
             if !valid {
-                if std::env::var("RAV2D_TRACE_ERR").is_ok() {
+                if env_flag!("RAV2D_TRACE_ERR") {
                     eprintln!(
                         "TRACE_ERR: ref {i} (slot {refidx}) invalid: pic={:?}",
                         rp.pic.as_ref().map(|p| (p.p.w, p.p.h, p.p.bpc))
@@ -4908,7 +4908,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         return Ok(b);
     }
 
-    if std::env::var("RAV2D_TRACE").is_ok() {
+    if env_flag!("RAV2D_TRACE") {
         eprintln!(
             "BLK poc={} y={} x={} cby={} cbx={} bs={} lbs={} cbs={} hasL={} hasC={} ireg={} rng={}",
             recon.frm_hdr.frame_offset,
@@ -5312,7 +5312,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         b.intrabc = 0;
         if fi.allow_intrabc && imin(bw4, bh4) < 16 && b.is_intra != 0 && intra_region == 0 {
             let ctx = (nb_intrabc[0] + nb_intrabc[1]) as usize;
-            if std::env::var("RAV2D_IBC").is_ok() {
+            if env_flag!("RAV2D_IBC") {
                 let c = cdf_m.intrabc(ctx);
                 eprintln!(
                     "IBC y={} x={} ctx={} cdf0={} cdf1={} rng_in={} dif={}",
@@ -5337,7 +5337,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             msac.dbg_rng()
         );
     }
-    if intrabc && std::env::var("RAV2D_IBC2").is_ok() {
+    if intrabc && env_flag!("RAV2D_IBC2") {
         eprintln!(
             "IBC2 y={} x={} bs={} bw4={} bh4={} hasC={} cbs={}",
             by, bx, bs as i32, bw4, bh4, has_chroma, cbs as i32
@@ -5916,7 +5916,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                     uv_mode_idx += msac.decode_bools_bypass(3) as usize;
                 }
                 if uv_mode_idx > 12 {
-                    if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+                    if env_flag!("RAV2D_SUBMIT_ERR") {
                         eprintln!("uv_mode_idx>12 bx={} by={}", bx, by);
                     }
                     return Err(());
@@ -6241,7 +6241,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                     msac.dbg_rng()
                 );
             }
-            if std::env::var("RAV2D_IBC2").is_ok() {
+            if env_flag!("RAV2D_IBC2") {
                 eprintln!(
                     "IBC2MV y={} x={} mvy={} mvx={} prec={}",
                     by,
@@ -7992,7 +7992,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 }
             }
             unsafe { b.data.intra.intrabc_mv = mv };
-            if std::env::var("RAV2D_IBC2").is_ok() {
+            if env_flag!("RAV2D_IBC2") {
                 eprintln!(
                     "RIBCMV y={} x={} mvy={} mvx={} drl={} nmvs={}",
                     by,
@@ -8799,7 +8799,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     if trace_blk {
         eprintln!("  CK pre_recon rng={}", msac.dbg_rng());
     }
-    if std::env::var("RAV2D_BLK_TRACE").is_ok() {
+    if env_flag!("RAV2D_BLK_TRACE") {
         let (r0, r1, mm, mvy, mvx) = if b.is_intra != 0 {
             (-2i32, -2i32, -1i32, 0i32, 0i32)
         } else {
@@ -8854,7 +8854,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         recon_b_intra(
             recon, msac, cdf_m, a, l, &b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
         )?;
-        if intrabc && std::env::var("RAV2D_IBC2").is_ok() {
+        if intrabc && env_flag!("RAV2D_IBC2") {
             eprintln!(
                 "RIBC y={} x={} mvy={} mvx={} refmv={} drl={} qpel={} morph={} rng={}",
                 by,
@@ -10605,7 +10605,7 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
         let stx = (txtp >> 8) as i32;
         (eob, stx, (txtp & 0xff) as u32)
     };
-    if std::env::var("RAV2D_COEF_TRACE").is_ok() {
+    if env_flag!("RAV2D_COEF_TRACE") {
         if pl == 0 {
             eprintln!(
                 "DCOEF y={} x={} tx={} txtp={} stx={} eob={} rng={}",
@@ -10768,7 +10768,7 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
         txtp += txtp & crate::tables::TX_DDT_MASK[tx] as u32;
     }
     let _ = IntraPredMode::DcPred;
-    if std::env::var("RAV2D_CFDUMP").is_ok() && by == 12 && bx == 0 && pl == 0 {
+    if env_flag!("RAV2D_CFDUMP") && by == 12 && bx == 0 && pl == 0 {
         let mut s = format!(
             "DCFDUMP by={} bx={} tx={} txtp={} eob={}\n",
             by, bx, tx, txtp, eob
@@ -13795,7 +13795,7 @@ fn update_temporal_grid<BD: crate::pixel::BitDepth>(
     if idx >= recon.cur_mvs.len() {
         return;
     }
-    if std::env::var("RAV2D_UT").is_ok() {
+    if env_flag!("RAV2D_UT") {
         let mv0 = crate::refmvs::quantize_mv(mv[swap as usize]);
         let mv1 = crate::refmvs::quantize_mv(mv[(!swap) as usize]);
         let (m0y, m0x) = if unsafe { mv0.n } == crate::refmvs::INVALID_TRAJ {
@@ -14332,7 +14332,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
     // frame global motion otherwise (GLOBALMV warp).
     let use_local_warp = motion_mode >= MotionMode::WarpCausal as u8;
 
-    if std::env::var("RAV2D_WARP").is_ok() {
+    if env_flag!("RAV2D_WARP") {
         eprintln!(
             "WARP by={} bx={} mm={} im={} warp_block={} use_local={} wm_type={:?} affine={} mat={:?} abcd={:?} mv=({},{})",
             by,
@@ -15789,7 +15789,7 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                         &mut res_ctx,
                     );
                     if eob == i32::MIN {
-                        if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+                        if env_flag!("RAV2D_SUBMIT_ERR") {
                             eprintln!(
                                 "recon chroma: eob==MIN cbx={} cby={} seg={}",
                                 cbx, cby, b.seg_id
@@ -15803,7 +15803,7 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                     tu_txtp[i][pl] = txtp;
                     tu_eob[i][pl] = eob as i16;
 
-                    if std::env::var("RAV2D_CTX").is_ok() && cby < 8 {
+                    if env_flag!("RAV2D_CTX") && cby < 8 {
                         eprintln!(
                             "CHROMATX cby={} cbx={} pl={} uvtx={} txtp={} eob={} uvmode={} cfl_type={} rng={}",
                             cby,
@@ -16551,7 +16551,7 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
             &mut res_ctx,
         );
         if eob == i32::MIN {
-            if std::env::var("RAV2D_SUBMIT_ERR").is_ok() {
+            if env_flag!("RAV2D_SUBMIT_ERR") {
                 eprintln!("recon luma: eob==MIN bx={} by={} seg={}", bx, by, b.seg_id);
             }
             return Err(());
@@ -17133,7 +17133,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
         return Err(());
     }
 
-    if std::env::var("RAV2D_TRACE_SB").is_ok() {
+    if env_flag!("RAV2D_TRACE_SB") {
         eprintln!(
             "SB y={} x={} bs={} lbs={} cbs={} ireg={} dir={} rng={}",
             *by,
@@ -17264,7 +17264,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                 let mix_inter = fi.is_inter_or_switch && *intra_region == 0;
                 let ctx1 = get_partition_ctx(a, l, b_dim, pl, by4, bx4);
                 let ctx2 = (ctx1 + pcc.ctx[0] as i32 * 4) as usize;
-                if std::env::var("RAV2D_PART_TRACE").is_ok() {
+                if env_flag!("RAV2D_PART_TRACE") {
                     eprintln!(
                         "DSPLIT y={} x={} bs={} ctx2={} hh={} hv={} rng_in={}",
                         *by,
@@ -17316,7 +17316,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                             dir = v_aspect as i32;
                         } else {
                             let ctx4 = (ctx1 + pcc.ctx[1] as i32 * 4) as usize;
-                            if std::env::var("RAV2D_PART_TRACE").is_ok() {
+                            if env_flag!("RAV2D_PART_TRACE") {
                                 eprintln!(
                                     "DDIR y={} x={} bs={} ctx1={} pccctx1={} ctx4={} rng_in={}",
                                     *by,
@@ -17408,7 +17408,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
             }
         }
 
-        if std::env::var("RAV2D_PART_TRACE").is_ok() {
+        if env_flag!("RAV2D_PART_TRACE") {
             eprintln!(
                 "DPART y={} x={} bs={} bp={} rng={}",
                 *by,

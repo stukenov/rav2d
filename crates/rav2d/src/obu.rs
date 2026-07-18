@@ -2787,7 +2787,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 // (`if ((res = dav2d_submit_frame(c)) < 0) return res;`,
                 // obu.c:2774).
                 if c.run_decode && crate::decode::submit_frame(c, c.n_tc.max(1) as i32).is_err() {
-                    if std::env::var("RAV2D_TRACE_ERR").is_ok() {
+                    if env_flag!("RAV2D_TRACE_ERR") {
                         eprintln!("TRACE_ERR: submit_frame failed");
                     }
                     return Err(Rav2dError::InvalidData);
