@@ -238,6 +238,7 @@ impl Decoder {
         };
 
         let ctx = DecoderContext {
+            allocator: allocator.clone(),
             seq_hdr: None,
             frame_hdr: None,
             tile: Vec::new(),
@@ -302,6 +303,15 @@ impl Decoder {
     ///
     /// Returns `Err(Again)` if the decoder hasn't consumed previous data yet;
     /// call `get_picture` to drain output before sending more.
+    /// Install a custom picture allocator for reconstructed/output frames
+    /// (dav2d's `Dav2dPicAllocator`). Call before decoding; the default
+    /// built-in allocator is used otherwise. Useful for zero-copy output into a
+    /// caller-owned buffer or a pooled allocator.
+    pub fn set_picture_allocator(&mut self, allocator: Arc<dyn PicAllocator>) {
+        self.allocator = allocator.clone();
+        self.ctx.allocator = allocator;
+    }
+
     pub fn send_data(&mut self, data: Option<Data>) -> Result<(), Rav2dError> {
         match data {
             None => {
@@ -418,7 +428,8 @@ impl Decoder {
         // The grain synthesis + base copy are parallelised across `n_tc` threads
         // (`n_tc == 1` keeps the byte-identical sequential path).
         if self.ctx.apply_grain && crate::decode::picture_has_grain(&pic) {
-            let grained = crate::decode::apply_grain_to_picture_mt(&pic, self.n_tc);
+            let grained =
+                crate::decode::apply_grain_to_picture_mt(&pic, self.n_tc, self.allocator.clone());
             pic.unref();
             return Ok(grained);
         }
@@ -474,7 +485,8 @@ impl Decoder {
             };
             // Append a fresh, independently-owned copy of the stored picture.
             let pic = self.ctx.refs[slot].p.pic.as_ref().unwrap().clone();
-            self.dpb[self.dpb_in].pic.p = crate::decode::clone_picture_mt(&pic, self.n_tc);
+            self.dpb[self.dpb_in].pic.p =
+                crate::decode::clone_picture_mt(&pic, self.n_tc, self.allocator.clone());
             self.dpb_in += 1;
             if self.dpb_in == self.dpb_sz {
                 self.dpb_in = 0;
@@ -706,5 +718,51 @@ mod tests {
         let s = Settings::default();
         let d = Decoder::open(&s).unwrap();
         drop(d);
+    }
+
+    #[test]
+    fn test_set_picture_allocator_is_used() {
+        use crate::picture::{PicAllocator, PictureAllocation, PictureParameters};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A custom allocator that counts allocations and delegates the actual
+        // buffer to the default allocator, proving the setter is honoured.
+        struct CountingAllocator {
+            inner: crate::picture::DefaultPicAllocator,
+            allocs: Arc<AtomicUsize>,
+        }
+        impl PicAllocator for CountingAllocator {
+            fn alloc_picture(&self, p: &PictureParameters) -> Option<PictureAllocation> {
+                self.allocs.fetch_add(1, Ordering::Relaxed);
+                self.inner.alloc_picture(p)
+            }
+            fn release_picture(&self, alloc: PictureAllocation) {
+                self.inner.release_picture(alloc);
+            }
+        }
+
+        let allocs = Arc::new(AtomicUsize::new(0));
+        let mut d = Decoder::open(&Settings::default()).unwrap();
+        d.set_picture_allocator(Arc::new(CountingAllocator {
+            inner: crate::picture::DefaultPicAllocator::new(),
+            allocs: allocs.clone(),
+        }));
+
+        // Decode a bundled keyframe; the custom allocator must have been called.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/hbd-10bit-128x128-intra.obu"
+        );
+        if let Ok(bytes) = std::fs::read(path) {
+            let _ = d.send_data(Some(Data::wrap(bytes)));
+            let _ = d.send_data(None);
+            while let Ok(pic) = d.get_picture() {
+                drop(pic);
+            }
+            assert!(
+                allocs.load(Ordering::Relaxed) > 0,
+                "custom picture allocator was never invoked"
+            );
+        }
     }
 }

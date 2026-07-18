@@ -373,6 +373,10 @@ pub struct CdfThreadContext {
 }
 
 pub struct DecoderContext {
+    /// Picture allocator for reconstructed/output frames (dav2d
+    /// `Dav2dPicAllocator`). Defaults to the built-in allocator; a custom one
+    /// is installed via `Decoder::set_picture_allocator`.
+    pub allocator: Arc<dyn crate::picture::PicAllocator>,
     pub seq_hdr: Option<Arc<SequenceHeader>>,
     pub frame_hdr: Option<Arc<FrameHeader>>,
 

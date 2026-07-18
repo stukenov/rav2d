@@ -4261,10 +4261,9 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     fc.inloop_filters = c.inloop_filters;
 
     // Allocate the output picture that reconstruction writes into. During
-    // bring-up we use the default allocator; the decoder's configured allocator
-    // is threaded through when output queueing is wired.
-    let allocator: std::sync::Arc<dyn crate::picture::PicAllocator> =
-        std::sync::Arc::new(crate::picture::DefaultPicAllocator::new());
+    // Use the decoder's configured picture allocator (custom or the built-in
+    // default) for the reconstructed frame.
+    let allocator = c.allocator.clone();
     fc.cur_pic = crate::picture::Picture::alloc(
         frame_hdr.width,
         frame_hdr.height,
@@ -4547,14 +4546,21 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     // The plane copy is parallelised across `c.n_tc` (the recon core stays on
     // the single-thread path; only this disjoint-output display copy threads).
     let display_threads = c.n_tc;
-    c.frame_out.push(clone_picture_mt(&shared, display_threads));
+    c.frame_out.push(clone_picture_mt(
+        &shared,
+        display_threads,
+        c.allocator.clone(),
+    ));
     Ok(())
 }
 
 /// Clone a `Picture`'s pixel planes into a fresh independently-owned allocation
 /// (the output path takes ownership while references keep the shared `Arc`).
-pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
-    clone_picture_mt(src, 1)
+pub(crate) fn clone_picture(
+    src: &crate::picture::Picture,
+    allocator: std::sync::Arc<dyn crate::picture::PicAllocator>,
+) -> crate::picture::Picture {
+    clone_picture_mt(src, 1, allocator)
 }
 
 /// `clone_picture` with optional per-plane parallelism. The three colour planes
@@ -4564,9 +4570,8 @@ pub(crate) fn clone_picture(src: &crate::picture::Picture) -> crate::picture::Pi
 pub(crate) fn clone_picture_mt(
     src: &crate::picture::Picture,
     n_threads: u32,
+    allocator: std::sync::Arc<dyn crate::picture::PicAllocator>,
 ) -> crate::picture::Picture {
-    let allocator: std::sync::Arc<dyn crate::picture::PicAllocator> =
-        std::sync::Arc::new(crate::picture::DefaultPicAllocator::new());
     let mut dst = match crate::picture::Picture::alloc(
         src.p.w,
         src.p.h,
@@ -4653,8 +4658,11 @@ pub(crate) fn picture_has_grain(pic: &crate::picture::Picture) -> bool {
 /// The copy is first made bit-identical to `src` (so planes without grain match
 /// dav2d's memcpy-of-non-modified-planes), then the grain kernels overwrite the
 /// grained planes reading from the ungrained `src` planes.
-pub(crate) fn apply_grain_to_picture(src: &crate::picture::Picture) -> crate::picture::Picture {
-    apply_grain_to_picture_mt(src, 1)
+pub(crate) fn apply_grain_to_picture(
+    src: &crate::picture::Picture,
+    allocator: std::sync::Arc<dyn crate::picture::PicAllocator>,
+) -> crate::picture::Picture {
+    apply_grain_to_picture_mt(src, 1, allocator)
 }
 
 /// `apply_grain_to_picture` with optional parallelism: the base copy is done
@@ -4664,12 +4672,13 @@ pub(crate) fn apply_grain_to_picture(src: &crate::picture::Picture) -> crate::pi
 pub(crate) fn apply_grain_to_picture_mt(
     src: &crate::picture::Picture,
     n_threads: u32,
+    allocator: std::sync::Arc<dyn crate::picture::PicAllocator>,
 ) -> crate::picture::Picture {
     let fgd = match src.fgm {
         Some(f) => f,
-        None => return clone_picture_mt(src, n_threads),
+        None => return clone_picture_mt(src, n_threads, allocator),
     };
-    let dst = clone_picture_mt(src, n_threads);
+    let dst = clone_picture_mt(src, n_threads, allocator);
     let seed = src
         .frame_hdr
         .as_ref()
