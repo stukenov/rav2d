@@ -2242,7 +2242,6 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
 /// scaled-MC path (svc scale/step != 0). `#[ignore]`d until that path is ported;
 /// un-ignore once the scaled 8-tap kernel lands and this must be bit-exact.
 #[test]
-#[ignore = "scaled reference MC not yet ported (resolution-switching streams)"]
 fn bit_exact_scaled_ref_sweep() {
     let path = data("resize-10bit-superres.obu");
     if !path.exists() {
@@ -2602,4 +2601,11 @@ fn mt_matches_single_thread() {
     eprintln!(
         "mt_matches_single_thread: {checked} decode configs byte-identical (n_threads 1 vs 4)"
     );
+}
+
+/// TEMP: dav2d full block trace for resize.
+#[test]
+fn tmp_dav2d_rz_blk() {
+    let f = dav2d_decode_invisible(&data("resize-10bit-superres.obu"));
+    eprintln!("dav2d frames: {}", f.len());
 }

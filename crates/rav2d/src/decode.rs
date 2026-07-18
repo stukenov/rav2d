@@ -9669,8 +9669,12 @@ fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
     let right = ((pos_x + (bw4 * h_mul - 1) * step_x) >> 10) + 1;
     let bottom = ((pos_y + (bh4 * v_mul - 1) * step_y) >> 10) + 1;
 
-    let rw = (ref_pic.p.w + ss_hor) >> ss_hor_pl;
-    let rh = (ref_pic.p.h + ss_ver) >> ss_ver_pl;
+    // Reference plane dimensions use the PLANE subsampling in both the round-up
+    // and the shift (dav2d mc(): `(w + ss_hor) >> ss_hor` with plane ss), so
+    // luma is exactly `w`, not `w + frame_ss`. Mixing frame and plane ss here
+    // left luma one column/row too wide and corrupted the right/bottom emu clamp.
+    let rw = (ref_pic.p.w + ss_hor_pl) >> ss_hor_pl;
+    let rh = (ref_pic.p.h + ss_ver_pl) >> ss_ver_pl;
     let w = (bw4 * h_mul) as usize;
     let h = (bh4 * v_mul) as usize;
 
