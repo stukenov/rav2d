@@ -118,4 +118,6 @@ pub use decoder::{get_frame_delay, version, version_api};
 pub use error::Rav2dError;
 pub use headers::{FrameHeader, PixelLayout, SequenceHeader};
 pub use log::Logger;
-pub use picture::{EventFlags, PicAllocator, Picture};
+pub use picture::{
+    EventFlags, PICTURE_ALIGNMENT, PicAllocator, Picture, PictureAllocation, PictureParameters,
+};

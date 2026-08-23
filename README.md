@@ -59,7 +59,12 @@ decoder.send_data(Some(Data::wrap(obu_data))).unwrap();
 
 loop {
     match decoder.get_picture() {
-        Ok(pic) => { /* pic.data planes, pic.p.w, pic.p.h, pic.p.bpc */ }
+        Ok(pic) => {
+            // Planes come out as ordinary slices — no `unsafe` in consumer code.
+            let (w, h) = pic.plane_dimensions(0).unwrap();   // luma size in samples
+            for row in pic.plane_rows_u8(0) { /* row: &[u8], w samples, no padding */ }
+            // 10/12-bit frames: pic.plane_rows_u16(0) -> &[u16]
+        }
         Err(Rav2dError::Again) => break, // need more data
         Err(e) => panic!("{e}"),
     }
@@ -134,6 +139,8 @@ Following the [rav1d](https://github.com/memorysafety/rav1d) strategy:
 
 ## Safety
 
+- The public API hands out pixels as ordinary slices (`plane_rows_u8`, `plane_row_u16`, …), so decoding a frame and reading it needs no `unsafe` in calling code. Raw pointers remain available via `plane_ptr`/`plane_stride_bytes` for FFI.
+- `PicAllocator` is an `unsafe trait`: supplying the decoder's pixel buffers is the one place a caller can undermine those safe accessors, so the contract is stated and opted into explicitly.
 - All `unsafe impl Send/Sync` documented with SAFETY comments.
 - Enum transmutes replaced with validated `from_raw()` helpers + debug assertions.
 - `#![warn(unsafe_op_in_unsafe_fn)]` crate-wide.

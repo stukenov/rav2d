@@ -110,20 +110,16 @@ fn y4m_colorspace(layout: PixelLayout, bpc: i32) -> String {
     }
 }
 
-/// Copy one plane into a tightly-packed buffer (`w` samples per row), honouring
-/// the picture's byte stride and bytes-per-sample.
-fn pack_plane(pic: &Picture, plane: usize, w: usize, h: usize, bps: usize) -> Vec<u8> {
-    let stride = pic.stride[if plane == 0 { 0 } else { 1 }].unsigned_abs();
-    let row_bytes = w * bps;
-    let mut out = vec![0u8; row_bytes * h];
-    if let Some(ptr) = pic.data[plane] {
-        // SAFETY: the allocation spans at least `stride * h` bytes per plane
-        // (DefaultPicAllocator); rows are copied within that span.
-        let src = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), stride * h) };
-        for y in 0..h {
-            out[y * row_bytes..(y + 1) * row_bytes]
-                .copy_from_slice(&src[y * stride..y * stride + row_bytes]);
-        }
+/// Copy one plane into a tightly-packed buffer (no row padding), which is the
+/// layout Y4M wants. Row sizes and the plane geometry come from the picture.
+fn pack_plane(pic: &Picture, plane: usize) -> Vec<u8> {
+    let (w, h) = match pic.plane_dimensions(plane) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(w * h * pic.bytes_per_sample());
+    for row in pic.plane_rows_bytes(plane) {
+        out.extend_from_slice(row);
     }
     out
 }
@@ -132,20 +128,12 @@ fn write_picture<W: std::io::Write>(
     writer: &mut y4m::Y4mWriter<W>,
     pic: &Picture,
 ) -> std::io::Result<()> {
-    let w = pic.p.w as usize;
-    let h = pic.p.h as usize;
-    let bps = if pic.p.bpc > 8 { 2 } else { 1 };
-    let layout = pic.p.layout;
-    let y = pack_plane(pic, 0, w, h, bps);
-    if layout == PixelLayout::I400 {
+    let y = pack_plane(pic, 0);
+    if pic.p.layout == PixelLayout::I400 {
         return writer.write_frame(&[&y]);
     }
-    let ss_hor = (layout != PixelLayout::I444) as usize;
-    let ss_ver = (layout == PixelLayout::I420) as usize;
-    let cw = (w + ss_hor) >> ss_hor;
-    let ch = (h + ss_ver) >> ss_ver;
-    let u = pack_plane(pic, 1, cw, ch, bps);
-    let v = pack_plane(pic, 2, cw, ch, bps);
+    let u = pack_plane(pic, 1);
+    let v = pack_plane(pic, 2);
     writer.write_frame(&[&y, &u, &v])
 }
 

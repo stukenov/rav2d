@@ -374,7 +374,7 @@ impl Decoder {
                     }
                     // Frames reconstructed during parsing: enqueue all of them in
                     // decode order (a single parse_obus call may decode several).
-                    let frames: Vec<_> = self.ctx.frame_out.drain(..).collect();
+                    let frames = std::mem::take(&mut self.ctx.frame_out);
                     for pic in frames {
                         // Mirror dav2d queue_append: track the POC of the most
                         // recently queued frame so end-of-stream queue_flush can
@@ -731,7 +731,9 @@ mod tests {
             inner: crate::picture::DefaultPicAllocator,
             allocs: Arc<AtomicUsize>,
         }
-        impl PicAllocator for CountingAllocator {
+        // SAFETY: every allocation is produced by `DefaultPicAllocator`, which
+        // upholds the contract; this wrapper only counts the calls.
+        unsafe impl PicAllocator for CountingAllocator {
             fn alloc_picture(&self, p: &PictureParameters) -> Option<PictureAllocation> {
                 self.allocs.fetch_add(1, Ordering::Relaxed);
                 self.inner.alloc_picture(p)

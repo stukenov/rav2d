@@ -495,40 +495,22 @@ pub fn rav2d_decode_filters(
 }
 
 fn rav2d_picture_planes(pic: &rav2d::Picture) -> FramePlanes {
-    let w = pic.p.w;
-    let h = pic.p.h;
-    let bpc = pic.p.bpc;
-    let layout = pic.p.layout as i32;
-    let bytes_per_sample = if bpc > 8 { 2usize } else { 1usize };
-    let (ssh, ssv) = ss(layout);
-
     let mut planes: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for pl in 0..3 {
-        if pl > 0 && layout == 0 {
-            break;
-        }
-        let pw = if pl == 0 { w } else { (w + ssh) >> ssh };
-        let ph = if pl == 0 { h } else { (h + ssv) >> ssv };
-        let stride = pic.stride[if pl == 0 { 0 } else { 1 }];
-        let base = match pic.data[pl] {
-            Some(p) => p.as_ptr() as *const u8,
-            None => continue,
+    for (pl, plane) in planes.iter_mut().enumerate() {
+        let Some((pw, ph)) = pic.plane_dimensions(pl) else {
+            continue;
         };
-        let row_bytes = pw as usize * bytes_per_sample;
-        let mut buf = Vec::with_capacity(row_bytes * ph as usize);
-        for y in 0..ph as isize {
-            let row = unsafe { base.offset(y * stride) };
-            let slice = unsafe { std::slice::from_raw_parts(row, row_bytes) };
-            buf.extend_from_slice(slice);
+        plane.reserve(pw * ph * pic.bytes_per_sample());
+        for row in pic.plane_rows_bytes(pl) {
+            plane.extend_from_slice(row);
         }
-        planes[pl] = buf;
     }
 
     FramePlanes {
-        w,
-        h,
-        bpc,
-        layout,
+        w: pic.p.w,
+        h: pic.p.h,
+        bpc: pic.p.bpc,
+        layout: pic.p.layout as i32,
         planes,
     }
 }
