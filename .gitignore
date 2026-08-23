@@ -7,6 +7,13 @@ Cargo.lock
 /dav2d-install
 /dav2d/build
 
+# cargo-fuzz build output, corpus and reproducers (the fixed-crash corpus that
+# CI replays lives in crates/rav2d/tests/data/fuzz-regressions instead)
+/crates/rav2d/fuzz/target
+/crates/rav2d/fuzz/corpus
+/crates/rav2d/fuzz/artifacts
+/crates/rav2d/fuzz/coverage
+
 # Internal grant/funding strategy notes (keep local)
 /grants/
 

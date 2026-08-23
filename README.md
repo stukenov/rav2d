@@ -146,6 +146,19 @@ Following the [rav1d](https://github.com/memorysafety/rav1d) strategy:
 - `#![warn(unsafe_op_in_unsafe_fn)]` crate-wide.
 - Remaining `unsafe` is concentrated in FFI calls, the NEON dispatch, and performance-critical inner loops.
 
+### Fuzzing and sanitizers
+
+Bit-exactness proves the decoder computes the right picture; it says nothing about what the `unsafe` pixel paths do on input no encoder would produce. Two workflows cover that, both nightly and on demand:
+
+- **`fuzz`** runs the `decode` and `decode_settings` [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets. `decode_settings` derives the decoder configuration from the input, so grain, header-only parsing, invisible-frame output and the per-filter combinations get fuzzed too. The corpus is seeded from the conformance vectors and carried between runs, and every crash it has found is replayed by `fuzz_regression_corpus_no_panic` in ordinary CI.
+- **`sanitizers`** runs the unit tests, the regression corpus and the conformance sweeps under AddressSanitizer (with leak detection where the C reference is not involved), and the multi-threaded decode under ThreadSanitizer.
+
+```sh
+cd crates/rav2d/fuzz
+./seed-corpus.sh decode
+cargo +nightly fuzz run decode -- -max_total_time=900
+```
+
 ## Development
 
 rav2d was ported from dav2d with heavy use of AI coding tools (Claude Code). This is

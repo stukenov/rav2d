@@ -1,0 +1,110 @@
+name: sanitizers
+
+# The port is bit-exact and panic-free under test, but bit-exactness says
+# nothing about the ~800 `unsafe` sites in the pixel paths: a read one byte past
+# a plane produces the right picture right up until it does not. AddressSanitizer
+# is what turns those into failures, and ThreadSanitizer guards the claim that
+# the parallel output path is byte-identical because it is actually race-free.
+#
+# Too slow for every push, so: nightly, on demand, and on main.
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    env:
+      DAV2D_LIB_PATH: ${{ github.workspace }}/dav2d/build/src
+      # `--target` is required: without it the build scripts and proc macros are
+      # instrumented too, which breaks the build.
+      TARGET: x86_64-unknown-linux-gnu
+      RUSTFLAGS: -Zsanitizer=address
+      ASAN_OPTIONS: detect_odr_violation=0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm
+
+      - name: Build dav2d (conformance oracle)
+        run: |
+          cd dav2d
+          meson setup build --default-library=both
+          ninja -C build
+
+      # The unit tests cover the DSP kernels directly, with the tightest buffers.
+      - name: Library tests under ASan
+        run: cargo test -p rav2d --lib --target "$TARGET" -- --test-threads=1
+        env:
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
+      # Malformed input is where an out-of-bounds write is most likely and least
+      # visible: every one of these inputs used to crash the decoder.
+      - name: Fuzz regression corpus under ASan
+        run: cargo test -p rav2d --test fuzz fuzz_regression_corpus_no_panic --target "$TARGET"
+        env:
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+
+      # Full decodes of real streams: the widest sweep of the reconstruction and
+      # filter paths there is. Leak detection is off here only because this is
+      # the one step that also runs the uninstrumented C reference, whose
+      # allocations LeakSanitizer cannot attribute — the two steps above keep
+      # rav2d's own allocations under leak checking.
+      - name: Conformance sweeps under ASan
+        run: cargo test -p rav2d --test conformance --target "$TARGET"
+        env:
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+          ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
+
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    env:
+      DAV2D_LIB_PATH: ${{ github.workspace }}/dav2d/build/src
+      TARGET: x86_64-unknown-linux-gnu
+      RUSTFLAGS: -Zsanitizer=thread
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm
+
+      - name: Build dav2d (needed to link the test binary)
+        run: |
+          cd dav2d
+          meson setup build --default-library=both
+          ninja -C build
+
+      # `mt_matches_single_thread` is the only test that spawns rav2d's worker
+      # threads, and it touches no dav2d C code — so every report belongs to us.
+      - name: Multi-threaded decode under TSan
+        run: cargo test -p rav2d --test conformance mt_matches_single_thread --target "$TARGET"
+        env:
+          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
