@@ -1,5 +1,7 @@
 /target
-Cargo.lock
+# Browser-automation session dumps; nothing to do with the decoder.
+.playwright-mcp/
+
 *.swp
 *.swo
 *~

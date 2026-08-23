@@ -4,14 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>rav2d — Memory-Safe AV2 Video Decoder in Rust</title>
-    <meta name="description" content="rav2d is a complete Rust port of dav2d, the AV2 video decoder. 47K+ lines of memory-safe Rust, 786 tests. Eliminates buffer overflows at compile time.">
+    <meta name="description" content="rav2d is a complete Rust port of dav2d, the AV2 video decoder. 80K lines of memory-safe Rust, bit-exact with the C reference, 868 tests. Eliminates buffer overflows at compile time.">
     <meta property="og:title" content="rav2d — Memory-Safe AV2 Video Decoder in Rust">
-    <meta property="og:description" content="Complete Rust port of dav2d (AV2 decoder). 47K lines, 786 tests. Memory safety for untrusted bitstream parsing.">
+    <meta property="og:description" content="Complete Rust port of dav2d (AV2 decoder). 80K lines, bit-exact, 868 tests. Memory safety for untrusted bitstream parsing.">
     <meta property="og:url" content="https://stukenov.github.io/rav2d/">
     <meta property="og:type" content="website">
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="rav2d — Memory-Safe AV2 Video Decoder">
-    <meta name="twitter:description" content="Complete Rust port of dav2d. 47K lines, 786 tests. Buffer overflows eliminated at compile time.">
+    <meta name="twitter:description" content="Complete Rust port of dav2d. 80K lines, bit-exact, 868 tests. Buffer overflows eliminated at compile time.">
     <style>
         :root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --border: #30363d; --card: #161b22; }
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -48,9 +48,9 @@
         <p class="tagline">Memory-safe AV2 video decoder — complete Rust port of dav2d</p>
 
         <div class="stats">
-            <div class="stat"><div class="stat-value">47K+</div><div class="stat-label">Lines of Rust</div></div>
-            <div class="stat"><div class="stat-value">786</div><div class="stat-label">Tests Passing</div></div>
-            <div class="stat"><div class="stat-value">47</div><div class="stat-label">Source Files</div></div>
+            <div class="stat"><div class="stat-value">80K</div><div class="stat-label">Lines of Rust</div></div>
+            <div class="stat"><div class="stat-value">868</div><div class="stat-label">Tests Passing</div></div>
+            <div class="stat"><div class="stat-value">bit-exact</div><div class="stat-label">vs dav2d, every frame</div></div>
             <div class="stat"><div class="stat-value">100%</div><div class="stat-label">C Logic Ported</div></div>
         </div>
 
@@ -58,14 +58,14 @@
 
         <h2>Why Rust for Video Decoding?</h2>
         <p>Video decoders parse untrusted bitstreams from the internet — they are a prime target for memory corruption exploits. Historical CVEs in video decoders (libvpx, dav1d, ffmpeg) are overwhelmingly buffer overflows, use-after-free, and integer overflows in C parsing code.</p>
-        <p style="margin-top: 1rem;"><strong>rav2d eliminates these classes of bugs at compile time</strong> while keeping the same hand-optimized assembly for actual pixel processing.</p>
+        <p style="margin-top: 1rem;"><strong>rav2d eliminates these classes of bugs at compile time</strong> while reusing dav2d's hand-written assembly for the pixel kernels where the AV2 fork's assembly is still valid. Decoded pixels reach calling code as ordinary slices, so reading a frame needs no <code>unsafe</code>.</p>
 
         <table>
             <tr><th>Component</th><th>dav2d (C)</th><th>rav2d (Rust)</th></tr>
             <tr><td>Bitstream parsing</td><td class="unsafe">C (unsafe)</td><td class="safe">Rust (bounds-checked)</td></tr>
             <tr><td>Decode orchestration</td><td class="unsafe">C (unsafe)</td><td class="safe">Rust (safe, typed)</td></tr>
             <tr><td>Filter pipeline</td><td class="unsafe">C (unsafe)</td><td class="safe">Rust (bounds-checked)</td></tr>
-            <tr><td>DSP kernels</td><td>Assembly</td><td>Assembly (shared via FFI)</td></tr>
+            <tr><td>DSP kernels</td><td>Assembly</td><td>Assembly via FFI where AV2-valid, otherwise Rust</td></tr>
             <tr><td>Type safety</td><td class="unsafe">Weak (enums as ints)</td><td class="safe">Strong (enum variants)</td></tr>
         </table>
 
