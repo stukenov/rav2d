@@ -4540,18 +4540,161 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
         }
     }
 
-    // Hand the reconstructed picture to the decoder's output path. (Visibility
-    // filtering / POC reordering is wired with full output queueing later.)
+    // Hand the reconstructed picture to the output path, but only if the
+    // bitstream asks to show it now (dav2d decode.c:5510). A frame coded for
+    // later display stays in the reference slots until `queue_output` or the
+    // end-of-stream flush reaches its turn.
+    //
     // The output buffer must be independently owned; clone the shared pixels.
     // The plane copy is parallelised across `c.n_tc` (the recon core stays on
     // the single-thread path; only this disjoint-output display copy threads).
-    let display_threads = c.n_tc;
-    c.frame_out.push(clone_picture_mt(
-        &shared,
-        display_threads,
-        c.allocator.clone(),
-    ));
+    if frame_hdr.show_immediate != 0 || c.output_invisible_frames {
+        let display_threads = c.n_tc;
+        let copy = clone_picture_mt(&shared, display_threads, c.allocator.clone());
+        queue_output(c, copy);
+    }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Output queueing (dav2d lib.c: queue_append / queue_flush / dav2d_queue_output)
+//
+// Frames are decoded in coding order, which is not the order they are shown in.
+// A frame the bitstream does not ask to show right away stays in the reference
+// slots marked `show_implicit`, and its turn comes either when a later frame is
+// displayed past it or when the stream drains. Getting this wrong is invisible
+// to a pixel-comparison test that matches frames by content and ignores order,
+// and very visible to anyone watching the video.
+// ---------------------------------------------------------------------------
+
+/// Put a finished picture on the output queue and move the display position to
+/// it (dav2d `queue_append`).
+pub(crate) fn queue_append(c: &mut crate::internal::DecoderContext, pic: crate::picture::Picture) {
+    if let Some(fh) = pic.frame_hdr.as_ref() {
+        c.dpb_poc = fh.frame_offset;
+    }
+    c.frame_out.push(pic);
+}
+
+/// Queue the picture held in reference slot `n`. The output path takes
+/// ownership, so the slot keeps its own copy for prediction.
+fn queue_append_ref(c: &mut crate::internal::DecoderContext, n: usize) {
+    let Some(src) = c.refs[n].p.pic.clone() else {
+        return;
+    };
+    let copy = clone_picture_mt(&src, c.n_tc, c.allocator.clone());
+    queue_append(c, copy);
+}
+
+/// Display POC of the picture stored in reference slot `n`.
+fn ref_slot_poc(c: &crate::internal::DecoderContext, n: usize) -> Option<u8> {
+    let slot = &c.refs[n].p;
+    let hdr = slot.frame_hdr.as_ref()?;
+    if hdr.show_implicit == 0 {
+        return None;
+    }
+    let pic = slot.pic.as_ref()?;
+    if !pic.has_data() {
+        return None;
+    }
+    Some(
+        pic.frame_hdr
+            .as_ref()
+            .map(|h| h.frame_offset)
+            .unwrap_or(hdr.frame_offset),
+    )
+}
+
+/// The deferred reference that comes next in display order: the smallest POC
+/// past the current display position, and — when `limit` is given — before it.
+///
+/// `limit` is what separates the two callers. `queue_output` passes the POC of
+/// the frame being shown, so only frames that belong *before* it come out.
+/// `queue_flush` passes `None` at end of stream, where everything left is due.
+fn next_deferred_ref(
+    c: &crate::internal::DecoderContext,
+    nb: i32,
+    mask: u32,
+    limit: Option<i32>,
+) -> Option<usize> {
+    let mut cand: Option<usize> = None;
+    let mut bound = limit;
+    for n in 0..8usize {
+        if mask & (1 << n) != 0 {
+            continue;
+        }
+        let Some(ipoc) = ref_slot_poc(c, n) else {
+            continue;
+        };
+        let ipoc = ipoc as i32;
+        if crate::env::get_poc_diff(nb, ipoc, c.dpb_poc as i32) <= 0 {
+            continue;
+        }
+        if let Some(b) = bound {
+            if crate::env::get_poc_diff(nb, ipoc, b) >= 0 {
+                continue;
+            }
+        }
+        cand = Some(n);
+        bound = Some(ipoc);
+    }
+    cand
+}
+
+/// Queue `pic` for display, along with any deferred frames whose turn it makes
+/// due (dav2d `dav2d_queue_output`).
+pub(crate) fn queue_output(c: &mut crate::internal::DecoderContext, pic: crate::picture::Picture) {
+    let nb = match (c.output_invisible_frames, c.seq_hdr.as_ref()) {
+        // Output-invisible mode hands frames over in coding order by design,
+        // and without a sequence header there is no order-hint arithmetic.
+        (false, Some(seq)) => seq.order_hint_n_bits as i32,
+        _ => {
+            queue_append(c, pic);
+            return;
+        }
+    };
+    let poc = pic.frame_hdr.as_ref().map(|h| h.frame_offset as i32);
+
+    // Deferred frames that belong before this one, earliest first.
+    let mut mask = 0u32;
+    while let Some(n) = next_deferred_ref(c, nb, mask, poc) {
+        mask |= 1 << n;
+        queue_append_ref(c, n);
+    }
+
+    queue_append(c, pic);
+
+    // Then any deferred frame that directly follows the one just shown, and
+    // whatever directly follows that.
+    loop {
+        let next = (0..8usize).find(|&n| {
+            mask & (1 << n) == 0
+                && ref_slot_poc(c, n).is_some_and(|ipoc| {
+                    crate::env::get_poc_diff(nb, ipoc as i32, c.dpb_poc as i32) == 1
+                })
+        });
+        let Some(n) = next else { break };
+        mask |= 1 << n;
+        queue_append_ref(c, n);
+    }
+}
+
+/// End-of-stream flush: every deferred frame still held back is now due, in
+/// display order (dav2d `queue_flush`).
+pub(crate) fn queue_flush(c: &mut crate::internal::DecoderContext) {
+    if c.seq_hdr.is_none() {
+        return;
+    }
+    let nb = c
+        .seq_hdr
+        .as_ref()
+        .map(|s| s.order_hint_n_bits as i32)
+        .unwrap();
+    let mut mask = 0u32;
+    while let Some(n) = next_deferred_ref(c, nb, mask, None) {
+        mask |= 1 << n;
+        queue_append_ref(c, n);
+    }
 }
 
 /// Clone a `Picture`'s pixel planes into a fresh independently-owned allocation

@@ -2762,14 +2762,11 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 return Err(Rav2dError::InvalidData);
             }
             // dav2d obu.c: dav2d_queue_output(c, &c->refs[idx].p) re-displays the
-            // referenced stored picture. With output_invisible_frames this is a
-            // plain append; rav2d emits in decode order, so push an independently
-            // owned clone of the referenced reconstruction onto the output queue.
-            c.frame_out.push(crate::decode::clone_picture_mt(
-                &ref_pic,
-                c.n_tc,
-                c.allocator.clone(),
-            ));
+            // referenced stored picture, pulling in any deferred frames whose
+            // turn it makes due. The output path takes ownership, so hand it an
+            // independently owned clone of the referenced reconstruction.
+            let copy = crate::decode::clone_picture_mt(&ref_pic, c.n_tc, c.allocator.clone());
+            crate::decode::queue_output(c, copy);
             // dav2d obu.c: a key-frame show_existing_frame copies the referenced
             // slot into every other ref slot and clears its showable flag.
             if c.refs[idx]
@@ -3528,6 +3525,7 @@ mod tests {
             inloop_filters: 0,
             run_decode: false,
             frame_out: Vec::new(),
+            dpb_poc: 0,
             n_tc: 1,
         }
     }

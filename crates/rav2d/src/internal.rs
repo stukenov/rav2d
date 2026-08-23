@@ -416,11 +416,17 @@ pub struct DecoderContext {
     /// worked through; the orchestration runs end-to-end when enabled.
     pub run_decode: bool,
 
-    /// Reconstructed pictures awaiting hand-off to the decoder's output queue,
-    /// in decode order. `submit_frame` pushes each decoded frame here so that
-    /// frames decoded within a single `parse_obus` call are not lost. (Minimal
-    /// output path; visibility/POC display reordering lands with full queueing.)
+    /// Pictures queued for output, already in display order. `queue_output`
+    /// (dav2d `dav2d_queue_output`, lib.c) puts them here: the frame the
+    /// bitstream asked to show, surrounded by any deferred `show_implicit`
+    /// references whose turn to be displayed has come. The decoder drains this
+    /// into its output ring in order.
     pub frame_out: Vec<crate::picture::Picture>,
+
+    /// Display position of the most recently queued frame (dav2d `c->dpb_poc`).
+    /// The deferred-frame scans measure against it to decide which stored
+    /// references are due for display.
+    pub dpb_poc: u8,
 
     /// Worker-thread budget (`Settings.n_threads` resolved to `n_tc`). Used to
     /// parallelise the disjoint-output display passes (output-frame copy / film

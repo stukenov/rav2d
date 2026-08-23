@@ -95,6 +95,314 @@ unsafe fn extract_planes(pic: &rav2d_sys::Dav2dPicture) -> FramePlanes {
     }
 }
 
+/// Decode the way a player would: film grain applied, every in-loop filter on,
+/// and only the frames the bitstream asks to show, in display order.
+///
+/// This is deliberately not what the bit-exactness gates use — those ask for
+/// invisible frames too, so they can check every coded frame's reconstruction.
+/// Here the visibility and ordering decisions are exactly what is under test.
+pub fn rav2d_decode_display(path: &PathBuf) -> Vec<FramePlanes> {
+    use rav2d::{Data, Decoder, Settings};
+    let bytes = std::fs::read(path).expect("read clip");
+    let s = Settings {
+        n_threads: 1,
+        apply_grain: true,
+        run_decode: true,
+        inloop_filters: rav2d::InloopFilterType::All,
+        output_invisible_frames: false,
+        ..Settings::default()
+    };
+    let mut dec = Decoder::open(&s).expect("open");
+
+    let mut frames = Vec::new();
+    let mut sent = false;
+    loop {
+        if !sent {
+            match dec.send_data(Some(Data::wrap(bytes.clone()))) {
+                Ok(()) => sent = true,
+                Err(rav2d::Rav2dError::Again) => {}
+                Err(_) => break,
+            }
+        }
+        match dec.get_picture() {
+            Ok(pic) => frames.push(rav2d_picture_planes(&pic)),
+            Err(rav2d::Rav2dError::Again) => {
+                if sent {
+                    let _ = dec.send_data(None);
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    frames
+}
+
+/// MD5, so the decoder output can be checked against the reference hashes that
+/// ship next to the vectors. Test-only and deliberately dependency-free: it is
+/// ~50 lines and pulling a crate in for it would be the larger cost. The
+/// implementation is pinned by `md5_matches_known_vectors` below.
+#[derive(Clone)]
+struct Md5 {
+    state: [u32; 4],
+    buf: [u8; 64],
+    buffered: usize,
+    total: u64,
+}
+
+impl Md5 {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+
+    fn new() -> Self {
+        Self {
+            state: [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
+            buf: [0; 64],
+            buffered: 0,
+            total: 0,
+        }
+    }
+
+    fn k(i: usize) -> u32 {
+        // floor(|sin(i + 1)| * 2^32), the standard constants.
+        const K: [u32; 64] = [
+            0xd76a_a478,
+            0xe8c7_b756,
+            0x2420_70db,
+            0xc1bd_ceee,
+            0xf57c_0faf,
+            0x4787_c62a,
+            0xa830_4613,
+            0xfd46_9501,
+            0x6980_98d8,
+            0x8b44_f7af,
+            0xffff_5bb1,
+            0x895c_d7be,
+            0x6b90_1122,
+            0xfd98_7193,
+            0xa679_438e,
+            0x49b4_0821,
+            0xf61e_2562,
+            0xc040_b340,
+            0x265e_5a51,
+            0xe9b6_c7aa,
+            0xd62f_105d,
+            0x0244_1453,
+            0xd8a1_e681,
+            0xe7d3_fbc8,
+            0x21e1_cde6,
+            0xc337_07d6,
+            0xf4d5_0d87,
+            0x455a_14ed,
+            0xa9e3_e905,
+            0xfcef_a3f8,
+            0x676f_02d9,
+            0x8d2a_4c8a,
+            0xfffa_3942,
+            0x8771_f681,
+            0x6d9d_6122,
+            0xfde5_380c,
+            0xa4be_ea44,
+            0x4bde_cfa9,
+            0xf6bb_4b60,
+            0xbebf_bc70,
+            0x289b_7ec6,
+            0xeaa1_27fa,
+            0xd4ef_3085,
+            0x0488_1d05,
+            0xd9d4_d039,
+            0xe6db_99e5,
+            0x1fa2_7cf8,
+            0xc4ac_5665,
+            0xf429_2244,
+            0x432a_ff97,
+            0xab94_23a7,
+            0xfc93_a039,
+            0x655b_59c3,
+            0x8f0c_cc92,
+            0xffef_f47d,
+            0x8584_5dd1,
+            0x6fa8_7e4f,
+            0xfe2c_e6e0,
+            0xa301_4314,
+            0x4e08_11a1,
+            0xf753_7e82,
+            0xbd3a_f235,
+            0x2ad7_d2bb,
+            0xeb86_d391,
+        ];
+        K[i]
+    }
+
+    fn block(&mut self, chunk: &[u8]) {
+        let mut m = [0u32; 16];
+        for (i, w) in m.iter_mut().enumerate() {
+            *w = u32::from_le_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        let [mut a, mut b, mut c, mut d] = self.state;
+        for i in 0..64 {
+            let (f, g) = match i / 16 {
+                0 => ((b & c) | (!b & d), i),
+                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let tmp = d;
+            d = c;
+            c = b;
+            let sum = a
+                .wrapping_add(f)
+                .wrapping_add(Self::k(i))
+                .wrapping_add(m[g]);
+            b = b.wrapping_add(sum.rotate_left(Self::S[i]));
+            a = tmp;
+        }
+        self.state[0] = self.state[0].wrapping_add(a);
+        self.state[1] = self.state[1].wrapping_add(b);
+        self.state[2] = self.state[2].wrapping_add(c);
+        self.state[3] = self.state[3].wrapping_add(d);
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        self.total += data.len() as u64;
+        if self.buffered > 0 {
+            let want = (64 - self.buffered).min(data.len());
+            self.buf[self.buffered..self.buffered + want].copy_from_slice(&data[..want]);
+            self.buffered += want;
+            data = &data[want..];
+            if self.buffered < 64 {
+                // Still a partial block, and `data` is spent — returning here
+                // matters: the tail below assigns `buffered` unconditionally.
+                return;
+            }
+            let chunk = self.buf;
+            self.block(&chunk);
+            self.buffered = 0;
+        }
+        while data.len() >= 64 {
+            let (chunk, rest) = data.split_at(64);
+            self.block(chunk);
+            data = rest;
+        }
+        self.buf[..data.len()].copy_from_slice(data);
+        self.buffered = data.len();
+    }
+
+    fn finish(mut self) -> String {
+        let bits = self.total.wrapping_mul(8);
+        self.update(&[0x80]);
+        while self.buffered != 56 {
+            self.update(&[0x00]);
+        }
+        // `update` counts these bytes too; the length was captured above.
+        let chunk = {
+            let mut c = self.buf;
+            c[56..64].copy_from_slice(&bits.to_le_bytes());
+            c
+        };
+        self.block(&chunk);
+        self.state
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+}
+
+#[test]
+fn md5_matches_known_vectors() {
+    let hash = |s: &str| {
+        let mut h = Md5::new();
+        h.update(s.as_bytes());
+        h.finish()
+    };
+    assert_eq!(hash(""), "d41d8cd98f00b204e9800998ecf8427e");
+    assert_eq!(hash("abc"), "900150983cd24fb0d6963f7d28e17f72");
+    assert_eq!(
+        hash("The quick brown fox jumps over the lazy dog"),
+        "9e107d9d372bb6826bd81d3542a419d6"
+    );
+    // Longer than one block, and not a block multiple, so the buffering path
+    // and the length padding both get exercised.
+    assert_eq!(hash(&"a".repeat(1000)), "cabe45dcc9ae5b66ba86600cca6b8ba8");
+}
+
+/// Check the decoded output against **avmdec**, the AOM reference decoder.
+///
+/// Every vector in `dav2d/media` ships with the md5 avmdec produces for it, and
+/// dav2d gates on those hashes in its own CI (`tests/test-md5.sh`). Until now
+/// rav2d only ever compared itself to dav2d, which cannot catch a bug rav2d
+/// faithfully reproduced from the C — both decoders agree and the gate stays
+/// green. This one is independent of dav2d entirely.
+///
+/// It also covers what the bit-exactness gates structurally cannot: they match
+/// frames by content and ignore order, and they ask for invisible frames. A
+/// hash over the visible frames in display order pins how many frames come out,
+/// which ones, and in what sequence — what a player actually consumes.
+#[test]
+fn bit_exact_avm_reference_md5() {
+    let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media"));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        eprintln!("skip: {dir:?} not found");
+        return;
+    };
+    let mut clips: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "obu"))
+        .collect();
+    clips.sort();
+
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for clip in clips {
+        let md5_path = PathBuf::from(format!("{}.md5", clip.display()));
+        let Ok(expected) = std::fs::read_to_string(&md5_path) else {
+            continue;
+        };
+        let expected = expected.trim().to_string();
+        let name = clip.file_name().unwrap().to_string_lossy().to_string();
+
+        let mut hasher = Md5::new();
+        let frames = rav2d_decode_display(&clip);
+        for f in &frames {
+            for pl in 0..3 {
+                hasher.update(&f.planes[pl]);
+            }
+        }
+        let got = hasher.finish();
+        if got == expected {
+            checked += 1;
+            eprintln!("{name}: {got} ({} frames)", frames.len());
+        } else {
+            failures.push(format!(
+                "{name}: avmdec={expected} rav2d={got} ({} frames decoded)",
+                frames.len()
+            ));
+        }
+    }
+
+    assert!(
+        checked > 0 || !failures.is_empty(),
+        "no vectors with hashes"
+    );
+    if !failures.is_empty() {
+        panic!(
+            "output does not match the AOM reference decoder:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+    eprintln!("bit_exact_avm_reference_md5: {checked} vectors match avmdec");
+}
+
 /// DAV2D_INLOOPFILTER_ALL (deblock | cdef | ccso | wiener | gdf).
 const DAV2D_INLOOPFILTER_ALL: u32 = 31;
 
@@ -381,6 +689,11 @@ pub fn rav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
         apply_grain: true,
         run_decode: true,
         inloop_filters: rav2d::InloopFilterType::All,
+        // Paired with `dav2d_decode_grain`, which also asks for them: the
+        // bit-exactness gates compare every coded frame's reconstruction, not
+        // what a player would show. Display order and visibility are gated
+        // separately, by `bit_exact_avm_reference_md5`.
+        output_invisible_frames: true,
         ..Settings::default()
     };
     let mut dec = Decoder::open(&s).expect("open");
@@ -424,6 +737,7 @@ pub fn rav2d_decode_threads(path: &PathBuf, n_threads: u32, apply_grain: bool) -
         apply_grain,
         run_decode: true,
         inloop_filters: rav2d::InloopFilterType::All,
+        output_invisible_frames: true,
         ..Settings::default()
     };
     let mut dec = Decoder::open(&s).expect("open");
@@ -468,6 +782,7 @@ pub fn rav2d_decode_filters(
         apply_grain: false,
         run_decode: true,
         inloop_filters,
+        output_invisible_frames: true,
         ..Settings::default()
     };
     let mut dec = Decoder::open(&s).expect("open");
