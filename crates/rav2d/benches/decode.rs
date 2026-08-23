@@ -72,11 +72,13 @@ fn frame_samples(w: i32, h: i32, layout: i32) -> u64 {
 /// Decode a clip with rav2d. Returns (frames decoded, total samples produced).
 fn rav2d_run(bytes: &[u8], filters: rav2d::InloopFilterType) -> (u32, u64) {
     use rav2d::{Data, Decoder, Settings};
-    let mut s = Settings::default();
-    s.n_threads = 1;
-    s.apply_grain = false;
-    s.run_decode = true;
-    s.inloop_filters = filters;
+    let s = Settings {
+        n_threads: 1,
+        apply_grain: false,
+        run_decode: true,
+        inloop_filters: filters,
+        ..Settings::default()
+    };
     let mut dec = match Decoder::open(&s) {
         Ok(d) => d,
         Err(_) => return (0, 0),

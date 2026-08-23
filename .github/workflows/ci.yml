@@ -50,8 +50,10 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      # --all-targets: without it the tests, benches and examples are never
+      # linted, and they are where the drift collects.
       - name: cargo clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         env:
           DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}

@@ -974,7 +974,7 @@ mod tests {
 
     #[test]
     fn row_clip_matches_scalar() {
-        let mut rng = Rng(0x12_ABCD_77);
+        let mut rng = Rng(0x12AB_CD77);
         for &(min, max) in &[(i16::MIN as i32, i16::MAX as i32), (-524288, 524287)] {
             for &(rnd, shift) in &[(8i32, 4i32), (1, 1), (2048, 12)] {
                 for n in [0usize, 8, 16, 32, 64, 256, 1024] {
@@ -1406,7 +1406,7 @@ mod tests {
     #[test]
     fn neon_row_clip_matches_scalar() {
         use super::neon_kernels::row_clip_i32;
-        let mut rng = Rng(0x12_ABCD_99);
+        let mut rng = Rng(0x12AB_CD99);
         for &(min, max) in &[(i16::MIN as i32, i16::MAX as i32), (-524288, 524287)] {
             for &(rnd, shift) in &[(8i32, 4i32), (1, 1), (2048, 12), (0, 0)] {
                 for n in 0..=40usize {

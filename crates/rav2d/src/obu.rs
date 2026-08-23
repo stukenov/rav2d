@@ -3665,9 +3665,8 @@ mod tests {
                                 }
                             }
                         }
-                    } else if c.frame_hdr.is_none() {
+                    } else if let (true, Some(fh)) = (c.frame_hdr.is_none(), prev_fh.as_ref()) {
                         // parse_obus consumed the frame — update refs from what was parsed
-                        let fh = prev_fh.unwrap();
                         let flags = fh.refresh_frame_flags;
                         for i in 0..8u8 {
                             if flags & (1 << i) != 0 {

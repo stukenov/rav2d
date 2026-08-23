@@ -847,15 +847,16 @@ mod tests {
     }
 
     #[test]
-    fn test_deblock_side_thr_8bit() {
-        let v = deblock_side_thr(0, 128);
-        assert!(v > 0 || v == 0);
+    fn test_deblock_side_thr_8bit_clamps_high() {
+        // q_ind saturates at 296 - 1, so everything past it is the last entry.
+        assert_eq!(deblock_side_thr(0, 1000), deblock_side_thr(0, 295));
     }
 
     #[test]
-    fn test_deblock_side_thr_10bit() {
-        let v = deblock_side_thr(1, 200);
-        let _ = v;
+    fn test_deblock_side_thr_10bit_qidx_offset() {
+        // High bit depth shifts qidx down by 24 * 2, so qidx 48 lands on the
+        // first table entry and anything below it clamps to the same one.
+        assert_eq!(deblock_side_thr(1, 47), deblock_side_thr(1, 48));
     }
 
     #[test]

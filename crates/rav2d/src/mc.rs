@@ -1890,7 +1890,7 @@ mod tests {
             assert!(v > 0);
         }
         for &m in &mask[..16] {
-            assert!(m >= 38 && m <= 64);
+            assert!((38..=64).contains(&m));
         }
     }
 

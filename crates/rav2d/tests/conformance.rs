@@ -65,7 +65,7 @@ unsafe fn extract_planes(pic: &rav2d_sys::Dav2dPicture) -> FramePlanes {
     let (ssh, ssv) = ss(layout);
 
     let mut planes: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for pl in 0..3 {
+    for (pl, plane) in planes.iter_mut().enumerate() {
         if pl > 0 && layout == 0 {
             break; // monochrome: no chroma
         }
@@ -83,7 +83,7 @@ unsafe fn extract_planes(pic: &rav2d_sys::Dav2dPicture) -> FramePlanes {
             let slice = unsafe { std::slice::from_raw_parts(row, row_bytes) };
             buf.extend_from_slice(slice);
         }
-        planes[pl] = buf;
+        *plane = buf;
     }
 
     FramePlanes {
@@ -376,11 +376,13 @@ pub fn rav2d_decode(path: &PathBuf) -> Vec<FramePlanes> {
 pub fn rav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
     use rav2d::{Data, Decoder, Settings};
     let bytes = std::fs::read(path).expect("read clip");
-    let mut s = Settings::default();
-    s.n_threads = 1;
-    s.apply_grain = true;
-    s.run_decode = true;
-    s.inloop_filters = rav2d::InloopFilterType::All;
+    let s = Settings {
+        n_threads: 1,
+        apply_grain: true,
+        run_decode: true,
+        inloop_filters: rav2d::InloopFilterType::All,
+        ..Settings::default()
+    };
     let mut dec = Decoder::open(&s).expect("open");
 
     let mut frames = Vec::new();
@@ -417,11 +419,13 @@ pub fn rav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
 pub fn rav2d_decode_threads(path: &PathBuf, n_threads: u32, apply_grain: bool) -> Vec<FramePlanes> {
     use rav2d::{Data, Decoder, Settings};
     let bytes = std::fs::read(path).expect("read clip");
-    let mut s = Settings::default();
-    s.n_threads = n_threads;
-    s.apply_grain = apply_grain;
-    s.run_decode = true;
-    s.inloop_filters = rav2d::InloopFilterType::All;
+    let s = Settings {
+        n_threads,
+        apply_grain,
+        run_decode: true,
+        inloop_filters: rav2d::InloopFilterType::All,
+        ..Settings::default()
+    };
     let mut dec = Decoder::open(&s).expect("open");
 
     let mut frames = Vec::new();
@@ -459,11 +463,13 @@ pub fn rav2d_decode_filters(
 ) -> Vec<FramePlanes> {
     use rav2d::{Data, Decoder, Settings};
     let bytes = std::fs::read(path).expect("read clip");
-    let mut s = Settings::default();
-    s.n_threads = 1;
-    s.apply_grain = false;
-    s.run_decode = true;
-    s.inloop_filters = inloop_filters;
+    let s = Settings {
+        n_threads: 1,
+        apply_grain: false,
+        run_decode: true,
+        inloop_filters,
+        ..Settings::default()
+    };
     let mut dec = Decoder::open(&s).expect("open");
 
     let mut frames = Vec::new();
@@ -620,14 +626,14 @@ fn bit_exact_keyframe_allplanes() {
     let (ssh, ssv) = ss(reference[0].layout);
     let plane_names = ["luma", "U", "V"];
     let mut failures = Vec::new();
-    for pl in 0..3 {
+    for (pl, plane_name) in plane_names.iter().enumerate() {
         let r = &reference[0].planes[pl];
         let g = &got[0].planes[pl];
         assert_eq!(
             r.len(),
             g.len(),
             "frame 0 plane {} size differs",
-            plane_names[pl]
+            plane_name
         );
         let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
@@ -640,7 +646,7 @@ fn bit_exact_keyframe_allplanes() {
             let _ = ssv;
             failures.push(format!(
                 "plane {} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
-                plane_names[pl],
+                plane_name,
                 r.len(),
                 first % stride,
                 first / stride,
@@ -689,14 +695,14 @@ fn bit_exact_keyframe_filtered() {
     let (ssh, _ssv) = ss(reference[0].layout);
     let plane_names = ["luma", "U", "V"];
     let mut failures = Vec::new();
-    for pl in 0..3 {
+    for (pl, plane_name) in plane_names.iter().enumerate() {
         let r = &reference[0].planes[pl];
         let g = &got[0].planes[pl];
         assert_eq!(
             r.len(),
             g.len(),
             "frame 0 plane {} size differs",
-            plane_names[pl]
+            plane_name
         );
         let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
@@ -708,7 +714,7 @@ fn bit_exact_keyframe_filtered() {
             };
             failures.push(format!(
                 "plane {} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
-                plane_names[pl],
+                plane_name,
                 r.len(),
                 first % stride,
                 first / stride,
@@ -893,11 +899,11 @@ fn bit_exact_filtered_sweep() {
         };
         let (ssh, _) = ss(r.layout);
         let mut clip_fail = Vec::new();
-        for pl in 0..3 {
+        for (pl, plane_name) in plane_names.iter().enumerate() {
             if r.planes[pl].len() != g.planes[pl].len() {
                 clip_fail.push(format!(
                     "plane {} size differs ({} vs {})",
-                    plane_names[pl],
+                    plane_name,
                     r.planes[pl].len(),
                     g.planes[pl].len()
                 ));
@@ -921,7 +927,7 @@ fn bit_exact_filtered_sweep() {
                 };
                 clip_fail.push(format!(
                     "plane {} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
-                    plane_names[pl],
+                    plane_name,
                     r.planes[pl].len(),
                     first % stride,
                     first / stride,
@@ -1233,6 +1239,7 @@ fn frame_align() {
 /// Diagnostic: rav2d emits frames in DECODE order (no POC reorder yet) while
 /// dav2d emits in DISPLAY order. For the first inter frame (rav2d decode index
 /// 1) find the closest-matching dav2d output frame and report per-plane diffs.
+///
 /// Run with `--ignored --nocapture`.
 #[test]
 #[ignore = "block-grid diff map for first inter frame"]
@@ -1355,17 +1362,17 @@ fn bit_exact_first_inter_frame() {
     let plane_names = ["luma", "U", "V"];
     let (ssh, _ssv) = ss(r.layout);
     let mut failures = Vec::new();
-    for pl in 0..3 {
+    for (pl, plane_name) in plane_names.iter().enumerate() {
         let rp = &r.planes[pl];
         let gp = &g.planes[pl];
-        assert_eq!(rp.len(), gp.len(), "plane {} size differs", plane_names[pl]);
+        assert_eq!(rp.len(), gp.len(), "plane {} size differs", plane_name);
         let diff = rp.iter().zip(gp.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
             let first = rp.iter().zip(gp.iter()).position(|(a, b)| a != b).unwrap();
             let stride = if pl == 0 { r.w } else { (r.w + ssh) >> ssh } as usize;
             failures.push(format!(
                 "{} differs in {diff}/{} bytes; first @ ({},{}) ref={} got={}",
-                plane_names[pl],
+                plane_name,
                 rp.len(),
                 first % stride,
                 first / stride,

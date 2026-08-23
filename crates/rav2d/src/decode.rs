@@ -18689,7 +18689,7 @@ mod tests {
             cdf_m.data[i] = 32768 / 4 * (3 - (i - 3100)) as u16;
         }
         let idx = read_wedge_idx(&mut msac, &mut cdf_m);
-        assert!(idx >= -1 && idx <= 67);
+        assert!((-1..=67).contains(&idx));
     }
 
     #[test]
@@ -18711,7 +18711,7 @@ mod tests {
         let mut msac = make_msac(&data);
         let mut cdf = [16384u16, 16384, 16384, 0];
         let result = decode_4way(&mut msac, 8, &mut cdf, 5);
-        assert!(result >= 0 && result < 32);
+        assert!((0..32).contains(&result));
     }
 
     #[test]
@@ -18720,7 +18720,7 @@ mod tests {
         let mut msac = make_msac(&data);
         let mut cdf = [16384u16, 16384, 16384, 0];
         let result = decode_4way(&mut msac, 16, &mut cdf, 5);
-        assert!(result >= 0 && result < 32);
+        assert!((0..32).contains(&result));
     }
 
     #[test]
@@ -20875,7 +20875,7 @@ mod tests {
         assert!(uv_mode <= CFL_PRED, "uv_mode {} out of range", uv_mode);
         // UV angle in [-3, 3]
         assert!(
-            uv_angle >= -3 && uv_angle <= 3,
+            (-3..=3).contains(&uv_angle),
             "uv_angle {} out of range",
             uv_angle
         );
@@ -21207,7 +21207,7 @@ mod tests {
                 assert_eq!(refs[1], -1);
                 // inter_mode should be NEARMV(13), GLOBALMV(14), or NEWMV(15)
                 assert!(
-                    inter_mode >= 13 && inter_mode <= 17,
+                    (13..=17).contains(&inter_mode),
                     "inter_mode {} out of range",
                     inter_mode
                 );

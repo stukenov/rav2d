@@ -2582,7 +2582,7 @@ mod tests {
     fn test_visit_mode_pal_idx_variable_n1d() {
         let mut pal_entries = Vec::new();
         visit_mode_kf_entries(|off, n1d| {
-            if off >= 1448 && off < 1448 + 7 * 40 {
+            if (1448..1448 + 7 * 40).contains(&off) {
                 pal_entries.push((off, n1d));
             }
         });
@@ -2596,7 +2596,7 @@ mod tests {
     fn test_visit_mode_cdef_idx_variable_n1d() {
         let mut cdef_entries = Vec::new();
         visit_mode_kf_entries(|off, n1d| {
-            if off >= 1088 && off < 1088 + 6 * 8 {
+            if (1088..1088 + 6 * 8).contains(&off) {
                 cdef_entries.push((off, n1d));
             }
         });

@@ -1232,7 +1232,7 @@ mod tests {
         let img = [128u8; 64];
         let mut var = 0u32;
         let dir = cdef_find_dir(&img, 8, &mut var);
-        assert!(dir >= 0 && dir < 8);
+        assert!((0..8).contains(&dir));
         assert_eq!(var, 0);
     }
 
@@ -1246,7 +1246,7 @@ mod tests {
         }
         let mut var = 0u32;
         let dir = cdef_find_dir(&img, 8, &mut var);
-        assert!(dir >= 0 && dir < 8);
+        assert!((0..8).contains(&dir));
         assert!(var > 0);
     }
 
@@ -1260,7 +1260,7 @@ mod tests {
         }
         let mut var = 0u32;
         let dir = cdef_find_dir(&img, 8, &mut var);
-        assert!(dir >= 0 && dir < 8);
+        assert!((0..8).contains(&dir));
         assert!(var > 0);
     }
 

@@ -2918,11 +2918,11 @@ mod tests {
         assert_eq!(PC_WIENER_CONFIG[11], [0, 3]);
     }
 
-    fn make_wiener_multi_test_data(
-        _w: usize,
-        h: usize,
-        stride: usize,
-    ) -> (
+    /// Everything `wiener_multi` needs, in the order its parameters take it:
+    /// the picture and its offset, the left-edge columns, the loop-filtered
+    /// row above and its offset, the destination and its offset, the filter
+    /// coefficients and the class map.
+    type WienerMultiTestData = (
         Vec<u8>,
         usize,
         Vec<[u8; 6]>,
@@ -2932,7 +2932,9 @@ mod tests {
         usize,
         Vec<[u16; 4]>,
         Vec<u16>,
-    ) {
+    );
+
+    fn make_wiener_multi_test_data(_w: usize, h: usize, stride: usize) -> WienerMultiTestData {
         let p_off = stride + 4;
         let p = vec![128u8; stride * (h + 8)];
         let left = vec![[128u8; 6]; h + 8];
@@ -3039,9 +3041,7 @@ mod tests {
         let stride = 16;
         let (mut p, p_off, left, lpf, lpf_off, lpf_bottom, lpf_bottom_off, _, noskip_mask) =
             make_wiener_multi_test_data(w, h, stride);
-        for i in 0..p.len() {
-            p[i] = 100;
-        }
+        p.fill(100);
         let subclass_lut = vec![0u8; 256];
         let filters_user = [[127i8; 18]; 1];
         let ll_mask = vec![[0xFFFFu16; 4]; (h >> 2) + 1];

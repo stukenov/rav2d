@@ -58,7 +58,7 @@ mod tests {
         let kernel = [1i8; 48 * 48];
         stxfm(&mut cf_out, &cf, &kernel, 48, 31, 255);
         for &v in &cf_out {
-            assert!(v >= -128 * 256 && v <= 128 * 256 - 1);
+            assert!((-128 * 256..=128 * 256 - 1).contains(&v));
         }
     }
 

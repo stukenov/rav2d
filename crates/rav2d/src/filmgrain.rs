@@ -1032,7 +1032,11 @@ mod tests {
         generate_grain_y(&mut buf, &data, 5678, 8);
         for row in &buf {
             for &v in row.iter() {
-                assert!(v >= -128 && v <= 127, "grain value {} out of 8bpc range", v);
+                assert!(
+                    (-128..=127).contains(&v),
+                    "grain value {} out of 8bpc range",
+                    v
+                );
             }
         }
     }
@@ -1057,7 +1061,7 @@ mod tests {
         generate_grain_y(&mut buf, &data, 999, 8);
         for row in &buf {
             for &v in row.iter() {
-                assert!(v >= -128 && v <= 127);
+                assert!((-128..=127).contains(&v));
             }
         }
     }
@@ -1108,7 +1112,7 @@ mod tests {
         generate_grain_uv(&mut buf, &buf_y, &data, 42, 0, false, false, 8);
         for row in &buf[..GRAIN_HEIGHT] {
             for &v in row[..GRAIN_WIDTH].iter() {
-                assert!(v >= -128 && v <= 127);
+                assert!((-128..=127).contains(&v));
             }
         }
     }
@@ -1192,7 +1196,7 @@ mod tests {
             &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0, 8,
         );
         for &v in &dst {
-            assert!(v >= 16 && v <= 235, "restricted range violated: {}", v);
+            assert!((16..=235).contains(&v), "restricted range violated: {}", v);
         }
     }
 

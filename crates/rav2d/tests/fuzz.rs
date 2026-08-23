@@ -47,14 +47,17 @@ impl Rng {
 /// `Ok(())` if it finished (decoded or returned a graceful error).
 fn decode_catch(bytes: Vec<u8>) -> Result<(), String> {
     let res = catch_unwind(AssertUnwindSafe(|| {
-        let mut s = Settings::default();
-        s.n_threads = 1;
-        s.apply_grain = false;
-        s.run_decode = true;
-        // Match the fuzz target: cap frame size so a malformed stream declaring
-        // an enormous frame is rejected (FrameTooLarge) rather than allocating
-        // gigabytes. This is what a memory-conscious application does.
-        s.frame_size_limit = 8192 * 8192;
+        let s = Settings {
+            n_threads: 1,
+            apply_grain: false,
+            run_decode: true,
+            // Match the fuzz target: cap frame size so a malformed stream
+            // declaring an enormous frame is rejected (FrameTooLarge) rather
+            // than allocating gigabytes. This is what a memory-conscious
+            // application does.
+            frame_size_limit: 8192 * 8192,
+            ..Settings::default()
+        };
         let mut dec = match Decoder::open(&s) {
             Ok(d) => d,
             Err(_) => return,

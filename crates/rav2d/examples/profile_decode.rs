@@ -5,10 +5,12 @@ use std::path::PathBuf;
 use rav2d::{Data, Decoder, Rav2dError, Settings};
 
 fn decode_once(bytes: &[u8]) -> usize {
-    let mut s = Settings::default();
-    s.n_threads = 1;
-    s.apply_grain = false;
-    s.run_decode = true;
+    let s = Settings {
+        n_threads: 1,
+        apply_grain: false,
+        run_decode: true,
+        ..Settings::default()
+    };
     let mut dec = Decoder::open(&s).unwrap();
     let mut sent = false;
     let mut frames = 0usize;
