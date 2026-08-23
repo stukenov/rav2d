@@ -1954,29 +1954,42 @@ fn bit_exact_full_clip_sweep() {
 /// 4:2:0 corpus happened to mask the bug (its IntraBC blocks paired with CfL/cctx
 /// that overwrote the affected transform type); the monochrome vector exposes it.
 ///
-/// The 4:2:0 (`cov-420-128x128.obu`) and multi-tile (`cov-multitile-416x240.obu`)
-/// vectors are covered by `coverage_decode_no_panic` and documented in
-/// `coverage_known_limitations` — see there for why they are not bit-exact gates.
+/// The 4:2:0 vector (`cov-420-128x128.obu`) is gated here too. Its inter frames
+/// used to diverge, which cost two blocks of frame 2: an IntraBC block leaves no
+/// temporal motion, so its footprint in the temporal MV grid has to be marked
+/// invalid, and rav2d was leaving it at the buffer's zero fill — which reads
+/// back as a valid candidate pointing at reference 0. A later frame then picked
+/// that up as its highest-weighted candidate and predicted from the wrong place.
+///
+/// The multi-tile vector (`cov-multitile-416x240.obu`) is still not a bit-exact
+/// gate; see `coverage_known_limitations`.
 #[test]
 fn bit_exact_coverage_sweep() {
-    let clip = "cov-monochrome-128x128.obu";
-    let path = data(clip);
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
+    let mut checked = 0;
+    for (clip, what) in [
+        ("cov-monochrome-128x128.obu", "4:0:0 monochrome"),
+        ("cov-420-128x128.obu", "4:2:0 intra + inter"),
+    ] {
+        let path = data(clip);
+        if !path.exists() {
+            eprintln!("skip: {path:?} not found");
+            continue;
+        }
+        let failures = full_clip_failures(&path);
+        if !failures.is_empty() {
+            panic!(
+                "{what} coverage clip not bit-exact:\n  {}",
+                failures
+                    .iter()
+                    .map(|f| format!("{clip}: {f}"))
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        }
+        eprintln!("{clip}: full clip bit-exact ({what})");
+        checked += 1;
     }
-    let failures = full_clip_failures(&path);
-    if !failures.is_empty() {
-        panic!(
-            "monochrome (4:0:0) coverage clip not bit-exact:\n  {}",
-            failures
-                .iter()
-                .map(|f| format!("{clip}: {f}"))
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        );
-    }
-    eprintln!("{clip}: full clip bit-exact (4:0:0 monochrome)");
+    assert!(checked > 0, "no coverage vectors available");
 }
 
 /// Smoke gate for the coverage vectors: rav2d must DECODE them without panicking.
@@ -2031,15 +2044,8 @@ fn coverage_decode_no_panic() {
     );
 }
 
-/// Documents (and pins, via `#[ignore]`) the two coverage vectors that are NOT
-/// bit-exact gates, with the precise first divergence so the state is recorded:
-///
-/// * `cov-420-128x128.obu` — the keyframe (intra) is bit-exact, but the inter
-///   frames use compound / TIP prediction features that rav2d does not yet fully
-///   reconstruct (the entropy desyncs at the first such block, e.g. luma tx
-///   bx=16 by=12 on the first inter frame). rav2d emits the keyframe + 3 frames,
-///   dav2d emits 7 (with `output_invisible_frames`). The 4:2:0 path itself is
-///   already comprehensively gated by `bit_exact_full_clip_sweep`.
+/// Documents (and pins, via `#[ignore]`) the one coverage vector that is NOT a
+/// bit-exact gate:
 ///
 /// * `cov-multitile-416x240.obu` — the keyframe entropy stream desyncs at luma tx
 ///   bx=64 by=4 (an out-of-range eob, `INT_MIN`) under single-pass decode. dav2d
@@ -2049,10 +2055,15 @@ fn coverage_decode_no_panic() {
 ///   stable across its own thread configs (MT vs `--threads 1` MD5s differ). The
 ///   vector is therefore not bit-exact-matchable; it remains for the no-panic
 ///   smoke gate above.
+///
+/// `cov-420-128x128.obu` used to be listed here as an entropy desync on its inter
+/// frames. It was neither: the entropy stream stayed in sync throughout, and the
+/// damage was two blocks of frame 2 predicted from a stale temporal MV candidate.
+/// It is a bit-exact gate now, in `bit_exact_coverage_sweep`.
 #[test]
-#[ignore = "cov-420 inter (compound/TIP deferred) + cov-multitile (encoder-side single-pass desync); see doc comment"]
+#[ignore = "cov-multitile: encoder-side single-pass desync, dav2d is non-deterministic on it too; see doc comment"]
 fn coverage_known_limitations() {
-    for clip in ["cov-420-128x128.obu", "cov-multitile-416x240.obu"] {
+    for clip in ["cov-multitile-416x240.obu"] {
         let path = data(clip);
         if !path.exists() {
             continue;

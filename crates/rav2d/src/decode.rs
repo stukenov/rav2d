@@ -8020,16 +8020,41 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 ..Default::default()
             };
             let s_off = by4r * 128 + (bx & 127) as usize;
-            let t_src = crate::refmvs::TemporalBlock::default();
-            crate::refmvs::splat_mv(
-                &mut recon.rt.r[s_off..],
-                &mut s_src,
-                None,
-                0,
-                &t_src,
-                bw4,
-                bh4,
-            );
+            // The block carries no temporal motion, so its footprint in the
+            // temporal grid has to be marked invalid — exactly as the plain
+            // intra path below does (decode.c:617-620). Leaving it alone is not
+            // neutral: the grid starts zeroed, and a zero entry reads back as a
+            // *valid* candidate pointing at reference 0 with a zero MV, which a
+            // later frame then picks up from `add_temporal_candidate`.
+            let mut t_src = crate::refmvs::TemporalBlock::default();
+            unsafe {
+                t_src.r#ref.pair = -1;
+                t_src.mv.n = crate::refmvs::INVALID_TRAJ as u32 * 0x10001;
+            }
+            let write_temporal = recon.seq_hdr.ref_frame_mvs && !recon.cur_mvs.is_empty();
+            if write_temporal {
+                let t_stride = recon.rf.rp_stride;
+                let t_off = (by >> 1) as isize * t_stride + (bx >> 1) as isize;
+                crate::refmvs::splat_mv(
+                    &mut recon.rt.r[s_off..],
+                    &mut s_src,
+                    Some(&mut recon.cur_mvs[t_off as usize..]),
+                    t_stride,
+                    &t_src,
+                    bw4,
+                    bh4,
+                );
+            } else {
+                crate::refmvs::splat_mv(
+                    &mut recon.rt.r[s_off..],
+                    &mut s_src,
+                    None,
+                    0,
+                    &t_src,
+                    bw4,
+                    bh4,
+                );
+            }
             if recon.seq_hdr.refmv_bank {
                 b.ref_pair = RefPair { pair: -1 };
                 crate::refmvs::bank_add(
