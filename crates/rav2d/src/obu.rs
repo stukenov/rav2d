@@ -793,15 +793,37 @@ pub fn parse_frame_hdr(
         if hdr.existing_frame_idx as u8 >= seqhdr.ref_frames {
             return Err(Rav2dError::InvalidData);
         }
-        if gb.get_bit() != 0 {
-            // picture_order_count (AV2 §5.9.2): the reference decoder dav2d reads
-            // this flag bit but does not consume the POC payload (obu.c:1054-1056
-            // `// FIXME poc`). Match the reference exactly — reading more bits here
-            // would desync from dav2d. Left intentionally empty.
+        // picture_order_count (AV2 §5.9.2): the bit says whether the POC is
+        // implicit. When it is not, the stream spells it out and it has to
+        // agree with the frame being shown (dav2d obu.c, `sef: fix
+        // show-existing frame output mechanism`).
+        if gb.get_bit() == 0 {
+            let coded_poc = gb.get_bits(seqhdr.order_hint_n_bits as i32) as u8;
+            // dav2d reads the slot's header unconditionally here; a stream
+            // pointing at a slot that was never filled would fault it. There is
+            // nothing to compare against in that case, so treat it as the
+            // malformed input it is.
+            let poc = refs[hdr.existing_frame_idx as usize]
+                .p
+                .frame_hdr
+                .as_ref()
+                .map(|h| h.frame_offset)
+                .ok_or(Rav2dError::InvalidData)?;
+            if coded_poc != poc {
+                return Err(Rav2dError::InvalidData);
+            }
         }
-        // film_grain_params copy for show_existing_frame (AV2 §5.9.31): dav2d also
-        // leaves this unimplemented (obu.c:1057 `// FIXME filmgrain`). No bits are
-        // consumed by the reference at this point; match it.
+        // film_grain_params for show_existing_frame (AV2 §5.9.31). These bits
+        // are in the bitstream whenever the sequence carries grain; skipping
+        // them leaves the reader mid-header and desyncs everything after.
+        if seqhdr.film_grain_present {
+            hdr.film_grain.present =
+                (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
+            if hdr.film_grain.present != 0 {
+                hdr.film_grain.id = gb.get_bits(3) as u8;
+                hdr.film_grain.seed = gb.get_bits(16);
+            }
+        }
         return Ok(hdr);
     }
 
@@ -2758,9 +2780,6 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 Some(p) if p.has_data() => p.clone(),
                 _ => return Err(Rav2dError::InvalidData),
             };
-            if c.strict_std_compliance && !c.refs[idx].p.showable {
-                return Err(Rav2dError::InvalidData);
-            }
             // dav2d obu.c: dav2d_queue_output(c, &c->refs[idx].p) re-displays the
             // referenced stored picture, pulling in any deferred frames whose
             // turn it makes due. The output path takes ownership, so hand it an
@@ -3386,20 +3405,52 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A show-existing-frame header with an implicit POC: the flag bit is set
+    /// and nothing follows it.
     #[test]
     fn test_parse_frame_hdr_show_existing_frame() {
         let mut seqhdr = SequenceHeader::default();
         seqhdr.id = 0;
         seqhdr.ref_frames_log2 = 3;
         seqhdr.ref_frames = 8;
-        // Bits: vlc(0)=1, vlc(0)=1, existing_frame_idx=000(3bits), poc_bit=0
-        // 0b11_000_0_00 = 0xC0
-        let data = [0xC0, 0x00];
+        seqhdr.order_hint_n_bits = 3;
+        // vlc(0)=1, vlc(0)=1, existing_frame_idx=000, poc_is_implicit=1
+        // 0b11_000_1_00 = 0xC4
+        let data = [0xC4, 0x00];
         let mut gb = GetBits::new(&data);
         let refs = default_refs();
         let hdr = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb).unwrap();
         assert_eq!(hdr.show_existing_frame, 1);
         assert_eq!(hdr.existing_frame_idx, 0);
+    }
+
+    /// With the flag clear the POC is spelled out, and it has to name the frame
+    /// actually being shown. Getting this wrong used to leave those bits in the
+    /// reader and desync every header after it.
+    #[test]
+    fn test_parse_frame_hdr_show_existing_frame_explicit_poc() {
+        let mut seqhdr = SequenceHeader::default();
+        seqhdr.id = 0;
+        seqhdr.ref_frames_log2 = 3;
+        seqhdr.ref_frames = 8;
+        seqhdr.order_hint_n_bits = 3;
+
+        let mut refs = default_refs();
+        let mut ref_hdr = crate::headers::FrameHeader::default();
+        ref_hdr.frame_offset = 5;
+        refs[0].p.frame_hdr = Some(std::sync::Arc::new(ref_hdr));
+
+        // vlc(0)=1, vlc(0)=1, idx=000, poc_is_implicit=0, poc=101 (5)
+        // 0b11_000_0_10 0b1... = 0xC2, 0x80
+        let data = [0xC2, 0x80];
+        let mut gb = GetBits::new(&data);
+        let hdr = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb).unwrap();
+        assert_eq!(hdr.existing_frame_idx, 0);
+
+        // The same header naming a different POC is a malformed stream.
+        let data = [0xC3, 0x00]; // poc=110 (6), slot holds 5
+        let mut gb = GetBits::new(&data);
+        assert!(parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb).is_err());
     }
 
     #[test]
