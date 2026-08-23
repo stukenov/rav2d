@@ -50,7 +50,18 @@ impl MemPool {
         drop(inner);
 
         let layout = Layout::from_size_align(size, POOL_ALIGNMENT).ok()?;
-        let ptr = unsafe { alloc::alloc(layout) };
+        // Zeroed, not `alloc`: these blocks become picture planes and header
+        // buffers that the decoder reads as ordinary slices. A stream that is
+        // truncated or malformed can reach a sample the reconstruction never
+        // wrote, and reading uninitialised memory is undefined behaviour in
+        // Rust however benign it looks in C — it also made the read result
+        // differ run to run, and would hand heap contents to whoever receives
+        // the decoded frame. Recycled blocks still carry the previous frame's
+        // pixels, which is what dav2d does and is well-defined.
+        //
+        // The cost is one memset per distinct block size per pool: steady-state
+        // decoding recycles and never reaches this path.
+        let ptr = unsafe { alloc::alloc_zeroed(layout) };
         NonNull::new(ptr)
     }
 

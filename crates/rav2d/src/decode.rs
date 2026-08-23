@@ -9402,8 +9402,11 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
             * (if bawp_idx & 1 != 0 { 1 } else { -1 });
         256 + 16 * aidx
     } else if count_l2 != 0 {
-        let num = sum_xy - (((sum_x as i64) * (sum_y as i64)) >> count_l2) as i32;
-        let den = sum_x2 - (((sum_x as i64) * (sum_x as i64)) >> count_l2) as i32;
+        // Same `int` wrap semantics as the accumulators above (recon_tmpl.c:
+        // 2806-2807): once a malformed stream has wrapped the sums, these
+        // subtractions can overflow too, and C carries the wrapped value on.
+        let num = sum_xy.wrapping_sub((((sum_x as i64) * (sum_y as i64)) >> count_l2) as i32);
+        let den = sum_x2.wrapping_sub((((sum_x as i64) * (sum_x as i64)) >> count_l2) as i32);
         crate::recon::derive_alpha(num, den, 256)
     } else {
         256
@@ -9411,8 +9414,12 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
     recon.bawp_ab[plane].0 = alpha;
 
     let beta: i32 = if count_l2 != 0 {
-        let diff = (sum_y << 8) - sum_x * alpha;
-        crate::intops::apply_sign(diff.abs() >> count_l2, diff)
+        // recon_tmpl.c:2816-2818, again plain `int`: the shift, the product and
+        // the subtraction all wrap, and `abs(INT_MIN)` stays INT_MIN.
+        let diff = sum_y
+            .wrapping_shl(8)
+            .wrapping_sub(sum_x.wrapping_mul(alpha));
+        crate::intops::apply_sign(diff.wrapping_abs() >> count_l2, diff)
     } else {
         -128
     };
