@@ -139,7 +139,9 @@ RAV2D_NEON_OFF=all DYLD_LIBRARY_PATH=dav2d/build/src cargo test -p rav2d
 
 ## Conformance
 
-`crates/rav2d/tests/conformance.rs` is an FFI oracle: it decodes each clip with **both** rav2d and the dav2d C library and asserts byte-equal output. Test clips live in `dav2d/media` (8-bit) and `crates/rav2d/tests/data` (10-bit). The dav2d submodule is kept pristine — it is the source of truth for the port.
+`crates/rav2d/tests/conformance.rs` is an FFI oracle: it decodes each clip with **both** rav2d and the dav2d C library and asserts byte-equal output. Test clips live in `crates/rav2d/tests/data` — the 8-bit vectors under `media/` came from dav2d, which has since stopped bundling them, and the rest were staged here. The dav2d submodule is kept pristine — it is the source of truth for the port.
+
+A second, independent gate compares against **avmdec**, the AOM reference decoder: every vector under `tests/data/media` ships the md5 avmdec produces for it, and `bit_exact_avm_reference_md5` hashes rav2d's visible frames, in display order, against it. Matching dav2d cannot catch a bug faithfully ported from the C — both agree and the gate stays green — so this one does not go through dav2d at all.
 
 ## Approach
 

@@ -2,6 +2,7 @@
  * Copyright © 2018, VideoLAN and dav2d authors
  * Copyright © 2015 Martin Storsjo
  * Copyright © 2015 Janne Grunau
+ * Copyright © 2026 Arm Limited
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,6 +37,23 @@
 #define __has_feature(x) 0
 #endif
 
+.macro  ldrel rd, raddr, val, offset=0
+#if defined(__APPLE__)
+        adrp            \raddr, \val+(\offset)@PAGE
+        ldr             \rd, [\raddr, \val+(\offset)@PAGEOFF]
+#elif defined(_MSC_VER)
+        movrel          \raddr, \val, \offset
+        ldr             \rd, [\raddr]
+#elif __has_feature(hwaddress_sanitizer)
+        adrp            \raddr, :pg_hi21_nc:\val+(\offset)
+        movk            \raddr, #:prel_g3:\val+0x100000000
+        ldr             \rd, [\raddr, :lo12:\val+(\offset)]
+#else
+        adrp            \raddr, \val+(\offset)
+        ldr             \rd, [\raddr, :lo12:\val+(\offset)]
+#endif
+.endm
+
 .macro  movrel rd, val, offset=0
 #if defined(__APPLE__)
   .if \offset < 0
@@ -46,7 +64,7 @@
         adrp            \rd, \val+(\offset)@PAGE
         add             \rd, \rd, \val+(\offset)@PAGEOFF
   .endif
-#elif defined(PIC) && defined(_WIN32)
+#elif defined(_WIN32)
   .if \offset < 0
         adrp            \rd, \val
         add             \rd, \rd, :lo12:\val
@@ -59,11 +77,9 @@
         adrp            \rd, :pg_hi21_nc:\val+(\offset)
         movk            \rd, #:prel_g3:\val+0x100000000
         add             \rd, \rd, :lo12:\val+(\offset)
-#elif defined(PIC)
+#else
         adrp            \rd, \val+(\offset)
         add             \rd, \rd, :lo12:\val+(\offset)
-#else
-        ldr             \rd, =\val+\offset
 #endif
 .endm
 
@@ -273,6 +289,69 @@
         trn2            \o2\().4s,  \t4\().4s,  \t6\().4s
         trn1            \o1\().4s,  \t5\().4s,  \t7\().4s
         trn2            \o3\().4s,  \t5\().4s,  \t7\().4s
+.endm
+
+.macro load_2_strided dst0, dst1, ptr, out_ptr, stride, inc=0
+        ldr             \dst0, [\ptr]
+        ldr             \dst1, [\ptr, \stride]
+  .if \inc
+        add             \out_ptr, \ptr, \stride, lsl #1
+  .endif
+.endm
+
+.macro load_4_strided dst0, dst1, dst2, dst3, ptr, out_ptr, stride, inc=0
+        ldr             \dst0, [\ptr]
+        ldr             \dst1, [\ptr, \stride]
+        add             \out_ptr, \ptr, \stride, lsl #1
+        ldr             \dst2, [\out_ptr]
+        ldr             \dst3, [\out_ptr, \stride]
+  .if \inc
+        add             \out_ptr, \out_ptr, \stride, lsl #1
+  .endif
+.endm
+
+.macro load_8_strided dst0, dst1, dst2, dst3, dst4, dst5, dst6, dst7, ptr, out_ptr, stride, inc=0
+        load_4_strided  \dst0, \dst1, \dst2, \dst3, \ptr, \out_ptr, \stride, 1
+        load_4_strided  \dst4, \dst5, \dst6, \dst7, \out_ptr, \out_ptr, \stride, \inc
+.endm
+
+.macro store_2_strided dst0, dst1, ptr, out_ptr, stride, inc=0
+        str             \dst0, [\ptr]
+        str             \dst1, [\ptr, \stride]
+  .if \inc
+        add             \out_ptr, \ptr, \stride, lsl #1
+  .endif
+.endm
+
+.macro store_4_strided dst0, dst1, dst2, dst3, ptr, out_ptr, stride, inc=0
+        str             \dst0, [\ptr]
+        str             \dst1, [\ptr, \stride]
+        add             \out_ptr, \ptr, \stride, lsl #1
+        str             \dst2, [\out_ptr]
+        str             \dst3, [\out_ptr, \stride]
+  .if \inc
+        add             \out_ptr, \out_ptr, \stride, lsl #1
+  .endif
+.endm
+
+.macro store_8_strided dst0, dst1, dst2, dst3, dst4, dst5, dst6, dst7, ptr, out_ptr, stride, inc=0
+        store_4_strided \dst0, \dst1, \dst2, \dst3, \ptr, \out_ptr, \stride, 1
+        store_4_strided \dst4, \dst5, \dst6, \dst7, \out_ptr, \out_ptr, \stride, \inc
+.endm
+
+.macro shift_4x4s dst0, dst1, dst2, dst3, src0, src1, src2, src3, vshift
+        srshl           \dst0\().4s, \src0\().4s, \vshift\().4s
+        srshl           \dst1\().4s, \src1\().4s, \vshift\().4s
+        srshl           \dst2\().4s, \src2\().4s, \vshift\().4s
+        srshl           \dst3\().4s, \src3\().4s, \vshift\().4s
+.endm
+
+.macro shift_and_narrow_4x4s dst0, dst1, dst2, dst3, src0, src1, src2, src3, vshift
+        shift_4x4s      \dst0, \dst1, \dst2, \dst3, \src0, \src1, \src2, \src3, \vshift
+        sqxtn           \dst0\().4h, \dst0\().4s
+        sqxtn           \dst1\().4h, \dst1\().4s
+        sqxtn           \dst2\().4h, \dst2\().4s
+        sqxtn           \dst3\().4h, \dst3\().4s
 .endm
 
 #endif /* DAV2D_SRC_ARM_64_UTIL_S */

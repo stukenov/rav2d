@@ -41,7 +41,7 @@ extern "C" {
 #define DAV2D_MAX_TILE_COLS 64
 #define DAV2D_MAX_TILE_ROWS 64
 #define DAV2D_MAX_SEGMENTS 16
-#define DAV2D_NUM_REF_FRAMES 8
+#define DAV2D_NUM_REF_FRAMES 16
 #define DAV2D_PRIMARY_REF_NONE 7
 #define DAV2D_REFS_PER_FRAME 7
 #define DAV2D_TOTAL_REFS_PER_FRAME (DAV2D_REFS_PER_FRAME + 1)
@@ -145,6 +145,7 @@ enum Dav2dColorDescription {
     DAV2D_COLOR_DESC_BT2100HLG = 3,  // CP=9, TC=14, MC=9
     DAV2D_COLOR_DESC_SRGB = 4,       // CP=1, TC=13, MC=0
     DAV2D_COLOR_DESC_SRGBSYCC = 5,   // CP=1, TC=13, MC=5
+    DAV2D_COLOR_DESC_RESERVED = 255,
 };
 
 enum Dav2dColorPrimaries {
@@ -213,6 +214,7 @@ enum Dav2dChromaSamplePosition {
     DAV2D_CHR_BOTTOMLEFT = 4,
     DAV2D_CHR_BOTTOM = 5,
     DAV2D_CHR_UNKNOWN = 6,
+    DAV2D_CHR_RESERVED = 255,
 };
 
 enum Dav2dAspectRatio {
@@ -295,6 +297,14 @@ typedef struct Dav2dSegmentationDataSet {
     int16_t delta_q[DAV2D_MAX_SEGMENTS];
     uint16_t delta_q_mask, skip_mask, globalmv_mask;
 } Dav2dSegmentationDataSet;
+
+typedef struct Dav2dTileInfo {
+    uint8_t uniform;
+    uint8_t min_log2_cols, max_log2_cols, log2_cols, cols;
+    uint8_t min_log2_rows, max_log2_rows, log2_rows, rows;
+    uint16_t col_start_sb[DAV2D_MAX_TILE_COLS + 1];
+    uint16_t row_start_sb[DAV2D_MAX_TILE_ROWS + 1];
+} Dav2dTileInfo;
 
 typedef struct Dav2dSequenceHeader {
     uint8_t id;
@@ -418,18 +428,12 @@ typedef struct Dav2dSequenceHeader {
     uint8_t separate_uv_delta_q;
     uint8_t equal_ac_dc_q;
     int8_t base_ydc_dq, ydc_dq_enabled;
-    uint8_t base_uvdc_dq, uvdc_dq_enabled;
-    uint8_t base_uvac_dq, uvac_dq_enabled;
+    int8_t base_uvdc_dq, uvdc_dq_enabled;
+    int8_t base_uvac_dq, uvac_dq_enabled;
 
     struct {
         uint8_t /*enum Dav2dAdaptiveBoolean*/ present;
-        struct Dav2dTileInfo {
-            uint8_t uniform;
-            uint8_t min_log2_cols, max_log2_cols, log2_cols, cols;
-            uint8_t min_log2_rows, max_log2_rows, log2_rows, rows;
-            uint16_t col_start_sb[DAV2D_MAX_TILE_COLS + 1];
-            uint16_t row_start_sb[DAV2D_MAX_TILE_ROWS + 1];
-        } t;
+        Dav2dTileInfo t;
     } tiling;
 
     uint8_t film_grain_present;
@@ -466,14 +470,14 @@ typedef struct Dav2dFrameHeader {
     uint32_t frame_presentation_delay;
     uint8_t show_immediate;
     uint8_t show_implicit;
-    uint8_t cross_frame_context;
+    uint8_t no_cross_frame_context;
     uint8_t disable_cdf_update;
     uint8_t allow_screen_content_tools;
     uint8_t force_integer_mv;
     uint8_t frame_size_override;
     uint8_t primary_ref_signaled, primary_ref_frame, secondary_ref_frame;
     uint8_t n_ref_frames;
-    uint8_t refresh_frame_flags;
+    uint16_t refresh_frame_flags;
     uint8_t allow_intrabc, allow_global_intrabc, allow_local_intrabc;
     uint8_t max_bvp_drl_bits, max_drl_bits;
     int8_t refidx[DAV2D_REFS_PER_FRAME];
@@ -497,7 +501,7 @@ typedef struct Dav2dFrameHeader {
     } tip;
     uint8_t sb128; // not literally coded, but derived from seqhdr/frame_type
     struct {
-        struct Dav2dTileInfo t;
+        Dav2dTileInfo t;
         uint8_t n_bytes;
         uint16_t update;
     } tiling;
@@ -533,6 +537,7 @@ typedef struct Dav2dFrameHeader {
     struct {
         enum Dav2dAdaptiveBoolean enabled;
         uint8_t qp_idx, scale;
+        uint8_t b64size;
     } gdf;
     struct {
         uint8_t enabled;
@@ -562,6 +567,7 @@ typedef struct Dav2dFrameHeader {
             uint8_t ext_filter_support, edge_clf, max_band_log2;
             uint8_t filter_off[64 /* nibbles. if bo_only { [band:128] } else { [d0:4][d1:4][band:8] } */];
         } p[3];
+        uint8_t b64size;
     } ccso;
     enum Dav2dTxfmMode txfm_mode;
     uint8_t switchable_comp_refs;

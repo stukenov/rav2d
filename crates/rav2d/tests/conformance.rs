@@ -26,7 +26,7 @@ pub struct FramePlanes {
 }
 
 fn media(name: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media")).join(name)
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/media")).join(name)
 }
 
 /// Locally-staged test vectors (NOT in the pristine dav2d submodule). Holds the
@@ -338,7 +338,8 @@ fn md5_matches_known_vectors() {
 
 /// Check the decoded output against **avmdec**, the AOM reference decoder.
 ///
-/// Every vector in `dav2d/media` ships with the md5 avmdec produces for it, and
+/// Every vector in `tests/data/media` ships with the md5 avmdec produces for
+/// it, and
 /// dav2d gates on those hashes in its own CI (`tests/test-md5.sh`). Until now
 /// rav2d only ever compared itself to dav2d, which cannot catch a bug rav2d
 /// faithfully reproduced from the C — both decoders agree and the gate stays
@@ -350,7 +351,7 @@ fn md5_matches_known_vectors() {
 /// which ones, and in what sequence — what a player actually consumes.
 #[test]
 fn bit_exact_avm_reference_md5() {
-    let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media"));
+    let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/media"));
     let Ok(entries) = std::fs::read_dir(&dir) else {
         eprintln!("skip: {dir:?} not found");
         return;

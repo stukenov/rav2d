@@ -46,7 +46,7 @@ const EAGAIN: i32 = -35;
 const EAGAIN: i32 = -11;
 
 fn media(name: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media")).join(name)
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/media")).join(name)
 }
 
 fn ss(layout: i32) -> (i32, i32) {

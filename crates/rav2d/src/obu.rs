@@ -303,8 +303,13 @@ pub fn parse_film_grain_data(gb: &mut GetBits, layout: PixelLayout) -> Result<Fi
         }
         let num_pl_pos = num_pos + (pl != 0 && fgd.num_points[0] != 0) as i32;
         let coef_bits = 5 + gb.get_bits(2) as i32;
+        // The coefficients are coded unsigned over `coef_bits` bits and centred
+        // on the middle of that range, not on 128 — which is only the same
+        // thing when `coef_bits` happens to be 8 (dav2d obu.c, "filmgrain:
+        // normalize ar coefficients correctly for nbits").
+        let half = 1 << (coef_bits - 1);
         for i in 0..num_pl_pos as usize {
-            fgd.ar_coeffs[pl][i] = (gb.get_bits(coef_bits) as i32 - 128) as i8;
+            fgd.ar_coeffs[pl][i] = (gb.get_bits(coef_bits) as i32 - half) as i8;
         }
     }
     fgd.ar_coeff_shift = gb.get_bits(2) as u64 + 6;
@@ -3623,7 +3628,7 @@ mod tests {
     fn test_parse_obus_real_file() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../dav2d/media/avm-v14.1.0-bus.352x288.l5.seg1.obu"
+            "/tests/data/media/avm-v14.1.0-bus.352x288.l5.seg1.obu"
         );
         let data = std::fs::read(path).expect("Failed to read test OBU file");
         let mut c = make_decoder_ctx();
@@ -3661,7 +3666,7 @@ mod tests {
     fn test_decode_keyframe_entropy() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../dav2d/media/avm-v14.1.0-bus.64x64.l5.obu"
+            "/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu"
         );
         let data = std::fs::read(path).expect("Failed to read test OBU file");
         let mut c = make_decoder_ctx();
@@ -3683,7 +3688,7 @@ mod tests {
 
     fn try_parse_obu_file(filename: &str) -> (bool, Option<(i32, i32)>) {
         let path = format!(
-            "{}/../../dav2d/media/{}",
+            "{}/tests/data/media/{}",
             env!("CARGO_MANIFEST_DIR"),
             filename
         );
@@ -3734,7 +3739,7 @@ mod tests {
 
     #[test]
     fn test_parse_obus_all_media_files() {
-        let media_dir = format!("{}/../../dav2d/media", env!("CARGO_MANIFEST_DIR"));
+        let media_dir = format!("{}/tests/data/media", env!("CARGO_MANIFEST_DIR"));
         let entries = std::fs::read_dir(&media_dir);
         if entries.is_err() {
             return;

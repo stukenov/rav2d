@@ -145,6 +145,20 @@
 #define assert __assume
 #endif
 
+#ifndef NDEBUG
+#define DAV2D_ASSERT0_IF_DEBUG() assert(0)
+#else
+#define DAV2D_ASSERT0_IF_DEBUG()
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define dav2d_unreachable() do { DAV2D_ASSERT0_IF_DEBUG(); __builtin_unreachable(); } while (0)
+#elif defined(_MSC_VER)
+#define dav2d_unreachable() do { DAV2D_ASSERT0_IF_DEBUG(); __assume(0); } while (0)
+#else
+#define dav2d_unreachable() assert(0)
+#endif
+
 #if defined(__GNUC__) && !defined(__INTEL_COMPILER) && !defined(__clang__)
 #    define dav2d_uninit(x) x=x
 #else

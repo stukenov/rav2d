@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use rav2d::{Data, Decoder, Rav2dError, Settings};
 
 fn media(name: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dav2d/media")).join(name)
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/media")).join(name)
 }
 fn data(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data")).join(name)
