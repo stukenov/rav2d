@@ -2584,10 +2584,3 @@ fn mt_matches_single_thread() {
         "mt_matches_single_thread: {checked} decode configs byte-identical (n_threads 1 vs 4)"
     );
 }
-
-/// TEMP: dav2d full block trace for resize.
-#[test]
-fn tmp_dav2d_rz_blk() {
-    let f = dav2d_decode_invisible(&data("resize-10bit-superres.obu"));
-    eprintln!("dav2d frames: {}", f.len());
-}
