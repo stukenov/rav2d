@@ -104,7 +104,12 @@ jobs:
 
       # `mt_matches_single_thread` is the only test that spawns rav2d's worker
       # threads, and it touches no dav2d C code — so every report belongs to us.
+      #
+      # `-Zbuild-std` is required, not optional: ThreadSanitizer changes the ABI,
+      # and rustc refuses to link an instrumented crate against a prebuilt `core`
+      # and `compiler_builtins`. (AddressSanitizer does not, hence the asan job
+      # above builds normally.)
       - name: Multi-threaded decode under TSan
-        run: cargo test -p rav2d --test conformance mt_matches_single_thread --target "$TARGET"
+        run: cargo test -Zbuild-std -p rav2d --test conformance mt_matches_single_thread --target "$TARGET"
         env:
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
