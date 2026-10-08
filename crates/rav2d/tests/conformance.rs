@@ -2136,9 +2136,18 @@ const AVMENC_PENDING: &[(&str, &str)] = &[
         "dav2d differs from avmdec too; md5 convention for 4:4:4 unchecked",
     ),
     ("avmenc-resize.obu", "dav2d hangs on it; scaled references"),
-    ("avmenc-tiles.obu", "dav2d differs from avmdec too"),
-    ("avmenc-unitsb.obu", "dav2d differs from avmdec too"),
+    (
+        "avmenc-tiles.obu",
+        "key frame off by 1 near tile edges (GDF stripes, chroma deblock); later frames fail",
+    ),
 ];
+
+/// Vectors where rav2d follows avm and dav2d does not: only avmdec's md5 is
+/// checked, the frame-by-frame comparison against dav2d is skipped.
+const AVMENC_AVMDEC_ONLY: &[(&str, &str)] = &[(
+    "avmenc-unitsb.obu",
+    "dav2d reads the GDF adaptive bit only for frames over 128px; avm counts units",
+)];
 
 fn avmenc_pending(path: &std::path::Path) -> Option<&'static str> {
     let name = path.file_name()?.to_str()?;
@@ -2167,6 +2176,10 @@ fn avmenc_failures(path: &PathBuf) -> Vec<String> {
             frames.len()
         ));
     }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if AVMENC_AVMDEC_ONLY.iter().any(|(n, _)| *n == name) {
+        return failures;
+    }
     failures.extend(full_clip_failures(path));
     failures.extend(
         full_clip_filtered_failures(path)
@@ -2177,7 +2190,7 @@ fn avmenc_failures(path: &PathBuf) -> Vec<String> {
 }
 
 /// Every avmenc vector not listed as pending matches avmdec's md5 and is
-/// bit-exact against dav2d on every coding-order frame.
+/// bit-exact against dav2d on every coding-order frame (except AVMENC_AVMDEC_ONLY).
 #[test]
 fn avmenc_vectors_bit_exact() {
     let vectors = avmenc_vectors();

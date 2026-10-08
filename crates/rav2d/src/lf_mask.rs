@@ -11,7 +11,8 @@ pub struct Av2Filter {
     pub qidx: [u16; 16],
     pub gdf: [u8; 16],
     pub cdef_idx: [i8; 16],
-    pub ccso: [u8; 3],
+    /// Per plane, per 64x64 block of the 256x256 area (`[plane][16]`).
+    pub ccso: [[u8; 16]; 3],
     pub noskip_mask: [[u16; 4]; 32],
     pub lr_noskip_mask: [[u16; 4]; 64],
     pub lossless_mask_y: [[u16; 4]; 64],
@@ -26,7 +27,7 @@ impl Default for Av2Filter {
             qidx: [0; 16],
             gdf: [0; 16],
             cdef_idx: [-1; 16],
-            ccso: [0; 3],
+            ccso: [[0; 16]; 3],
             noskip_mask: [[0; 4]; 32],
             lr_noskip_mask: [[0; 4]; 64],
             lossless_mask_y: [[0; 4]; 64],

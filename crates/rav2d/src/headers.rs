@@ -607,6 +607,8 @@ pub struct FhGdf {
     pub enabled: AdaptiveBoolean,
     pub qp_idx: u8,
     pub scale: u8,
+    /// GDF flag unit in 64px blocks (1, 2 or 4), dav2d `gdf.b64size`.
+    pub b64size: u8,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -678,6 +680,8 @@ impl Default for FhCcsoPlane {
 pub struct FhCcso {
     pub enabled: u8,
     pub p: [FhCcsoPlane; 3],
+    /// CCSO flag unit in 64px blocks (1, 2 or 4), dav2d `ccso.b64size`.
+    pub b64size: u8,
 }
 
 #[derive(Debug, Clone, Default)]

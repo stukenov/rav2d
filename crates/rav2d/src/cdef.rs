@@ -570,12 +570,12 @@ pub struct CcsoPlaneCfg {
     pub filter_off: [u8; 64],
 }
 
-/// CCSO configuration for a CDEF brow. `mask_ccso[sb256x][pl]` is the per-SB CCSO
-/// enable flag (decoded into the `Av2Filter` masks). The lossless masks are
+/// CCSO configuration for a CDEF brow. `mask_ccso[sb256x][pl][sb64_idx]` is the
+/// per-64x64 CCSO enable flag (decoded into the `Av2Filter` masks). The lossless masks are
 /// per-SB256 and only non-zero on segmented-lossless frames.
 pub struct CcsoCfg<'a> {
     pub p: [CcsoPlaneCfg; 3],
-    pub mask_ccso: &'a [[u8; 3]],
+    pub mask_ccso: &'a [[[u8; 16]; 3]],
 }
 
 pub struct CdefBrowParams<'a> {
@@ -796,7 +796,10 @@ pub fn cdef_brow<BD: BitDepth>(
             // dav2d cdef_apply_tmpl.c:153-210. Runs for every SB (independent of
             // CDEF), computing the per-pixel LUT index used by ccso_add later.
             if let Some(cc) = &p.ccso {
-                let ccm = cc.mask_ccso.get(sb256x).copied().unwrap_or([0; 3]);
+                let ccm = cc
+                    .mask_ccso
+                    .get(sb256x)
+                    .map_or([0; 3], |m| [m[0][sb64_idx], m[1][sb64_idx], m[2][sb64_idx]]);
                 let flag = ccm[0] | ccm[1] | ccm[2];
                 let do_left = flag & !prev_flag;
                 prev_flag |= flag;
@@ -1087,7 +1090,10 @@ pub fn cdef_brow<BD: BitDepth>(
             // dav2d cdef_apply_tmpl.c:355-377. Applies the per-pixel offset using
             // the LUT index computed in the prep stage.
             if let Some(cc) = &p.ccso {
-                let ccm = cc.mask_ccso.get(sb256x).copied().unwrap_or([0; 3]);
+                let ccm = cc
+                    .mask_ccso
+                    .get(sb256x)
+                    .map_or([0; 3], |m| [m[0][sb64_idx], m[1][sb64_idx], m[2][sb64_idx]]);
                 let flag = ccm[0] | ((ccm[1] | ccm[2]) << 1);
                 let do_right = flag & !prev_flag;
                 if do_right != 0 && (sbx + 1) * sbsz < p.bw {

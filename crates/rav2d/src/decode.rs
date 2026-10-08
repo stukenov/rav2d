@@ -56,6 +56,13 @@ pub fn init_wiener(frame_hdr: &FrameHeader, lf: &mut LoopFilterState) {
     }
 }
 
+/// Fill an `n`x`n` square of a row-major map with `v` (dav2d `splat2d`).
+fn splat2d(map: &mut [u8], stride: usize, n: usize, v: u8) {
+    for y in 0..n {
+        map[y * stride..y * stride + n].fill(v);
+    }
+}
+
 pub fn compute_restore_planes(frame_hdr: &FrameHeader) -> i32 {
     let has_y = frame_hdr.restoration.p[0].restoration_type != RestorationType::None as u8
         || frame_hdr.gdf.enabled != AdaptiveBoolean::Off;
@@ -2013,7 +2020,8 @@ pub struct SbFrameInfo {
     pub seg_delta_q: [i16; crate::headers::MAX_SEGMENTS],
     // GDF / CDEF-index / CCSO (read at SB / 64x64 boundaries, before delta-q)
     pub gdf_enabled: crate::headers::AdaptiveBoolean,
-    pub gdf_is_key: bool,
+    pub gdf_b64size: i32,
+    pub ccso_b64size: i32,
     pub cur_w: i32,
     pub cur_h: i32,
     pub cdef_enabled: bool,
@@ -2148,7 +2156,8 @@ impl SbFrameInfo {
             q_vdc_delta: frame_hdr.quant.vdc_delta as i32,
             seg_delta_q: frame_hdr.segmentation.d.delta_q,
             gdf_enabled: frame_hdr.gdf.enabled,
-            gdf_is_key: frame_hdr.frame_type == crate::headers::FrameType::Key,
+            gdf_b64size: frame_hdr.gdf.b64size as i32,
+            ccso_b64size: frame_hdr.ccso.b64size as i32,
             cur_w: frame_hdr.width,
             cur_h: frame_hdr.height,
             cdef_enabled: frame_hdr.cdef.enabled != 0,
@@ -4090,9 +4099,9 @@ fn collect_noskip(
         .collect()
 }
 
-fn collect_ccso(mask: &[crate::lf_mask::Av2Filter], row: usize, sb256w: i32) -> Vec<[u8; 3]> {
+fn collect_ccso(mask: &[crate::lf_mask::Av2Filter], row: usize, sb256w: i32) -> Vec<[[u8; 16]; 3]> {
     (0..sb256w as usize)
-        .map(|i| mask.get(row + i).map(|m| m.ccso).unwrap_or([0; 3]))
+        .map(|i| mask.get(row + i).map(|m| m.ccso).unwrap_or([[0; 16]; 3]))
         .collect()
 }
 
@@ -4507,7 +4516,8 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
             let r = frame_hdr.ccso.p[p].refidx as usize;
             fc.prev_ccsomap[p] = c.refs[frame_hdr.refidx[r] as usize].ccsomap.clone();
         }
-        fc.cur_ccsomap = vec![0; 3 * (fc.sb256w * fc.sb256h) as usize];
+        // One flag per 64x64 block, plane-major (dav2d 356f84c4).
+        fc.cur_ccsomap = vec![0; 3 * 16 * (fc.sb256w * fc.sb256h) as usize];
     }
 
     // ---- skip_mode_refs (decode.c:5687-5691) ------------------------------
@@ -5608,13 +5618,12 @@ fn decode_b<BD: crate::pixel::BitDepth>(
 
     // GDF (guided deblocking filter) flag. Port of decode.c:1806-1833.
     if has_luma {
-        let gdf_sz_log2 = if fi.gdf_is_key { 1 } else { imax(1, fi.sb128) };
-        let gdf_bs = 16 << gdf_sz_log2;
-        if (bx | by) & (gdf_bs - 1) == 0 {
+        let gdf_bs = fi.gdf_b64size;
+        if (bx | by) & (16 * gdf_bs - 1) == 0 {
             let idx = (((by & 48) >> 2) + ((bx & 48) >> 4)) as usize;
-            let flag = if fi.gdf_enabled == crate::headers::AdaptiveBoolean::Adaptive
-                && imax(fi.cur_w, fi.cur_h) > 4 * gdf_bs
-            {
+            // Adaptive is only coded when the frame has more than one unit
+            // (avm read_gdf), so it alone decides whether a flag is read.
+            let flag = if fi.gdf_enabled == crate::headers::AdaptiveBoolean::Adaptive {
                 let f = msac.decode_bool_adapt(cdf_m.gdf()) as u8;
                 if trace_blk {
                     eprintln!("  CK gdf flag={} rng={}", f, msac.dbg_rng());
@@ -5623,16 +5632,12 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             } else {
                 (fi.gdf_enabled != crate::headers::AdaptiveBoolean::Off) as u8
             };
-            let n = 1usize << gdf_sz_log2;
-            let m = &mut recon.lf_mask[recon.lf_idx];
-            m.gdf[idx..idx + n].fill(flag);
-            if gdf_bs >= 32 {
-                m.gdf[idx + 4..idx + 4 + n].fill(flag);
-                if gdf_bs == 64 {
-                    m.gdf[idx + 8..idx + 8 + n].fill(flag);
-                    m.gdf[idx + 12..idx + 12 + n].fill(flag);
-                }
-            }
+            splat2d(
+                &mut recon.lf_mask[recon.lf_idx].gdf[idx..],
+                4,
+                gdf_bs as usize,
+                flag,
+            );
         }
     }
 
@@ -5695,8 +5700,12 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     }
 
     // CCSO (cross-component sample offset). Port of decode.c:1895-1919.
-    if has_luma && (bx | by) & 63 == 0 {
-        let ccso_idx = (3 * ((bx >> 6) + (by >> 6) * fi.sb256w)) as usize;
+    // The flag covers a unit of `ccso_b64size` 64px blocks (dav2d 356f84c4).
+    let ccso_bs = fi.ccso_b64size;
+    if has_luma && (bx | by) & (16 * ccso_bs - 1) == 0 {
+        let ccso_fidx = ((bx >> 4) + (by >> 4) * fi.sb256w * 4) as usize;
+        let ccso_bidx = (((by & 48) >> 2) + ((bx & 48) >> 4)) as usize;
+        let bs = ccso_bs as usize;
         for p in 0..3 {
             if !fi.ccso_enabled[p] {
                 continue;
@@ -5705,14 +5714,17 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 // A reference of another size has a map of another shape; dav2d
                 // reads past it, rav2d reads the flag as off.
                 recon.prev_ccsomap[p]
-                    .and_then(|prev| prev.get(ccso_idx + p).copied())
+                    .and_then(|prev| prev.get(p * prev.len() / 3 + ccso_fidx).copied())
                     .unwrap_or(0)
             } else {
-                let ctx = if bx - 64 >= fi.tile_col_start {
-                    recon.lf_mask[recon.lf_idx - 1].ccso[p] as usize * 2
-                } else {
+                let left = if bx == fi.tile_col_start {
                     0
+                } else if bx & 63 != 0 {
+                    recon.lf_mask[recon.lf_idx].ccso[p][ccso_bidx - bs]
+                } else {
+                    recon.lf_mask[recon.lf_idx - 1].ccso[p][(ccso_bidx | 3) & !(bs - 1)]
                 };
+                let ctx = left as usize * 2;
                 let v = msac.decode_bool_adapt(cdf_m.ccso(p, ctx)) as u8;
                 if trace_blk {
                     eprintln!(
@@ -5725,9 +5737,17 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 }
                 v
             };
-            recon.lf_mask[recon.lf_idx].ccso[p] = val;
+            splat2d(
+                &mut recon.lf_mask[recon.lf_idx].ccso[p][ccso_bidx..],
+                4,
+                bs,
+                val,
+            );
             if !recon.cur_ccsomap.is_empty() {
-                recon.cur_ccsomap[ccso_idx + p] = val;
+                let plane = recon.cur_ccsomap.len() / 3;
+                let stride = fi.sb256w as usize * 4;
+                let map = &mut recon.cur_ccsomap[p * plane..(p + 1) * plane];
+                splat2d(&mut map[ccso_fidx..], stride, bs, val);
             }
         }
     }

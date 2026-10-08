@@ -1658,6 +1658,7 @@ fn deblock64_cols<BD: BitDepth>(
         let n64 = (ctx.bw + 15) >> 4;
         for x64 in 0..n64 {
             let have_left = x64 > 0;
+            let tile_edge = is_tile_col_edge(ctx.frame_hdr, x64);
             let col = lflvl_row + (x64 >> 2) as usize;
             if col >= ctx.mask.len() {
                 break;
@@ -1720,10 +1721,9 @@ fn deblock64_cols<BD: BitDepth>(
                     hmask[3][sb64y],
                 ];
                 let llm = [ll_mask[x], ll_mask[x + 1]];
-                // dav2d's `tile_edge` (= tile_end == x64*16) is only set for the
-                // first column of an x64 that begins a new tile; for single-tile
-                // frames it is always false. Passing `x == 0` here would wrongly
-                // clamp max_width_neg at every superblock-column's left edge.
+                // dav2d's `tile_edge` (= tile_end == x64*16): only the first
+                // column of an x64 that begins a new tile, where avm shortens the
+                // negative side as on a superblock row edge.
                 deblock_h_sb64y_bd(
                     bd,
                     p_y,
@@ -1733,7 +1733,7 @@ fn deblock64_cols<BD: BitDepth>(
                     &llm,
                     &q_thr[x * 16..],
                     &side_thr[x * 16..],
-                    false,
+                    x == 0 && tile_edge,
                 );
             }
         }
@@ -1767,6 +1767,7 @@ fn deblock64_cols<BD: BitDepth>(
     let apply_v = ctx.frame_hdr.deblock.level_v != 0;
     for x64 in 0..n64 {
         let have_left = x64 > 0;
+        let tile_edge = is_tile_col_edge(ctx.frame_hdr, x64);
         let col = lflvl_row + (x64 >> 2) as usize;
         if col >= ctx.mask.len() {
             break;
@@ -1830,7 +1831,6 @@ fn deblock64_cols<BD: BitDepth>(
                 ((hmask[2][mask_idx] as u32 >> mask_shift) & bytes_mask) as u16,
             ];
             let llm = [ll_mask[x], ll_mask[x + 1]];
-            // Single-tile: tile_edge is always false (see luma above).
             if apply_u {
                 deblock_h_sb64uv_bd(
                     bd,
@@ -1841,7 +1841,7 @@ fn deblock64_cols<BD: BitDepth>(
                     &llm,
                     &q_thr[0][x * 16..],
                     &side_thr[0][x * 16..],
-                    false,
+                    x == 0 && tile_edge,
                 );
             }
             if apply_v {
@@ -1854,11 +1854,19 @@ fn deblock64_cols<BD: BitDepth>(
                     &llm,
                     &q_thr[1][x * 16..],
                     &side_thr[1][x * 16..],
-                    false,
+                    x == 0 && tile_edge,
                 );
             }
         }
     }
+}
+
+/// Whether the 64px column `x64` starts a tile other than the first (dav2d
+/// `tile_end == x64 * 16`, db_apply_tmpl.c).
+fn is_tile_col_edge(hdr: &FrameHeader, x64: i32) -> bool {
+    let t = &hdr.tiling.t;
+    let sbl2 = 4 + hdr.sb128 as i32;
+    (1..t.cols as usize).any(|i| (t.col_start_sb[i] as i32) << sbl2 == x64 * 16)
 }
 
 /// Port of `deblock_sbrow64_rows` (single-tile).

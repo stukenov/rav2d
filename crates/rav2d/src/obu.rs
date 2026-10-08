@@ -188,6 +188,39 @@ fn parse_tile_info(
     thdr.row_start_sb[thdr.rows as usize] = sbh as u16;
 }
 
+/// Number of GDF units in the frame, as avm's `init_gdf` counts them: units
+/// restart at each tile, so every tile row and column adds at least one.
+fn gdf_unit_count(hdr: &FrameHeader) -> i32 {
+    let t = &hdr.tiling.t;
+    let unit = 64 * hdr.gdf.b64size as i32;
+    let sb = 64 << hdr.sb128;
+    let count = |starts: &[u16], n: usize, size: i32| {
+        // avm measures in whole 4x4 units (mi_cols * MI_SIZE).
+        let size = (size + 3) & !3;
+        (0..n)
+            .map(|i| {
+                let a = imin(starts[i] as i32 * sb, size);
+                let b = imin(starts[i + 1] as i32 * sb, size);
+                if b > a { 1 + (b - a - 1) / unit } else { 0 }
+            })
+            .sum::<i32>()
+    };
+    count(&t.col_start_sb[..], t.cols as usize, hdr.width)
+        * count(&t.row_start_sb[..], t.rows as usize, hdr.height)
+}
+
+/// OR of the inner tile start positions in superblocks; a set low bit means
+/// some tile starts mid-way through a larger CCSO/GDF unit. avm tests the
+/// parity of every tile size but the last (`col_start_sb[i + 1] -
+/// col_start_sb[i]`), which is the parity of the starts 1..cols. dav2d ORs the
+/// starts 0..cols-1 instead, skips the last inner start and so keeps 128px
+/// units for two 64px-wide tiles.
+fn tile_start_mask(hdr: &FrameHeader) -> u16 {
+    let t = &hdr.tiling.t;
+    let inner = |starts: &[u16], n: usize| starts[1.min(n)..n].iter().fold(0, |m, &s| m | s);
+    inner(&t.col_start_sb[..], t.cols as usize) | inner(&t.row_start_sb[..], t.rows as usize)
+}
+
 pub fn parse_tile_info_frmhdr(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, gb: &mut GetBits) {
     hdr.sb128 = if hdr.is_inter_or_switch() {
         seqhdr.sb128
@@ -1374,12 +1407,21 @@ pub fn parse_frame_hdr(
             }
         }
 
+        // The GDF unit follows the superblock or is 128px, but never straddles
+        // a tile boundary (dav2d 356f84c4/360bbd85, avm init_gdf).
+        hdr.gdf.b64size = 1 << imax(!seqhdr.gdf_unit_matches_sbsz as i32, hdr.sb128 as i32);
+        if !seqhdr.gdf_unit_matches_sbsz && hdr.sb128 == 0 && tile_start_mask(&hdr) & 1 != 0 {
+            hdr.gdf.b64size = 1;
+        }
+
         // gdf
         if hdr.all_lossless == 0 && seqhdr.gdf {
-            let gdf_bs = 128 << (hdr.sb128 == 2) as i32;
             let mut gdf_val: u8 = (seqhdr.reduced_still_picture_header || gb.get_bit() != 0) as u8;
             if gdf_val != 0 {
-                if imax(hdr.width, hdr.height) > gdf_bs {
+                // avm reads the adaptive bit only when the frame holds more than
+                // one GDF unit, counted per tile (`gdf_block_num > 1`). dav2d's
+                // `max(w, h) > 128` misses SB-sized units and multiple tiles.
+                if gdf_unit_count(&hdr) > 1 {
                     gdf_val += gb.get_bit() as u8;
                 }
                 let qp_base = if hdr.is_key_or_intra() { 85 } else { 110 };
@@ -1805,6 +1847,22 @@ pub fn parse_frame_hdr(
                         hdr.ccso.p[p].filter_off = rp.filter_off;
                     }
                 }
+            }
+        }
+        // As for GDF: 256px by default, the superblock when asked, and shrunk
+        // so a unit never straddles a tile boundary.
+        hdr.ccso.b64size = 1
+            << if seqhdr.ccso_unit_matches_sbsz {
+                hdr.sb128
+            } else {
+                2
+            };
+        if !seqhdr.ccso_unit_matches_sbsz && hdr.sb128 < 2 {
+            let mask = tile_start_mask(&hdr);
+            if mask & 3 != 0 && hdr.sb128 == 0 {
+                hdr.ccso.b64size = 2 - (mask & 1) as u8;
+            } else if mask & 1 != 0 {
+                hdr.ccso.b64size = 2;
             }
         }
 
@@ -2886,6 +2944,40 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // avm counts GDF units and tile parity differently from dav2d; the
+    // `unitsb` and `tiles` vectors first exposed both (zettel
+    // rav2d-follows-avm-where-dav2d-differs).
+    #[test]
+    fn test_gdf_units_and_tile_mask_follow_avm() {
+        let mut hdr = FrameHeader::default();
+        hdr.width = 128;
+        hdr.height = 64;
+        hdr.sb128 = 0;
+        hdr.tiling.t.cols = 1;
+        hdr.tiling.t.rows = 1;
+        hdr.tiling.t.col_start_sb[1] = 2;
+        hdr.tiling.t.row_start_sb[1] = 1;
+        // SB-sized units: two 64px units in a 128x64 frame, so the adaptive
+        // bit is coded although max(w, h) is not above 128.
+        hdr.gdf.b64size = 1;
+        assert_eq!(gdf_unit_count(&hdr), 2);
+        hdr.gdf.b64size = 2;
+        assert_eq!(gdf_unit_count(&hdr), 1);
+
+        // 2x2 tiles of one 64px superblock each in 128x128: the inner start 1
+        // is odd. dav2d's 0..cols-1 loop sees only start 0 and misses it.
+        hdr.height = 128;
+        hdr.tiling.t.cols = 2;
+        hdr.tiling.t.rows = 2;
+        hdr.tiling.t.col_start_sb[1] = 1;
+        hdr.tiling.t.col_start_sb[2] = 2;
+        hdr.tiling.t.row_start_sb[1] = 1;
+        hdr.tiling.t.row_start_sb[2] = 2;
+        assert_eq!(tile_start_mask(&hdr) & 1, 1);
+        // Units restart per tile: each tile holds one 128px unit.
+        assert_eq!(gdf_unit_count(&hdr), 4);
+    }
 
     #[test]
     fn test_tile_log2() {
