@@ -3862,12 +3862,15 @@ fn filter_sbrow<BD: crate::pixel::BitDepth + crate::internal::LfPixelBufs>(
 
     // (3) CDEF (+CCSO). CCSO is folded into this stage in dav2d (applied per 8x8
     // after CDEF). It runs when the CCSO inloop bit is set and any plane enables
-    // CCSO in the frame header.
-    if seq_hdr.cdef && inloop & (INLOOPFILTER_CDEF | INLOOPFILTER_CCSO) != 0 {
-        let ccso_on = inloop & INLOOPFILTER_CCSO != 0
-            && (frame_hdr.ccso.p[0].enabled != 0
-                || frame_hdr.ccso.p[1].enabled != 0
-                || frame_hdr.ccso.p[2].enabled != 0);
+    // CCSO in the frame header. The stage runs when either filter is active, not
+    // when the sequence enables CDEF: a stream may turn CDEF off and keep CCSO
+    // (dav2d 891c53bb, `f->lf.cdef_planes`).
+    let ccso_on = inloop & INLOOPFILTER_CCSO != 0
+        && (frame_hdr.ccso.p[0].enabled != 0
+            || frame_hdr.ccso.p[1].enabled != 0
+            || frame_hdr.ccso.p[2].enabled != 0);
+    let cdef_on = frame_hdr.cdef.enabled != 0 && inloop & INLOOPFILTER_CDEF != 0;
+    if cdef_on || ccso_on {
         let ccso_pcfg = [
             build_ccso_plane_cfg(&frame_hdr, 0),
             build_ccso_plane_cfg(&frame_hdr, 1),
