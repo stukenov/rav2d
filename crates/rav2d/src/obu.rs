@@ -589,9 +589,9 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     }
 
     if !hdr.reduced_still_picture_header {
-        hdr.opfl_refine = gb.get_bits(2) != 0;
+        hdr.opfl_refine = gb.get_bits(2) as u8;
         hdr.refine_mv = gb.get_bit() != 0;
-        if hdr.tip && (hdr.opfl_refine || hdr.refine_mv) {
+        if hdr.tip && (hdr.opfl_refine != 0 || hdr.refine_mv) {
             hdr.tip_refine_mv = gb.get_bit() != 0;
         }
         hdr.bru = gb.get_bit() != 0;
@@ -977,11 +977,11 @@ pub fn parse_frame_hdr(
         if seqhdr.tip && hdr.n_ref_frames > 1 && hdr.use_ref_frame_mvs != 0 {
             if obu_type == ObuType::Tip || obu_type == ObuType::LeadingTip {
                 hdr.tip.frame_mode = 2; // output
-                hdr.opfl_refine_type = 2 * (seqhdr.opfl_refine && seqhdr.tip_refine_mv) as u8;
+                hdr.opfl_refine_type = 2 * (seqhdr.opfl_refine != 0 && seqhdr.tip_refine_mv) as u8;
             } else {
                 hdr.tip.frame_mode = gb.get_bit() as u8;
-                hdr.opfl_refine_type = if (seqhdr.opfl_refine as u8) < 3 {
-                    seqhdr.opfl_refine as u8
+                hdr.opfl_refine_type = if seqhdr.opfl_refine < 3 {
+                    seqhdr.opfl_refine
                 } else if gb.get_bit() != 0 {
                     1
                 } else {
@@ -994,7 +994,7 @@ pub fn parse_frame_hdr(
                 }
                 if hdr.has_bothside_refs == 0
                     || !seqhdr.tip_refine_mv
-                    || (!seqhdr.opfl_refine && !seqhdr.refine_mv)
+                    || (seqhdr.opfl_refine == 0 && !seqhdr.refine_mv)
                 {
                     hdr.tip.global_wtd_idx = gb.get_bits(3) as u8;
                 }
@@ -1020,8 +1020,8 @@ pub fn parse_frame_hdr(
             }
             find_tip_ref_frames(&mut hdr, seqhdr, refs)?;
         } else {
-            hdr.opfl_refine_type = if (seqhdr.opfl_refine as u8) < 3 {
-                seqhdr.opfl_refine as u8
+            hdr.opfl_refine_type = if seqhdr.opfl_refine < 3 {
+                seqhdr.opfl_refine
             } else if gb.get_bit() != 0 {
                 1
             } else {

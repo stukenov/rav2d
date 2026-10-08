@@ -2223,18 +2223,160 @@ fn full_clip_failures(path: &PathBuf) -> Vec<String> {
     failures
 }
 
+/// Vectors made by `tools/vectors/generate.sh`: one avmenc option each, so
+/// every coding tool and header path the option turns on appears in a stream.
+/// The `.md5` next to each is avmdec's, over the displayed frames.
+fn avmenc_vectors() -> Vec<PathBuf> {
+    let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/avmenc"));
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "obu"))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// avmenc vectors rav2d does not decode yet, with what is missing. They stay
+/// out of the gates below and are reported by `avmenc_pending_report`; a
+/// vector leaves this list in the commit that makes it pass.
+const AVMENC_PENDING: &[(&str, &str)] = &[
+    // dav2d decodes these like avmdec; the port is behind it.
+    (
+        "avmenc-aspect2.obu",
+        "bit-exact with dav2d filters off, differs from avmdec filters on",
+    ),
+    (
+        "avmenc-cfcdf0.obu",
+        "cross-frame-cdf-init-mode=0: frames differ from the fourth on",
+    ),
+    (
+        "avmenc-dpb16.obu",
+        "max_dpb_size=16 not ported (dav2d adcd093b)",
+    ),
+    (
+        "avmenc-erfm.obu",
+        "per-frame explicit_ref_frame_map bit not ported (dav2d 86ca0fdb)",
+    ),
+    (
+        "avmenc-lag0.obu",
+        "low-delay stream: frames differ from the fourth on",
+    ),
+    (
+        "avmenc-mfh.obu",
+        "multi-frame header OBU not ported (dav2d a0c3271a)",
+    ),
+    (
+        "avmenc-odd.obu",
+        "66x50: differs inside a frame not a multiple of 8",
+    ),
+    ("avmenc-tip2.obu", "TIP output frames: decodes one frame"),
+    ("avmenc-tiprefine0.obu", "tip-refinemv=0: frames differ"),
+    // dav2d does not match avmdec on these either.
+    (
+        "avmenc-i400.obu",
+        "dav2d differs from avmdec too; md5 convention for 4:0:0 unchecked",
+    ),
+    (
+        "avmenc-i422.obu",
+        "dav2d differs from avmdec too; md5 convention for 4:2:2 unchecked",
+    ),
+    (
+        "avmenc-i444.obu",
+        "dav2d differs from avmdec too; md5 convention for 4:4:4 unchecked",
+    ),
+    ("avmenc-resize.obu", "dav2d hangs on it; scaled references"),
+    ("avmenc-tiles.obu", "dav2d differs from avmdec too"),
+    ("avmenc-unitsb.obu", "dav2d differs from avmdec too"),
+];
+
+fn avmenc_pending(path: &std::path::Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    AVMENC_PENDING
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, why)| *why)
+}
+
+fn avmenc_failures(path: &PathBuf) -> Vec<String> {
+    let mut failures = Vec::new();
+    let expected = std::fs::read_to_string(format!("{}.md5", path.display()))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let mut hasher = Md5::new();
+    let frames = rav2d_decode_display(path);
+    for f in &frames {
+        for pl in 0..3 {
+            hasher.update(&f.planes[pl]);
+        }
+    }
+    let got = hasher.finish();
+    if got != expected {
+        failures.push(format!(
+            "avmdec={expected} rav2d={got} ({} frames)",
+            frames.len()
+        ));
+    }
+    failures.extend(full_clip_failures(path));
+    failures
+}
+
+/// Every avmenc vector not listed as pending matches avmdec's md5 and is
+/// bit-exact against dav2d on every coding-order frame.
+#[test]
+fn avmenc_vectors_bit_exact() {
+    let vectors = avmenc_vectors();
+    assert!(!vectors.is_empty(), "no avmenc vectors found");
+    let mut all = Vec::new();
+    for path in vectors.iter().filter(|p| avmenc_pending(p).is_none()) {
+        let name = path.file_name().unwrap().to_string_lossy();
+        for f in avmenc_failures(path) {
+            all.push(format!("{name}: {f}"));
+        }
+    }
+    if !all.is_empty() {
+        panic!("avmenc vectors not bit-exact:\n  {}", all.join("\n  "));
+    }
+}
+
+/// What the pending avmenc vectors still get wrong.
+#[test]
+#[ignore = "report on the vectors in AVMENC_PENDING, run with --ignored --nocapture"]
+fn avmenc_pending_report() {
+    for path in avmenc_vectors() {
+        let Some(why) = avmenc_pending(&path) else {
+            continue;
+        };
+        let name = path.file_name().unwrap().to_string_lossy();
+        let failures = avmenc_failures(&path);
+        eprintln!(
+            "{name} ({why}): {}",
+            if failures.is_empty() {
+                "passes now"
+            } else {
+                "fails"
+            }
+        );
+        for f in failures.iter().take(4) {
+            eprintln!("    {f}");
+        }
+    }
+}
+
 /// Debug helper: the full-clip comparison against dav2d for one clip, printed
-/// instead of asserted. `CLIP` names a file under `tests/data/media` or
-/// `tests/data`.
+/// instead of asserted. `CLIP` names a file under `tests/data/media`,
+/// `tests/data` or `tests/data/avmenc`.
 #[test]
 #[ignore = "debug report, run with CLIP=<file> --ignored --nocapture"]
 fn full_clip_report() {
     let clip = std::env::var("CLIP").expect("set CLIP");
-    let path = if media(&clip).exists() {
-        media(&clip)
-    } else {
-        data(&clip)
-    };
+    let path = [media(&clip), data(&clip), data("avmenc").join(&clip)]
+        .into_iter()
+        .find(|p| p.exists())
+        .expect("CLIP not found under tests/data");
     let failures = full_clip_failures(&path);
     if failures.is_empty() {
         eprintln!("{clip}: full clip bit-exact");

@@ -10802,6 +10802,7 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
             chroma_dctonly: false,
             reduced_txtp_set: recon.frame.reduced_txtp_set,
             tcq_enabled: recon.frame.tcq,
+            parity_hiding: recon.frm_hdr.parity_hiding != 0,
             layout: recon.frame.layout,
             u_has_cf: recon.scratch_u_has_cf,
             cbx: bx,
@@ -11142,6 +11143,7 @@ fn inter_chroma_residual_8bpc<BD: crate::pixel::BitDepth>(
                             chroma_dctonly: false,
                             reduced_txtp_set: recon.frame.reduced_txtp_set,
                             tcq_enabled: recon.frame.tcq,
+                            parity_hiding: recon.frm_hdr.parity_hiding != 0,
                             layout: recon.frame.layout,
                             u_has_cf: recon.scratch_u_has_cf,
                             cbx: bx,
@@ -13284,7 +13286,7 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
         ((!opfl && imin(bw4_full, bh4_full) >= 4) || is_256) as i32
     };
     let step = 2i32 << step_shift;
-    opfl &= recon.seq_hdr.opfl_refine && recon.frm_hdr.has_bothside_refs != 0;
+    opfl &= recon.seq_hdr.opfl_refine != 0 && recon.frm_hdr.has_bothside_refs != 0;
 
     // BACP (block adaptive compound prediction) masked-blend predicate.
     let bacp = recon.seq_hdr.imp_msk_bld
@@ -15972,6 +15974,7 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                         chroma_dctonly: false,
                         reduced_txtp_set: recon.frame.reduced_txtp_set,
                         tcq_enabled: recon.frame.tcq,
+                        parity_hiding: recon.frm_hdr.parity_hiding != 0,
                         layout: recon.frame.layout,
                         u_has_cf,
                         cbx,
@@ -16734,6 +16737,7 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
             chroma_dctonly: false,
             reduced_txtp_set: recon.frame.reduced_txtp_set,
             tcq_enabled: recon.frame.tcq,
+            parity_hiding: recon.frm_hdr.parity_hiding != 0,
             layout: recon.frame.layout,
             u_has_cf: 0,
             cbx: 0,

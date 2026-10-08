@@ -24,8 +24,10 @@ if [ "$target" = "decode_settings" ]; then
 fi
 
 seeded=0
-for vector in "$repo_root"/dav2d/media/*.obu "$repo_root"/crates/rav2d/tests/data/*.obu \
-              "$repo_root"/crates/rav2d/tests/data/fuzz-regressions/*; do
+# dav2d/media is gone upstream (June 2026); its vectors live in tests/data/media.
+data="$repo_root/crates/rav2d/tests/data"
+for vector in "$data"/media/*.obu "$data"/avmenc/*.obu "$data"/*.obu \
+              "$data"/fuzz-regressions/*; do
   [ -f "$vector" ] || continue
   dest="$corpus/seed-$(basename "$vector")"
   [ -e "$dest" ] && continue

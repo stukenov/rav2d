@@ -431,7 +431,8 @@ pub struct SequenceHeader {
     pub db_sub_pu: bool,
     pub tip_explicit_qp: bool,
 
-    pub opfl_refine: bool,
+    /// 0 off, 1 switchable per block, 2 always, 3 chosen per frame.
+    pub opfl_refine: u8,
     pub refine_mv: bool,
     pub tip_refine_mv: bool,
     pub bru: bool,

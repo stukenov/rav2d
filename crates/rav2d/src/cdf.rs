@@ -13,12 +13,12 @@ impl Default for CdfModeContext {
 #[derive(Clone)]
 #[repr(C)]
 pub struct CdfCoefContext {
-    pub data: [u16; 4656],
+    pub data: [u16; 4676],
 }
 
 impl Default for CdfCoefContext {
     fn default() -> Self {
-        Self { data: [0; 4656] }
+        Self { data: [0; 4676] }
     }
 }
 
@@ -84,6 +84,12 @@ impl CdfCoefContext {
     }
     pub fn br_y_tok_lf(&mut self, j: usize) -> &mut [u16] {
         let o = 4080 + j * 4;
+        &mut self.data[o..o + 4]
+    }
+    /// Parity-hidden DC token (dav2d 7f59d85). Kept after the C layout rather
+    /// than at its C position, so no existing offset moves.
+    pub fn ph_dc_y_tok(&mut self, ctx: usize) -> &mut [u16] {
+        let o = 4656 + ctx * 4;
         &mut self.data[o..o + 4]
     }
     pub fn dc_sign(&mut self, i: usize, j: usize, k: usize) -> &mut [u16] {
@@ -887,7 +893,9 @@ pub static DEFAULT_COEF_CDF: [CdfCoefContext; 4] = [
             0, 26850, 17139, 10451, 6166, 3667, 23040, 0, 0, 30753, 27064, 22933, 19063, 15469,
             19456, 0, 0, 6348, 813, 456, 338, 242, 19200, 0, 0, 16394, 3208, 1237, 745, 477, 7680,
             0, 0, 25571, 16814, 11782, 7834, 5031, 1536, 0, 0, 27948, 23280, 21067, 18703, 16520,
-            2816, 0, 0,
+            2816, 0, 0, // ph_dc_y_tok: [5][4], dav2d 7f59d85
+            24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384,
+            8192, 0, 24576, 16384, 8192, 0,
         ],
     },
     CdfCoefContext {
@@ -1199,7 +1207,10 @@ pub static DEFAULT_COEF_CDF: [CdfCoefContext; 4] = [
             118, 0, 0, 0, 21262, 6944, 2251, 820, 325, 19200, 0, 0, 26557, 15996, 9067, 5036, 2807,
             23040, 0, 0, 30307, 25529, 21013, 16899, 13558, 23040, 0, 0, 5817, 632, 212, 114, 72,
             19200, 0, 0, 15077, 2553, 824, 369, 218, 19200, 0, 0, 23419, 13461, 7383, 3741, 1947,
-            1536, 0, 0, 24240, 17657, 14311, 11092, 9001, 9472, 0, 0,
+            1536, 0, 0, 24240, 17657, 14311, 11092, 9001, 9472, 0,
+            0, // ph_dc_y_tok: [5][4], dav2d 7f59d85
+            24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384,
+            8192, 0, 24576, 16384, 8192, 0,
         ],
     },
     CdfCoefContext {
@@ -1508,7 +1519,9 @@ pub static DEFAULT_COEF_CDF: [CdfCoefContext; 4] = [
             0, 0, 21911, 7885, 2883, 1165, 513, 0, 0, 0, 27700, 18493, 11789, 7284, 4430, 0, 0, 0,
             30943, 27194, 23331, 19484, 15955, 23808, 0, 0, 4100, 318, 72, 32, 28, 3840, 0, 0,
             15382, 1857, 383, 116, 36, 23040, 0, 0, 23297, 11774, 5478, 2256, 984, 3840, 0, 0,
-            25557, 19068, 13620, 9133, 6089, 0, 0, 0,
+            25557, 19068, 13620, 9133, 6089, 0, 0, 0, // ph_dc_y_tok: [5][4], dav2d 7f59d85
+            24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384,
+            8192, 0, 24576, 16384, 8192, 0,
         ],
     },
     CdfCoefContext {
@@ -1809,7 +1822,10 @@ pub static DEFAULT_COEF_CDF: [CdfCoefContext; 4] = [
             25214, 10341, 3510, 1293, 382, 1280, 0, 0, 26559, 12074, 3982, 1324, 438, 23040, 0, 0,
             28583, 20407, 12881, 7029, 3277, 23808, 0, 0, 31185, 27312, 23066, 17398, 12294, 23040,
             0, 0, 2585, 452, 194, 129, 65, 23040, 0, 0, 17621, 1039, 247, 99, 49, 8960, 0, 0,
-            27307, 21845, 16384, 10923, 5461, 0, 0, 0, 27307, 21845, 16384, 10923, 5461, 0, 0, 0,
+            27307, 21845, 16384, 10923, 5461, 0, 0, 0, 27307, 21845, 16384, 10923, 5461, 0, 0,
+            0, // ph_dc_y_tok: [5][4], dav2d 7f59d85
+            24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384, 8192, 0, 24576, 16384,
+            8192, 0, 24576, 16384, 8192, 0,
         ],
     },
 ];
@@ -2400,6 +2416,9 @@ fn visit_coef_entries(mut f: impl FnMut(usize, usize)) {
     for j in 0..12 {
         f(4560 + j * 8, 5);
     } // base_uv_tok_lf
+    for j in 0..5 {
+        f(4656 + j * 4, 3);
+    } // ph_dc_y_tok
 }
 
 #[cfg(test)]
@@ -2409,7 +2428,7 @@ mod tests {
     #[test]
     fn test_cdf_struct_sizes() {
         assert_eq!(std::mem::size_of::<CdfModeContext>(), 6992);
-        assert_eq!(std::mem::size_of::<CdfCoefContext>(), 9312);
+        assert_eq!(std::mem::size_of::<CdfCoefContext>(), 9352);
         assert_eq!(std::mem::size_of::<CdfMvContext>(), 336);
         assert_eq!(std::mem::size_of::<CdfDefaultContext>(), 7328);
     }
@@ -2525,8 +2544,8 @@ mod tests {
     fn test_visit_coef_no_out_of_bounds() {
         visit_coef_entries(|off, n1d| {
             assert!(
-                off + n1d < 4656,
-                "Coef entry off={off} n1d={n1d} exceeds 4656"
+                off + n1d < 4676,
+                "Coef entry off={off} n1d={n1d} exceeds 4676"
             );
         });
     }

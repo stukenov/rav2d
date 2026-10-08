@@ -250,6 +250,19 @@ pub fn get_dc_sign_ctx(t_dim: &TxfmInfo, a: &[u8], l: &[u8]) -> u32 {
     (s != 0) as u32 + (s > 0) as u32
 }
 
+/// Context for the parity-hidden DC token (dav2d get_ph_ctx): the clipped
+/// magnitudes of the five nearest coefficients.
+fn get_ph_ctx(levels: &[i8], tx_class: u8, stride: usize) -> u32 {
+    let mag = |v: i8| (v as u8 as u32).min(3);
+    let mut sum = mag(levels[1]) + mag(levels[2]) + mag(levels[stride]);
+    if tx_class == 0 {
+        sum += mag(levels[stride + 1]) + mag(levels[2 * stride]);
+    } else {
+        sum += mag(levels[3]) + mag(levels[4]);
+    }
+    if sum < 7 { (sum + 1) >> 1 } else { 4 }
+}
+
 pub fn get_lo_ctx(
     levels: &[i8],
     off: usize,
@@ -598,6 +611,7 @@ pub struct DecodeCoefParams<'a> {
     pub chroma_dctonly: bool,
     pub reduced_txtp_set: i32,
     pub tcq_enabled: bool,
+    pub parity_hiding: bool,
     pub layout: PixelLayout,
     pub u_has_cf: i32,
     pub cbx: i32,
@@ -1400,6 +1414,12 @@ pub fn decode_coefs(
         && tx_class != 3;
     let mut dq_shift = tcq_en as i32 + 3 + imax(0, t_dim.ctx as i32 - 2);
     let mut dc_sign_level: u32 = 1 << 6;
+    // Parity hiding (dav2d 7f59d85, f6859b3), enabled when non-zero: the
+    // upper 16 bits count the non-zero coefficients, the middle bits are
+    // scratch for the running sum, the low bit is the hidden DC parity.
+    let ph_enabled =
+        !chroma && p.parity_hiding && *txtp as u8 != txtp::IDTX && !p.lossless && eob > 3;
+    let mut ph_state: u32 = if ph_enabled { 2 } else { 0 };
 
     let scan = SCANS[p.tx];
 
@@ -1578,6 +1598,11 @@ pub fn decode_coefs(
                     let hi_idx = if lim == 5 { 7 } else { 0 };
                     let o = hi_base + hi_idx * hi_stride;
                     tok += msac.decode_symbol_adapt(&mut coef.data[o..o + 4], 3) as i32;
+                    if ph_state != 0 {
+                        ph_state = ph_state.wrapping_add(0x10000 + tok as u32 + (tok == 7) as u32);
+                    }
+                } else if ph_state != 0 {
+                    ph_state = ph_state.wrapping_add(0x10000 + tok as u32);
                 }
                 tcq_state = tcq_next_state(tcq_state, tok);
                 cf[if is_stx { eob as usize } else { rc }] = tok;
@@ -1641,6 +1666,13 @@ pub fn decode_coefs(
                     if tok == lim && hi_cdf_valid {
                         let o2 = hi_base + hr_ctx as usize * hi_stride;
                         tok += msac.decode_symbol_adapt(&mut coef.data[o2..o2 + 4], 3) as i32;
+                        if ph_state != 0 {
+                            ph_state =
+                                ph_state.wrapping_add(0x10000 + tok as u32 + (tok == 7) as u32);
+                        }
+                    } else if ph_state != 0 {
+                        // +1 coefficient and +parity for a non-zero token
+                        ph_state = ph_state.wrapping_add((tok as u32).wrapping_neg() & 0x10001);
                     }
                     tcq_state = tcq_next_state(tcq_state, tok);
                     levels[off] = tok as i8;
@@ -1648,16 +1680,24 @@ pub fn decode_coefs(
                     i -= 1;
                 }
 
-                // dc token
-                let mut hr_ctx = 0u32;
-                let ctx = get_lo_ctx(&levels, 0, $tx_cl, &mut hr_ctx, 0, p.plane, stride);
-                let tcq_bit = ((tcq_state & 2) >> 1) as u32;
-                let lo_cdf_idx = (ctx * (2 - chroma as u32) + tcq_bit) as usize;
-                let o = lo_base + lo_cdf_idx * lo_stride;
-                dc_tok = msac.decode_symbol_adapt(&mut coef.data[o..o + lo_stride], lo_nsym) as i32;
-                if dc_tok == lim && hi_cdf_valid {
-                    let o2 = hi_base + hr_ctx as usize * hi_stride;
-                    dc_tok += msac.decode_symbol_adapt(&mut coef.data[o2..o2 + 4], 3) as i32;
+                // dc token: with enough non-zero coefficients its parity is
+                // hidden in their sum and only the rest is coded.
+                if ph_state >> 18 != 0 {
+                    let ctx = get_ph_ctx(&levels, $tx_cl, stride);
+                    let idx = msac.decode_symbol_adapt(coef.ph_dc_y_tok(ctx as usize), 3) as i32;
+                    dc_tok = (idx << 1) + (ph_state & 1) as i32;
+                } else {
+                    let mut hr_ctx = 0u32;
+                    let ctx = get_lo_ctx(&levels, 0, $tx_cl, &mut hr_ctx, 0, p.plane, stride);
+                    let tcq_bit = ((tcq_state & 2) >> 1) as u32;
+                    let lo_cdf_idx = (ctx * (2 - chroma as u32) + tcq_bit) as usize;
+                    let o = lo_base + lo_cdf_idx * lo_stride;
+                    dc_tok =
+                        msac.decode_symbol_adapt(&mut coef.data[o..o + lo_stride], lo_nsym) as i32;
+                    if dc_tok == lim && hi_cdf_valid {
+                        let o2 = hi_base + hr_ctx as usize * hi_stride;
+                        dc_tok += msac.decode_symbol_adapt(&mut coef.data[o2..o2 + 4], 3) as i32;
+                    }
                 }
 
                 // sign & dequant for AC
@@ -1687,7 +1727,11 @@ pub fn decode_coefs(
                     if $tx_cl == 0 || y > 0 || chroma {
                         sign = msac.decode_bool_bypass();
                     } else {
-                        sign = msac.decode_bool_adapt(coef.dc_sign(chroma as usize, 0, 0));
+                        sign = msac.decode_bool_adapt(coef.dc_sign(
+                            chroma as usize,
+                            (ph_state >> 18 != 0) as usize,
+                            0,
+                        ));
                     }
                     let tcq_bit = ((tcq_state & 2) >> 1) as i32;
                     tcq_state = tcq_next_state(tcq_state, tok_val);
@@ -1793,7 +1837,11 @@ pub fn decode_coefs(
         dc_sign = msac.decode_bool_bypass();
     } else {
         let dc_sign_ctx = get_dc_sign_ctx(t_dim, a, l) as usize;
-        dc_sign = msac.decode_bool_adapt(coef.dc_sign(chroma as usize, 0, dc_sign_ctx));
+        dc_sign = msac.decode_bool_adapt(coef.dc_sign(
+            chroma as usize,
+            (ph_state >> 18 != 0) as usize,
+            dc_sign_ctx,
+        ));
     }
 
     let mut dc_dq = p.dq_tbl[0] as i32;
@@ -1805,7 +1853,12 @@ pub fn decode_coefs(
     let max_br = if chroma { 5 } else { 8 };
     let tcq_bit = (tcq_state & 2) >> 1;
     let dc_val: i32;
-    if dc_tok >= max_br - tcq_en as i32 {
+    if ph_state >> 18 != 0 && dc_tok > 5 {
+        // A parity-hidden DC continues in steps of two.
+        let hr = decode_hr(msac, hr_avg >> 1) << 1;
+        dc_tok += hr;
+        dc_val = (((dc_tok as u32).wrapping_mul(dc_dq as u32)).wrapping_add(4) >> dq_shift) as i32;
+    } else if dc_tok >= max_br - tcq_en as i32 {
         let hr = decode_hr(msac, hr_avg);
         dc_tok += hr << tcq_en as i32;
         dc_tok &= 0xfffff;
@@ -3460,6 +3513,7 @@ mod tests {
             chroma_dctonly: false,
             reduced_txtp_set: 0,
             tcq_enabled: false,
+            parity_hiding: false,
             layout: PixelLayout::I420,
             u_has_cf: 0,
             cbx: 0,
@@ -3520,6 +3574,7 @@ mod tests {
             chroma_dctonly: false,
             reduced_txtp_set: 0,
             tcq_enabled: false,
+            parity_hiding: false,
             layout: PixelLayout::I420,
             u_has_cf: 0,
             cbx: 0,

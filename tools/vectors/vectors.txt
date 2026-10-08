@@ -1,0 +1,35 @@
+# One vector per line: name size frames bitdepth layout [avmenc options...]
+# Every vector is cut from bus_cif.y4m at offset 96x64 (see generate.sh).
+# A vector exists to make one coding tool or header path appear in a stream;
+# the name says which. A vector whose stream comes out byte-identical to
+# base is dropped (drl-reorder=2 did, on this content).
+# 12-bit is missing: avmenc on av2-normative rejects g_bit_depth > 10.
+base          64x64   10 8  420
+lag0          64x64   10 8  420 --lag-in-frames=0
+ph            64x64   10 8  420 --enable-tcq=0 --enable-parity-hiding=1
+opfl0         64x64   10 8  420 --enable-opfl-refine=0
+opfl2         64x64   10 8  420 --enable-opfl-refine=2
+refinemv0     64x64   10 8  420 --enable-refinemv=0
+tiprefine0    64x64   10 8  420 --enable-tip-refinemv=0
+tip2          64x64   10 8  420 --enable-tip=2
+aspect2       64x64   10 8  420 --max-pb-aspect-ratio=2
+aspect4       64x64   10 8  420 --max-pb-aspect-ratio=4
+rrfmv1        64x64   10 8  420 --reduced-ref-frame-mvs-mode=1
+cfcdf0        64x64   10 8  420 --cross-frame-cdf-init-mode=0
+lossless      64x64   6  8  420 --lossless=1
+dpb16         64x64   20 8  420 --dpb-size=16
+erfm          64x64   10 8  420 --explicit-ref-frame-map=1
+qm            64x64   10 8  420 --enable-qm=1 --qm-min=0 --qm-max=8
+extseg        64x64   10 8  420 --enable-ext-seg=1 --aq-mode=1
+rtxpart1      64x64   10 8  420 --reduced-tx-part-set=1
+rtxtype2      64x64   10 8  420 --reduced-tx-type-set=2
+mfh           64x64   10 8  420 --enable-mfh-obu-signaling=1
+unitsb        128x64  6  8  420 --ccso-unit-matches-sb=1 --gdf-unit-matches-sb=1
+tiles         128x128 4  8  420 --tile-columns=1 --tile-rows=1
+resize        64x64   10 8  420 --resize-mode=1 --resize-denominator=12
+grain         64x64   6  8  420 --film-grain-test=1
+odd           66x50   6  8  420
+b10           64x64   6  10 420
+i444          64x64   6  8  444 --profile=1
+i422          64x64   6  8  422 --profile=2
+i400          64x64   6  8  400 --monochrome
