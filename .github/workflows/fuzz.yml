@@ -24,6 +24,9 @@ jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -103,3 +106,27 @@ jobs:
           name: fuzz-artifacts-${{ matrix.target }}
           path: crates/rav2d/fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
+
+      # A red scheduled run is easy to miss: the next night's run goes green
+      # again whenever the fuzzer does not rediscover the input, and the crash
+      # is forgotten. Open (or comment on) an issue so it stays visible until
+      # the reproducer lands in tests/data/fuzz-regressions.
+      - name: Report the crash in an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="fuzz: $TARGET target crashed"
+          body="The nightly fuzz run of \`$TARGET\` failed: $RUN_URL
+
+          Download the \`fuzz-artifacts-$TARGET\` artifact, add the reproducer to
+          \`crates/rav2d/tests/data/fuzz-regressions/\` (inputs from \`decode_settings\`
+          go into its \`decode_settings/\` subdirectory), fix the panic and close this issue."
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label bug --body "$body"
+          fi

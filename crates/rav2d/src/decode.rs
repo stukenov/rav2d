@@ -9490,14 +9490,12 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
                 rp.stride[(plane != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
             match rp.data[plane] {
                 Some(p) => {
-                    let ph = if plane == 0 {
-                        rp.p.h
-                    } else {
-                        (rp.p.h + ss_ver) >> ss_ver
-                    };
-                    // SAFETY: ref_pic owns a stride*height allocation for this plane.
+                    // SAFETY: see `ref_plane_rows`.
                     let s: &[BD::Pixel] = unsafe {
-                        std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, rs * ph as usize)
+                        std::slice::from_raw_parts(
+                            p.as_ptr() as *const BD::Pixel,
+                            rs * ref_plane_rows(rp, plane),
+                        )
                     };
                     (rs, s)
                 }
@@ -9655,12 +9653,12 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
             } else {
                 (ref_pic.p.h + ss_ver) >> ss_ver
             };
-            // SAFETY: ref_pic owns a stride*height allocation for this plane.
+            // SAFETY: see `ref_plane_rows`.
             (
                 unsafe {
                     std::slice::from_raw_parts(
                         p.as_ptr() as *const BD::Pixel,
-                        ref_stride * ph as usize,
+                        ref_stride * ref_plane_rows(ref_pic, pl),
                     )
                 },
                 pw,
@@ -9826,14 +9824,12 @@ fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
     let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
         Some(p) => {
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            // SAFETY: ref_pic owns a stride*height allocation for this plane.
+            // SAFETY: see `ref_plane_rows`.
             unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
+                std::slice::from_raw_parts(
+                    p.as_ptr() as *const BD::Pixel,
+                    ref_stride * ref_plane_rows(ref_pic, pl),
+                )
             }
         }
         None => return,
@@ -9956,12 +9952,12 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
             } else {
                 (ref_pic.p.h + ss_ver) >> ss_ver
             };
-            // SAFETY: ref_pic owns a stride*height allocation for this plane.
+            // SAFETY: see `ref_plane_rows`.
             (
                 unsafe {
                     std::slice::from_raw_parts(
                         p.as_ptr() as *const BD::Pixel,
-                        ref_stride * ph as usize,
+                        ref_stride * ref_plane_rows(ref_pic, pl),
                     )
                 },
                 pw,
@@ -10089,6 +10085,42 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
+/// Rows of plane `pl` that the decoder wrote into reference `pic`.
+///
+/// Reconstruction fills whole 8x8 luma blocks, so a decoded frame holds samples
+/// down to its 8-aligned height, past the visible `p.h`. dav2d reads that
+/// overhang from references (it clips to `f->bh * 4`, recon_tmpl.c), so a view
+/// cut at `p.h` panics where C reads decoded data. The allocation covers it:
+/// the decoder writes these rows itself, into planes padded to 128 rows (see
+/// `DefaultPicAllocator::alloc_picture`).
+fn ref_plane_rows(pic: &crate::picture::Picture, pl: usize) -> usize {
+    let ss_ver = (pl != 0 && pic.p.layout == crate::headers::PixelLayout::I420) as i32;
+    (((pic.p.h + 7) & !7) >> ss_ver) as usize
+}
+
+/// The area a warp may read from `ref_pic`, in samples of plane `pl`.
+///
+/// dav2d clips warp reads to the current frame (`f->bw * 4`, `f->bh * 4`) and
+/// has no scaled warp ("no scaled support", recon_tmpl.c). AV2 allows warping
+/// from a reference of another size, and dav2d then reads past the reference
+/// buffer. For such a reference clip to what it actually holds instead; for an
+/// unscaled one the extent is the current frame's, so output stays bit-exact.
+fn warp_ref_extent(
+    ref_pic: &crate::picture::Picture,
+    plss_hor: i32,
+    plss_ver: i32,
+    frame_w: i32,
+    frame_h: i32,
+    ref_scaled: bool,
+) -> (i32, i32) {
+    if !ref_scaled {
+        return (frame_w, frame_h);
+    }
+    let ref_w = (ref_pic.p.w + plss_hor) >> plss_hor;
+    let ref_h = (ref_pic.p.h + plss_ver) >> plss_ver;
+    (imin(frame_w, ref_w), imin(frame_h, ref_h))
+}
+
 /// Warp-affine motion compensation for a block plane (recon_tmpl.c
 /// `warp_affine`, affine path). Predicts the block in 8x8 sub-tiles using the
 /// derived warp matrix `wmp`. Only the affine sub-path is implemented (block is
@@ -10109,27 +10141,30 @@ fn warp_affine_plane_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     frame_bw: i32,
     frame_bh: i32,
+    ref_scaled: bool,
 ) {
     let plss_ver = if pl != 0 { ss_ver } else { 0 };
     let plss_hor = if pl != 0 { ss_hor } else { 0 };
     let h_mul = 4 >> plss_hor;
     let v_mul = 4 >> plss_ver;
     let mat = &wmp.matrix;
-    let width = frame_bw * 4 >> plss_hor;
-    let height = frame_bh * 4 >> plss_ver;
+    let (width, height) = warp_ref_extent(
+        ref_pic,
+        plss_hor,
+        plss_ver,
+        frame_bw * 4 >> plss_hor,
+        frame_bh * 4 >> plss_ver,
+        ref_scaled,
+    );
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
     let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
-        Some(p) => {
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
-            }
-        }
+        Some(p) => unsafe {
+            std::slice::from_raw_parts(
+                p.as_ptr() as *const BD::Pixel,
+                ref_stride * ref_plane_rows(ref_pic, pl),
+            )
+        },
         None => return,
     };
 
@@ -10228,27 +10263,30 @@ fn ext_warp_plane_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     frame_bw: i32,
     frame_bh: i32,
+    ref_scaled: bool,
 ) {
     let plss_ver = if pl != 0 { ss_ver } else { 0 };
     let plss_hor = if pl != 0 { ss_hor } else { 0 };
     let h_mul = 4 >> plss_hor;
     let v_mul = 4 >> plss_ver;
     let mat = &wmp.matrix;
-    let w = frame_bw * 4 >> plss_hor;
-    let h = frame_bh * 4 >> plss_ver;
+    let (w, h) = warp_ref_extent(
+        ref_pic,
+        plss_hor,
+        plss_ver,
+        frame_bw * 4 >> plss_hor,
+        frame_bh * 4 >> plss_ver,
+        ref_scaled,
+    );
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
     let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
-        Some(p) => {
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
-            }
-        }
+        Some(p) => unsafe {
+            std::slice::from_raw_parts(
+                p.as_ptr() as *const BD::Pixel,
+                ref_stride * ref_plane_rows(ref_pic, pl),
+            )
+        },
         None => return,
     };
 
@@ -10377,6 +10415,7 @@ fn warp_affine_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     frame_bw: i32,
     frame_bh: i32,
+    ref_scaled: bool,
 ) {
     let plss_ver = if pl != 0 { ss_ver } else { 0 };
     let plss_hor = if pl != 0 { ss_hor } else { 0 };
@@ -10385,26 +10424,28 @@ fn warp_affine_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     if wmp.affine == 0 || imin(b_dim[0] as i32 * h_mul, b_dim[1] as i32 * v_mul) < 8 {
         ext_warp_plane_prep_8bpc::<BD>(
             bd, tmp, tmp_stride, ref_pic, pl, bx, by, b_dim, wmp, ss_hor, ss_ver, frame_bw,
-            frame_bh,
+            frame_bh, ref_scaled,
         );
         return;
     }
     let mat = &wmp.matrix;
-    let width = frame_bw * 4 >> plss_hor;
-    let height = frame_bh * 4 >> plss_ver;
+    let (width, height) = warp_ref_extent(
+        ref_pic,
+        plss_hor,
+        plss_ver,
+        frame_bw * 4 >> plss_hor,
+        frame_bh * 4 >> plss_ver,
+        ref_scaled,
+    );
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
     let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
-        Some(p) => {
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
-            }
-        }
+        Some(p) => unsafe {
+            std::slice::from_raw_parts(
+                p.as_ptr() as *const BD::Pixel,
+                ref_stride * ref_plane_rows(ref_pic, pl),
+            )
+        },
         None => return,
     };
 
@@ -10503,27 +10544,30 @@ fn ext_warp_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     frame_bw: i32,
     frame_bh: i32,
+    ref_scaled: bool,
 ) {
     let plss_ver = if pl != 0 { ss_ver } else { 0 };
     let plss_hor = if pl != 0 { ss_hor } else { 0 };
     let h_mul = 4 >> plss_hor;
     let v_mul = 4 >> plss_ver;
     let mat = &wmp.matrix;
-    let w = frame_bw * 4 >> plss_hor;
-    let h = frame_bh * 4 >> plss_ver;
+    let (w, h) = warp_ref_extent(
+        ref_pic,
+        plss_hor,
+        plss_ver,
+        frame_bw * 4 >> plss_hor,
+        frame_bh * 4 >> plss_ver,
+        ref_scaled,
+    );
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
     let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
-        Some(p) => {
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
-            }
-        }
+        Some(p) => unsafe {
+            std::slice::from_raw_parts(
+                p.as_ptr() as *const BD::Pixel,
+                ref_stride * ref_plane_rows(ref_pic, pl),
+            )
+        },
         None => return,
     };
 
@@ -11947,6 +11991,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                         ss_ver,
                         fi.bw,
                         fi.bh,
+                        recon.svc[refs[i] as usize][0].scale != 0,
                     );
                 } else {
                     inter_mc_plane_prep_8bpc(
@@ -12271,6 +12316,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                             ss_ver,
                             fi.bw,
                             fi.bh,
+                            recon.svc[refs[i] as usize][0].scale != 0,
                         );
                     } else {
                         inter_mc_plane_prep_8bpc(
@@ -14120,14 +14166,12 @@ fn mc_prep_bounds_8bpc<BD: crate::pixel::BitDepth>(
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
     let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
         Some(p) => {
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            // SAFETY: ref_pic owns a stride*height allocation for this plane.
+            // SAFETY: see `ref_plane_rows`.
             unsafe {
-                std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph as usize)
+                std::slice::from_raw_parts(
+                    p.as_ptr() as *const BD::Pixel,
+                    ref_stride * ref_plane_rows(ref_pic, pl),
+                )
             }
         }
         None => return,
@@ -14262,15 +14306,12 @@ fn mc_opfl_8bpc<BD: crate::pixel::BitDepth>(
 ) {
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
-    let ss_ver_p = (ref_pic.p.layout == crate::headers::PixelLayout::I420) as i32;
     let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
         Some(p) => unsafe {
-            let ph = if pl == 0 {
-                ref_pic.p.h as usize
-            } else {
-                ((ref_pic.p.h + ss_ver_p) >> ss_ver_p) as usize
-            };
-            std::slice::from_raw_parts(p.as_ptr() as *const BD::Pixel, ref_stride * ph)
+            std::slice::from_raw_parts(
+                p.as_ptr() as *const BD::Pixel,
+                ref_stride * ref_plane_rows(ref_pic, pl),
+            )
         },
         None => return,
     };
@@ -14482,6 +14523,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
 
     // Take the reference picture out of recon.refp (immutable Arc) to satisfy the
     // borrow checker while mutating dst planes.
+    let ref_scaled = recon.svc[ref0 as usize][0].scale != 0;
     let refp = match recon.refp[ref0 as usize].clone() {
         Some(p) => p,
         None => return Ok(()),
@@ -14561,6 +14603,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                     ss_ver,
                     fi.bw,
                     fi.bh,
+                    ref_scaled,
                 );
             } else {
                 ext_warp_plane_8bpc(
@@ -14577,6 +14620,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                     ss_ver,
                     fi.bw,
                     fi.bh,
+                    ref_scaled,
                 );
             }
         } else {
@@ -14793,12 +14837,12 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                 if c_affine {
                     warp_affine_plane_8bpc(
                         bd, dst, uv_stride, &refp, pl, cbx, cby, cb_dim, &c_wmp, ss_hor, ss_ver,
-                        fi.bw, fi.bh,
+                        fi.bw, fi.bh, ref_scaled,
                     );
                 } else {
                     ext_warp_plane_8bpc(
                         bd, dst, uv_stride, &refp, pl, cbx, cby, cb_dim, &c_wmp, ss_hor, ss_ver,
-                        fi.bw, fi.bh,
+                        fi.bw, fi.bh, ref_scaled,
                     );
                 }
             } else {

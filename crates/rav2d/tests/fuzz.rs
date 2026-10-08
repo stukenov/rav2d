@@ -11,7 +11,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
-use rav2d::{Data, Decoder, Rav2dError, Settings};
+use rav2d::{Data, DecodeFrameType, Decoder, InloopFilterType, Rav2dError, Settings};
 
 fn media(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/media")).join(name)
@@ -43,22 +43,70 @@ impl Rng {
     }
 }
 
+/// Settings for the deterministic sweeps in this file.
+fn sweep_settings() -> Settings {
+    Settings {
+        n_threads: 1,
+        apply_grain: false,
+        run_decode: true,
+        // Match the fuzz target: cap frame size so a malformed stream
+        // declaring an enormous frame is rejected (FrameTooLarge) rather
+        // than allocating gigabytes. This is what a memory-conscious
+        // application does.
+        frame_size_limit: 8192 * 8192,
+        ..Settings::default()
+    }
+}
+
+/// The settings the `decode` fuzz target opens the decoder with.
+fn decode_target_settings() -> Settings {
+    Settings {
+        frame_size_limit: 8192 * 8192,
+        ..Settings::default()
+    }
+}
+
+/// The settings the `decode_settings` fuzz target derives from the first two
+/// bytes of its input. Keep in sync with `fuzz/fuzz_targets/decode_settings.rs`:
+/// a reproducer from that target only crashes under the configuration it chose.
+fn decode_settings_target_settings(seed: u16) -> Settings {
+    Settings {
+        n_threads: 1 + ((seed >> 12) & 1) as u32,
+        apply_grain: seed & 1 != 0,
+        output_invisible_frames: seed & 2 != 0,
+        all_layers: seed & 4 != 0,
+        strict_std_compliance: seed & 8 != 0,
+        run_decode: seed & 16 == 0,
+        inloop_filters: match (seed >> 5) & 7 {
+            0 => InloopFilterType::None,
+            1 => InloopFilterType::Deblock,
+            2 => InloopFilterType::Cdef,
+            3 => InloopFilterType::Restoration,
+            4 => InloopFilterType::Wiener,
+            5 => InloopFilterType::Gdf,
+            _ => InloopFilterType::All,
+        },
+        decode_frame_type: match (seed >> 8) & 3 {
+            0 => DecodeFrameType::All,
+            1 => DecodeFrameType::Reference,
+            2 => DecodeFrameType::Intra,
+            _ => DecodeFrameType::Key,
+        },
+        operating_point: ((seed >> 10) & 3) as u32,
+        frame_size_limit: 8192 * 8192,
+        ..Settings::default()
+    }
+}
+
 /// Decode `bytes` to completion. Returns `Err(panic_msg)` if it panicked,
 /// `Ok(())` if it finished (decoded or returned a graceful error).
 fn decode_catch(bytes: Vec<u8>) -> Result<(), String> {
+    decode_catch_with(bytes, &sweep_settings())
+}
+
+fn decode_catch_with(bytes: Vec<u8>, s: &Settings) -> Result<(), String> {
     let res = catch_unwind(AssertUnwindSafe(|| {
-        let s = Settings {
-            n_threads: 1,
-            apply_grain: false,
-            run_decode: true,
-            // Match the fuzz target: cap frame size so a malformed stream
-            // declaring an enormous frame is rejected (FrameTooLarge) rather
-            // than allocating gigabytes. This is what a memory-conscious
-            // application does.
-            frame_size_limit: 8192 * 8192,
-            ..Settings::default()
-        };
-        let mut dec = match Decoder::open(&s) {
+        let mut dec = match Decoder::open(s) {
             Ok(d) => d,
             Err(_) => return,
         };
@@ -184,26 +232,51 @@ fn fuzz_mutated_streams_no_panic() {
 /// Replay every fuzzer-discovered crashing input (checked into
 /// `tests/data/fuzz-regressions/`). Each was a real panic on malformed input
 /// that has since been fixed; this guards against reintroducing any of them.
+///
+/// Inputs at the top level came from the `decode` target and are replayed with
+/// its settings as well as the sweep settings. Inputs under `decode_settings/`
+/// carry the decoder configuration in their first two bytes, exactly as that
+/// target reads them, so they are replayed under that configuration.
 #[test]
 fn fuzz_regression_corpus_no_panic() {
     let dir = PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/data/fuzz-regressions"
     ));
-    let entries =
-        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
     let mut n = 0;
-    for entry in entries {
-        let path = entry.unwrap().path();
-        if !path.is_file() {
+    for path in regression_inputs(&dir) {
+        let bytes = std::fs::read(&path).unwrap();
+        for s in [sweep_settings(), decode_target_settings()] {
+            if let Err(msg) = decode_catch_with(bytes.clone(), &s) {
+                panic!("regression: {} still panics: {msg}", path.display());
+            }
+        }
+        n += 1;
+    }
+    for path in regression_inputs(&dir.join("decode_settings")) {
+        let bytes = std::fs::read(&path).unwrap();
+        if bytes.len() < 2 {
             continue;
         }
-        let bytes = std::fs::read(&path).unwrap();
-        if let Err(msg) = decode_catch(bytes) {
+        let (cfg, stream) = bytes.split_at(2);
+        let s = decode_settings_target_settings(u16::from_le_bytes([cfg[0], cfg[1]]));
+        if let Err(msg) = decode_catch_with(stream.to_vec(), &s) {
             panic!("regression: {} still panics: {msg}", path.display());
         }
         n += 1;
     }
     assert!(n > 0, "no regression inputs found in {}", dir.display());
     eprintln!("fuzz_regression_corpus_no_panic: {n} inputs replayed cleanly");
+}
+
+fn regression_inputs(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .collect();
+    paths.sort();
+    paths
 }
