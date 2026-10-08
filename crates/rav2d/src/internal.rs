@@ -384,7 +384,7 @@ pub struct DecoderContext {
     pub n_tile_data: i32,
     pub n_tiles: i32,
 
-    pub refs: [RefState; 8],
+    pub refs: [RefState; crate::headers::NUM_REF_FRAMES],
     pub cdf: Vec<CdfThreadContext>,
 
     pub dsp: Arc<[DSPContext; 3]>,
@@ -395,6 +395,9 @@ pub struct DecoderContext {
     pub mastering_display: Option<MasteringDisplay>,
     pub ci: Option<ContentInterpretation>,
     pub fgm: [Option<FilmGrainData>; 8],
+    /// The sequence header each multi-frame header names, by its id (dav2d
+    /// a0c3271a keeps the whole header but reads nothing else from it).
+    pub multi_frame_hdr_seq_ids: [Option<u8>; crate::obu::MAX_MFH_NUM],
 
     pub apply_grain: bool,
     pub operating_point: i32,

@@ -1268,154 +1268,32 @@ fn bit_exact_filtered_sweep() {
     }
 }
 
-/// Debug helper: bisect which filter stage diverges for CLIP by decoding both
-/// decoders with the same filter mask, comparing the keyframe, for each of:
-/// none, deblock, deblock+cdef, deblock+cdef+ccso, +wiener, +gdf, all.
+/// Debug helper: bisect which filter stage diverges for CLIP, over the whole
+/// clip, by decoding both decoders with the same cumulative filter mask: none,
+/// deblock, +cdef, +ccso, +wiener, all. `CLIP` is looked up like in
+/// `full_clip_report`.
 #[test]
 #[ignore = "filter bisect harness"]
 fn filter_bisect() {
-    use rav2d::InloopFilterType as F;
-    let clip = std::env::var("CLIP").unwrap();
-    let path = media(&clip);
-    // Cumulative filter masks (dav2d DAV2D_INLOOPFILTER_* bits). rav2d uses the
-    // RAV2D_FILT_OVERRIDE env to run the exact same bit mask, since the public
-    // InloopFilterType enum only exposes single bits / All.
-    let combos: [(u32, &str); 6] = [
+    let clip = std::env::var("CLIP").expect("set CLIP");
+    let path = [media(&clip), data(&clip), data("avmenc").join(&clip)]
+        .into_iter()
+        .find(|p| p.exists())
+        .expect("CLIP not found under tests/data");
+    let combos: [(u32, &str); 7] = [
         (0, "none"),
         (1, "deblock"),
         (3, "deblock+cdef"),
+        (5, "deblock+ccso"),
         (7, "deblock+cdef+ccso"),
         (15, "deblock+cdef+ccso+wiener"),
         (31, "all"),
     ];
     for (bits, name) in combos {
-        let reference = dav2d_decode_filters_invisible(&path, bits);
-        // SAFETY: single-threaded test; set the override env for the rust decode.
-        unsafe {
-            std::env::set_var("RAV2D_FILT_OVERRIDE", bits.to_string());
-        }
-        let got = rav2d_decode_filters(&path, F::All);
-        unsafe {
-            std::env::remove_var("RAV2D_FILT_OVERRIDE");
-        }
-        if got.is_empty() || reference.is_empty() {
-            eprintln!("{name}: empty");
-            continue;
-        }
-        let g = &got[0];
-        let r = reference
-            .iter()
-            .filter(|r| (r.w, r.h, r.bpc, r.layout) == (g.w, g.h, g.bpc, g.layout))
-            .min_by_key(|r| {
-                (0..3)
-                    .map(|pl| {
-                        r.planes[pl]
-                            .iter()
-                            .zip(g.planes[pl].iter())
-                            .filter(|(a, b)| a != b)
-                            .count()
-                    })
-                    .sum::<usize>()
-            });
-        let r = match r {
-            Some(r) => r,
-            None => {
-                eprintln!("{name}: no match");
-                continue;
-            }
-        };
-        let (ssh, _) = ss(r.layout);
-        let mut parts = Vec::new();
-        for pl in 0..3 {
-            if r.planes[pl].len() != g.planes[pl].len() {
-                parts.push(format!("p{pl} sizediff"));
-                continue;
-            }
-            let diff = r.planes[pl]
-                .iter()
-                .zip(g.planes[pl].iter())
-                .filter(|(a, b)| a != b)
-                .count();
-            if diff != 0 {
-                let first = r.planes[pl]
-                    .iter()
-                    .zip(g.planes[pl].iter())
-                    .position(|(a, b)| a != b)
-                    .unwrap();
-                let stride = if pl == 0 {
-                    r.w as usize
-                } else {
-                    ((r.w + ssh) >> ssh) as usize
-                };
-                parts.push(format!(
-                    "p{pl} diff={diff} @({},{}) r={} g={}",
-                    first % stride,
-                    first / stride,
-                    r.planes[pl][first],
-                    g.planes[pl][first]
-                ));
-            }
-        }
-        if parts.is_empty() {
-            eprintln!("{name}: BIT-EXACT");
-        } else {
-            eprintln!("{name}: {}", parts.join("  "));
-        }
-        // Optional first-N diff coords for the combo named by env DIFFCOMBO.
-        if std::env::var("DIFFCOMBO").ok().as_deref() == Some(name) {
-            let pl = 0usize;
-            let pw = r.w as usize;
-            let mut n = 0;
-            for (i, (a, b)) in r.planes[pl].iter().zip(g.planes[pl].iter()).enumerate() {
-                if a != b {
-                    eprintln!("  diff @({},{}) r={} g={}", i % pw, i / pw, a, b);
-                    n += 1;
-                    if n >= 30 {
-                        break;
-                    }
-                }
-            }
-        }
-        // Optional grid map for the combo named by env GRIDCOMBO.
-        if std::env::var("GRIDCOMBO").ok().as_deref() == Some(name) {
-            let cell = std::env::var("CELL")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(16);
-            for pl in 0..3 {
-                if r.planes[pl].len() != g.planes[pl].len() || r.planes[pl].is_empty() {
-                    continue;
-                }
-                let pw = if pl == 0 {
-                    r.w as usize
-                } else {
-                    ((r.w + ssh) >> ssh) as usize
-                };
-                let ph = r.planes[pl].len() / pw;
-                let gw = pw.div_ceil(cell);
-                let gh = ph.div_ceil(cell);
-                let mut grid = vec![0usize; gw * gh];
-                for (i, (a, b)) in r.planes[pl].iter().zip(g.planes[pl].iter()).enumerate() {
-                    if a != b {
-                        grid[(i / pw / cell) * gw + (i % pw / cell)] += 1;
-                    }
-                }
-                eprintln!("  plane {pl} grid (cell={cell}, {gw}x{gh}):");
-                for gy in 0..gh {
-                    let mut row = String::new();
-                    for gx in 0..gw {
-                        let n = grid[gy * gw + gx];
-                        row.push(if n == 0 {
-                            '.'
-                        } else if n < cell {
-                            '+'
-                        } else {
-                            '#'
-                        });
-                    }
-                    eprintln!("    {row}");
-                }
-            }
+        let failures = full_clip_mask_failures(&path, bits);
+        eprintln!("{name}: {} failing planes", failures.len());
+        for f in failures.iter().take(3) {
+            eprintln!("    {f}");
         }
     }
 }
@@ -2244,38 +2122,7 @@ fn avmenc_vectors() -> Vec<PathBuf> {
 /// out of the gates below and are reported by `avmenc_pending_report`; a
 /// vector leaves this list in the commit that makes it pass.
 const AVMENC_PENDING: &[(&str, &str)] = &[
-    // dav2d decodes these like avmdec; the port is behind it.
-    (
-        "avmenc-aspect2.obu",
-        "bit-exact with dav2d filters off, differs from avmdec filters on",
-    ),
-    (
-        "avmenc-cfcdf0.obu",
-        "cross-frame-cdf-init-mode=0: frames differ from the fourth on",
-    ),
-    (
-        "avmenc-dpb16.obu",
-        "max_dpb_size=16 not ported (dav2d adcd093b)",
-    ),
-    (
-        "avmenc-erfm.obu",
-        "per-frame explicit_ref_frame_map bit not ported (dav2d 86ca0fdb)",
-    ),
-    (
-        "avmenc-lag0.obu",
-        "low-delay stream: frames differ from the fourth on",
-    ),
-    (
-        "avmenc-mfh.obu",
-        "multi-frame header OBU not ported (dav2d a0c3271a)",
-    ),
-    (
-        "avmenc-odd.obu",
-        "66x50: differs inside a frame not a multiple of 8",
-    ),
-    ("avmenc-tip2.obu", "TIP output frames: decodes one frame"),
-    ("avmenc-tiprefine0.obu", "tip-refinemv=0: frames differ"),
-    // dav2d does not match avmdec on these either.
+    // dav2d does not match avmdec on these either, so it cannot guide the port.
     (
         "avmenc-i400.obu",
         "dav2d differs from avmdec too; md5 convention for 4:0:0 unchecked",
@@ -2321,6 +2168,11 @@ fn avmenc_failures(path: &PathBuf) -> Vec<String> {
         ));
     }
     failures.extend(full_clip_failures(path));
+    failures.extend(
+        full_clip_filtered_failures(path)
+            .into_iter()
+            .map(|f| format!("filters on: {f}")),
+    );
     failures
 }
 
@@ -2383,6 +2235,13 @@ fn full_clip_report() {
     }
     for f in failures {
         eprintln!("{clip}: {f}");
+    }
+    let failures = full_clip_filtered_failures(&path);
+    if failures.is_empty() {
+        eprintln!("{clip}: full clip filtered bit-exact");
+    }
+    for f in failures {
+        eprintln!("{clip}: filters on: {f}");
     }
 }
 
@@ -2568,8 +2427,24 @@ fn coverage_known_limitations() {
 /// `full_clip_failures`, but passes the filter flags through
 /// `rav2d_decode_filters`/`dav2d_decode_filters_invisible`.
 fn full_clip_filtered_failures(path: &PathBuf) -> Vec<String> {
-    let reference = dav2d_decode_filters_invisible(path, DAV2D_INLOOPFILTER_ALL);
-    let got = rav2d_decode_filters(path, rav2d::InloopFilterType::All);
+    full_clip_mask_failures(path, DAV2D_INLOOPFILTER_ALL)
+}
+
+/// `full_clip_filtered_failures` for any DAV2D_INLOOPFILTER_* mask. rav2d gets
+/// the same mask through RAV2D_FILT_OVERRIDE, since the public
+/// InloopFilterType only exposes single filters and All.
+fn full_clip_mask_failures(path: &PathBuf, bits: u32) -> Vec<String> {
+    let reference = dav2d_decode_filters_invisible(path, bits);
+    let got = if bits == DAV2D_INLOOPFILTER_ALL {
+        rav2d_decode_filters(path, rav2d::InloopFilterType::All)
+    } else {
+        // SAFETY: the override is read once per decode; callers that pass a
+        // partial mask are single-clip debug harnesses.
+        unsafe { std::env::set_var("RAV2D_FILT_OVERRIDE", bits.to_string()) };
+        let got = rav2d_decode_filters(path, rav2d::InloopFilterType::All);
+        unsafe { std::env::remove_var("RAV2D_FILT_OVERRIDE") };
+        got
+    };
     let mut failures = Vec::new();
     if reference.is_empty() {
         failures.push("dav2d produced no frames".into());

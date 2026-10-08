@@ -249,6 +249,7 @@ impl Decoder {
             mastering_display: None,
             ci: None,
             fgm: Default::default(),
+            multi_frame_hdr_seq_ids: Default::default(),
             apply_grain: s.apply_grain,
             operating_point: s.operating_point as i32,
             operating_point_idc: 0,

@@ -1102,6 +1102,10 @@ pub struct MvSearchState {
     pub sngl_iter_cntr: i32,
     pub iter_cntr: i32,
     pub b8x8: isize,
+    /// Position of the block whose candidates are searched, in 4px units of
+    /// the frame; spatial offsets are relative to it.
+    pub by4: i32,
+    pub bx4: i32,
 }
 
 impl Default for MvSearchState {
@@ -1118,6 +1122,8 @@ impl Default for MvSearchState {
             sngl_iter_cntr: 0,
             iter_cntr: 0,
             b8x8: 0,
+            by4: 0,
+            bx4: 0,
         }
     }
 }
@@ -1253,9 +1259,16 @@ pub fn add_spatial_candidate(
             (!seq_hdr.tip_refine_mv && imin(b_dim[0] as i32, b_dim[1] as i32) >= 4)
                 || b.bs == crate::levels::BlockSize::Bs256x256 as u8
         };
+        // dav2d a8081ad4: align to 16x16 relative to the neighbour block's own
+        // top-left, not to the frame. off_y_8x8 is relative to the sbrow, whose
+        // base is even, so the alignment carries over unchanged.
         let tip16m = !(tip16 as isize);
-        off_y_8x8 &= tip16m;
-        off_x_8x8 &= tip16m;
+        let cell_y8 = ((st.by4 + y_off) >> 1) as isize;
+        let cell_x8 = ((st.bx4 + x_off) >> 1) as isize;
+        let rby8 = ((st.by4 + y_off - b.oy4 as i32) >> 1) as isize;
+        let rbx8 = ((st.bx4 + x_off - b.ox4 as i32) >> 1) as isize;
+        off_y_8x8 += rby8 + ((cell_y8 - rby8) & tip16m) - cell_y8;
+        off_x_8x8 += rbx8 + ((cell_x8 - rbx8) & tip16m) - cell_x8;
     }
     // Add the per-sbrow base (`rp_base`, == dav2d's `off3`) so negative-row
     // (top SB-boundary) projected-MV accesses land in valid buffer memory,
@@ -1865,6 +1878,8 @@ pub fn refmvs_find(
     let lms_8x8x = (bx4 >> 1) as isize;
     let mut st = MvSearchState {
         b8x8: lms_8x8x + tms_8x8y * stride,
+        by4,
+        bx4,
         ..Default::default()
     };
 

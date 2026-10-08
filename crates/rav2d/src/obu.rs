@@ -18,7 +18,7 @@ type Result<T> = std::result::Result<T, Rav2dError>;
 /// directly and relies on a later null check; a memory-safe port must bounds
 /// check first. A negative `i8` widens to a huge `usize`, so `get` rejects it.
 #[inline]
-fn ref_slot(refs: &[RefState; 8], idx: i32) -> Result<&RefState> {
+fn ref_slot(refs: &[RefState; crate::headers::NUM_REF_FRAMES], idx: i32) -> Result<&RefState> {
     usize::try_from(idx)
         .ok()
         .and_then(|i| refs.get(i))
@@ -548,11 +548,11 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
         } else {
             8
         };
-        // The reference-frame bank has DAV2D_NUM_REF_FRAMES (8) slots; reference
-        // indices are later validated only against `ref_frames`, so a value above
-        // 8 would let a malformed stream index the 8-slot `refs` array out of
-        // bounds. Valid streams never signal more than 8 reference frames.
-        if hdr.ref_frames > 8 {
+        // The reference-frame bank has NUM_REF_FRAMES (16) slots; reference
+        // indices are later validated only against `ref_frames`, so a larger
+        // value would let a malformed stream index `refs` out of bounds. The
+        // 4-bit field cannot exceed 16; the check keeps the bound explicit.
+        if hdr.ref_frames as usize > crate::headers::NUM_REF_FRAMES {
             return Err(Rav2dError::InvalidData);
         }
         hdr.ref_frames_log2 = if hdr.ref_frames <= 2 {
@@ -571,8 +571,12 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     }
 
     if !hdr.reduced_still_picture_header {
-        let tip_val = gb.get_bit();
-        hdr.tip = tip_val != 0 && (1 + gb.get_bit() as u8) > 0;
+        hdr.tip_mode = if gb.get_bit() != 0 {
+            1 + gb.get_bit() as u8
+        } else {
+            0
+        };
+        hdr.tip = hdr.tip_mode != 0;
         if hdr.tip {
             hdr.tip_hole_fill = gb.get_bit() != 0;
         }
@@ -583,7 +587,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
         hdr.cwp = gb.get_bit() != 0;
         hdr.imp_msk_bld = gb.get_bit() != 0;
         hdr.db_sub_pu = gb.get_bit() != 0;
-        if hdr.tip && hdr.db_sub_pu {
+        if hdr.tip_mode == 1 && hdr.db_sub_pu {
             hdr.tip_explicit_qp = gb.get_bit() != 0;
         }
     }
@@ -769,9 +773,13 @@ pub fn parse_sequence_header(data: &[u8]) -> Result<SequenceHeader> {
     parse_seq_hdr(&mut gb, false)
 }
 
+/// dav2d DAV2D_MAX_MFH_NUM: multi-frame header ids are 1..16.
+pub const MAX_MFH_NUM: usize = 16;
+
 pub fn parse_frame_hdr(
     seqhdr: &SequenceHeader,
-    refs: &[RefState; 8],
+    refs: &[RefState; crate::headers::NUM_REF_FRAMES],
+    multi_frame_hdr_seq_ids: &[Option<u8>; MAX_MFH_NUM],
     obu_type: ObuType,
     gb: &mut GetBits,
 ) -> Result<FrameHeader> {
@@ -783,11 +791,22 @@ pub fn parse_frame_hdr(
 
     let mut hdr = FrameHeader::default();
 
-    hdr.id = gb.get_vlc() as u8;
-    if hdr.id != 0 {
-        return Err(Rav2dError::InvalidData);
-    }
-    let seqhdr_idx = gb.get_vlc() as u8;
+    // A frame either names a multi-frame header, which carries the sequence
+    // header id, or codes that id itself (dav2d a0c3271a).
+    let mfh_id = if obu_type == ObuType::Bridge {
+        0
+    } else {
+        gb.get_vlc()
+    };
+    hdr.id = mfh_id.min(u8::MAX as u32) as u8;
+    let seqhdr_idx = if mfh_id != 0 {
+        match multi_frame_hdr_seq_ids.get(mfh_id as usize) {
+            Some(Some(id)) => *id,
+            _ => return Err(Rav2dError::InvalidData),
+        }
+    } else {
+        gb.get_vlc() as u8
+    };
     if seqhdr_idx != seqhdr.id {
         return Err(Rav2dError::InvalidData);
     }
@@ -898,12 +917,12 @@ pub fn parse_frame_hdr(
 
     // refresh_frame_flags
     if obu_type == ObuType::ClosedLoopKf && seqhdr.max_mlayer_id == 0 {
-        hdr.refresh_frame_flags = ((1u32 << seqhdr.ref_frames) - 1) as u8;
+        hdr.refresh_frame_flags = ((1u32 << seqhdr.ref_frames) - 1) as u16;
     } else if obu_type == ObuType::OpenLoopKf || seqhdr.max_mlayer_id > 0 {
         if seqhdr.short_refresh_frame_flags {
             hdr.refresh_frame_flags = 1 << gb.get_bits(seqhdr.ref_frames_log2 as i32);
         } else {
-            hdr.refresh_frame_flags = gb.get_bits(seqhdr.ref_frames as i32) as u8;
+            hdr.refresh_frame_flags = gb.get_bits(seqhdr.ref_frames as i32) as u16;
         }
     } else if hdr.frame_type != FrameType::Switch && seqhdr.short_refresh_frame_flags {
         let refresh = gb.get_bit() != 0;
@@ -915,13 +934,18 @@ pub fn parse_frame_hdr(
             hdr.refresh_frame_flags = 1 << refresh_idx;
         }
     } else {
-        hdr.refresh_frame_flags = gb.get_bits(seqhdr.ref_frames as i32) as u8;
+        hdr.refresh_frame_flags = gb.get_bits(seqhdr.ref_frames as i32) as u16;
     }
 
     let mut tip_output_frame = false;
 
     if hdr.is_inter_or_switch() {
-        if hdr.frame_type == FrameType::Switch || seqhdr.explicit_ref_frame_map {
+        // dav2d 86ca0fdb: with explicit_ref_frame_map on in the sequence, each
+        // frame says whether it uses it.
+        let explicit_ref_frame_map = obu_type != ObuType::Bridge
+            && (hdr.frame_type == FrameType::Switch
+                || (seqhdr.explicit_ref_frame_map && gb.get_bit() != 0));
+        if explicit_ref_frame_map {
             hdr.n_ref_frames = gb.get_bits(3) as u8;
             if hdr.n_ref_frames as i32 > imin(7, seqhdr.ref_frames as i32) {
                 return Err(Rav2dError::InvalidData);
@@ -2236,7 +2260,7 @@ fn u32_to_chr(v: u32) -> ChromaSamplePosition {
 pub fn read_frame_size(
     hdr: &mut FrameHeader,
     seqhdr: &SequenceHeader,
-    refs: &[RefState; 8],
+    refs: &[RefState; crate::headers::NUM_REF_FRAMES],
     gb: &mut GetBits,
 ) -> Result<()> {
     if hdr.frame_size_override != 0 && hdr.is_inter_or_switch() {
@@ -2266,7 +2290,7 @@ pub fn read_frame_size(
 pub fn get_ref_frames(
     hdr: &mut FrameHeader,
     seqhdr: &SequenceHeader,
-    refs: &[RefState; 8],
+    refs: &[RefState; crate::headers::NUM_REF_FRAMES],
     have_resolution: bool,
 ) -> i32 {
     struct Score {
@@ -2277,7 +2301,7 @@ pub fn get_ref_frames(
         mlayer: u8,
         _res_ratio_log2: i8,
     }
-    let mut ref_info: [Score; 8] = std::array::from_fn(|_| Score {
+    let mut ref_info: [Score; crate::headers::NUM_REF_FRAMES] = std::array::from_fn(|_| Score {
         score: 0,
         poc: 0,
         pocdiff: 0,
@@ -2285,13 +2309,13 @@ pub fn get_ref_frames(
         mlayer: 0,
         _res_ratio_log2: 0,
     });
-    let mut sort_idx = [0u8; 8];
+    let mut sort_idx = [0u8; crate::headers::NUM_REF_FRAMES];
     let mut n_refs = 0i32;
     let mut have_fwd_refs = false;
     let poc = hdr.frame_offset as i32;
     let nbits = seqhdr.order_hint_n_bits as i32;
 
-    for n in 0..8 {
+    for n in 0..crate::headers::NUM_REF_FRAMES {
         if have_fwd_refs {
             break;
         }
@@ -2308,7 +2332,7 @@ pub fn get_ref_frames(
     let mut maxq = -1i32;
     let mut last_refhdr_ptr: Option<*const FrameHeader> = None;
 
-    for n in 0..8usize {
+    for n in 0..crate::headers::NUM_REF_FRAMES {
         let refhdr_arc = match refs[n].p.frame_hdr.as_ref() {
             Some(fh) => fh,
             None => continue,
@@ -2394,12 +2418,12 @@ pub fn get_ref_frames(
         last_refhdr_ptr = Some(refhdr_ptr);
     }
 
-    if n_refs == 8 {
+    if n_refs > 7 {
         let q_thr = (maxq + minq + 1) >> 1;
         let mut maxpocdiff = [0i32; 2];
         let mut num = [0i32; 2];
         let mut furthest_idx = [0usize; 2];
-        for n in 0..8usize {
+        for n in 0..n_refs as usize {
             let r = &ref_info[sort_idx[n] as usize];
             if (r.qidx as i32) < q_thr {
                 continue;
@@ -2441,7 +2465,7 @@ pub fn get_ref_frames(
 pub fn find_tip_ref_frames(
     hdr: &mut FrameHeader,
     seqhdr: &SequenceHeader,
-    refs: &[RefState; 8],
+    refs: &[RefState; crate::headers::NUM_REF_FRAMES],
 ) -> Result<()> {
     let n_refs = hdr.n_ref_frames as usize;
     // n_refs >= 2 is required to pick two TIP references; the index arithmetic
@@ -2494,7 +2518,7 @@ pub fn find_tip_ref_frames(
 pub fn derive_pri_sec_ref(
     hdr: &FrameHeader,
     seqhdr: &SequenceHeader,
-    refs: &[RefState; 8],
+    refs: &[RefState; crate::headers::NUM_REF_FRAMES],
 ) -> [i32; 2] {
     let mut result = [PRIMARY_REF_NONE as i32, PRIMARY_REF_NONE as i32];
     let mut best_qdiff = [0i32; 2];
@@ -2639,8 +2663,10 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 c.frame_hdr = None;
                 c.content_light = None;
                 c.mastering_display = None;
-                for i in 0..8 {
+                for i in 0..crate::headers::NUM_REF_FRAMES {
                     c.refs[i] = RefState::default();
+                }
+                for i in 0..8 {
                     c.fgm[i] = None;
                 }
                 c.ci = None;
@@ -2669,7 +2695,13 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             let has_hdr = first_tile || gb.get_bit() != 0;
 
             if has_hdr {
-                let mut hdr = parse_frame_hdr(&seqhdr, &c.refs, obu_type, &mut gb)?;
+                let mut hdr = parse_frame_hdr(
+                    &seqhdr,
+                    &c.refs,
+                    &c.multi_frame_hdr_seq_ids,
+                    obu_type,
+                    &mut gb,
+                )?;
                 hdr.tlayer_id = tlayer_id as u8;
                 hdr.mlayer_id = mlayer_id as u8;
                 hdr.xlayer_id = xlayer_id as u8;
@@ -2766,6 +2798,17 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             // ignore
         }
 
+        Some(ObuType::MultiFrameHdr) => {
+            // dav2d parse_multi_frame_hdr: only the ids are used; the size,
+            // deblock and segmentation fields that follow are not applied.
+            let seq_hdr_id = gb.get_vlc();
+            let id = gb.get_vlc() as usize + 1;
+            if gb.has_error() || id >= MAX_MFH_NUM || seq_hdr_id > u8::MAX as u32 {
+                return Err(Rav2dError::InvalidData);
+            }
+            c.multi_frame_hdr_seq_ids[id] = Some(seq_hdr_id as u8);
+        }
+
         _ => {
             // unknown OBU type — ignore
         }
@@ -2801,7 +2844,7 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
             {
                 let r = idx;
                 c.refs[r].p.showable = false;
-                for i in 0..8 {
+                for i in 0..crate::headers::NUM_REF_FRAMES {
                     if i == r {
                         continue;
                     }
@@ -3104,8 +3147,8 @@ mod tests {
         fh
     }
 
-    fn make_refs_with(hdrs: &[(usize, FrameHeader)]) -> [RefState; 8] {
-        let mut refs: [RefState; 8] = Default::default();
+    fn make_refs_with(hdrs: &[(usize, FrameHeader)]) -> [RefState; crate::headers::NUM_REF_FRAMES] {
+        let mut refs: [RefState; crate::headers::NUM_REF_FRAMES] = Default::default();
         for (idx, fh) in hdrs {
             refs[*idx].p.frame_hdr = Some(Arc::new(fh.clone()));
         }
@@ -3119,7 +3162,7 @@ mod tests {
         let mut seqhdr = SequenceHeader::default();
         seqhdr.max_width = 1920;
         seqhdr.max_height = 1080;
-        let refs: [RefState; 8] = Default::default();
+        let refs: [RefState; crate::headers::NUM_REF_FRAMES] = Default::default();
         let data = [0x00; 4];
         let mut gb = GetBits::new(&data);
         read_frame_size(&mut hdr, &seqhdr, &refs, &mut gb).unwrap();
@@ -3141,7 +3184,7 @@ mod tests {
         let bits: u32 = (639 << 21) | (479 << 10);
         let data = bits.to_be_bytes();
         let mut gb = GetBits::new(&data);
-        let refs: [RefState; 8] = Default::default();
+        let refs: [RefState; crate::headers::NUM_REF_FRAMES] = Default::default();
         read_frame_size(&mut hdr, &seqhdr, &refs, &mut gb).unwrap();
         assert_eq!(hdr.width, 640);
         assert_eq!(hdr.height, 480);
@@ -3173,7 +3216,7 @@ mod tests {
         hdr.frame_type = FrameType::Inter;
         hdr.n_ref_frames = 1;
         hdr.refidx[0] = 0;
-        let refs: [RefState; 8] = Default::default();
+        let refs: [RefState; crate::headers::NUM_REF_FRAMES] = Default::default();
         let data = [0x80, 0x00, 0x00, 0x00]; // bit=1 → try ref 0, but no frame_hdr
         let mut gb = GetBits::new(&data);
         assert!(read_frame_size(&mut hdr, &SequenceHeader::default(), &refs, &mut gb).is_err());
@@ -3233,7 +3276,7 @@ mod tests {
         hdr.n_ref_frames = 1;
         hdr.tip.r#ref = [-1, -1];
         let seqhdr = SequenceHeader::default();
-        let refs: [RefState; 8] = Default::default();
+        let refs: [RefState; crate::headers::NUM_REF_FRAMES] = Default::default();
         find_tip_ref_frames(&mut hdr, &seqhdr, &refs).unwrap();
         assert_eq!(hdr.tip.r#ref[0], 0);
         assert_eq!(hdr.tip.r#ref[1], 0);
@@ -3383,7 +3426,7 @@ mod tests {
         assert_eq!(seqhdr.tlayer_dependencies[2], 1);
     }
 
-    fn default_refs() -> [RefState; 8] {
+    fn default_refs() -> [RefState; crate::headers::NUM_REF_FRAMES] {
         std::array::from_fn(|_| RefState::default())
     }
 
@@ -3394,7 +3437,13 @@ mod tests {
         let mut gb = GetBits::new(&data);
         let seqhdr = SequenceHeader::default();
         let refs = default_refs();
-        let result = parse_frame_hdr(&seqhdr, &refs, ObuType::ClosedLoopKf, &mut gb);
+        let result = parse_frame_hdr(
+            &seqhdr,
+            &refs,
+            &Default::default(),
+            ObuType::ClosedLoopKf,
+            &mut gb,
+        );
         assert!(result.is_err());
     }
 
@@ -3406,7 +3455,13 @@ mod tests {
         let mut seqhdr = SequenceHeader::default();
         seqhdr.id = 1;
         let refs = default_refs();
-        let result = parse_frame_hdr(&seqhdr, &refs, ObuType::ClosedLoopKf, &mut gb);
+        let result = parse_frame_hdr(
+            &seqhdr,
+            &refs,
+            &Default::default(),
+            ObuType::ClosedLoopKf,
+            &mut gb,
+        );
         assert!(result.is_err());
     }
 
@@ -3424,7 +3479,8 @@ mod tests {
         let data = [0xC4, 0x00];
         let mut gb = GetBits::new(&data);
         let refs = default_refs();
-        let hdr = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb).unwrap();
+        let hdr =
+            parse_frame_hdr(&seqhdr, &refs, &Default::default(), ObuType::Sef, &mut gb).unwrap();
         assert_eq!(hdr.show_existing_frame, 1);
         assert_eq!(hdr.existing_frame_idx, 0);
     }
@@ -3449,13 +3505,16 @@ mod tests {
         // 0b11_000_0_10 0b1... = 0xC2, 0x80
         let data = [0xC2, 0x80];
         let mut gb = GetBits::new(&data);
-        let hdr = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb).unwrap();
+        let hdr =
+            parse_frame_hdr(&seqhdr, &refs, &Default::default(), ObuType::Sef, &mut gb).unwrap();
         assert_eq!(hdr.existing_frame_idx, 0);
 
         // The same header naming a different POC is a malformed stream.
         let data = [0xC3, 0x00]; // poc=110 (6), slot holds 5
         let mut gb = GetBits::new(&data);
-        assert!(parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb).is_err());
+        assert!(
+            parse_frame_hdr(&seqhdr, &refs, &Default::default(), ObuType::Sef, &mut gb).is_err()
+        );
     }
 
     #[test]
@@ -3473,7 +3532,7 @@ mod tests {
         let data = [0xF8, 0x00];
         let mut gb = GetBits::new(&data);
         let refs = default_refs();
-        let result = parse_frame_hdr(&seqhdr, &refs, ObuType::Sef, &mut gb);
+        let result = parse_frame_hdr(&seqhdr, &refs, &Default::default(), ObuType::Sef, &mut gb);
         assert!(result.is_err());
     }
 
@@ -3569,6 +3628,7 @@ mod tests {
             mastering_display: None,
             ci: None,
             fgm: Default::default(),
+            multi_frame_hdr_seq_ids: Default::default(),
             apply_grain: false,
             operating_point: 0,
             operating_point_idc: 0,

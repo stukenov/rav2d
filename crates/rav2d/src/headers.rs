@@ -3,7 +3,8 @@ pub const MAX_OPERATING_POINTS: usize = 64;
 pub const MAX_TILE_COLS: usize = 64;
 pub const MAX_TILE_ROWS: usize = 64;
 pub const MAX_SEGMENTS: usize = 16;
-pub const NUM_REF_FRAMES: usize = 8;
+/// Reference slots; AV2 allows a DPB of 16 (dav2d adcd093b).
+pub const NUM_REF_FRAMES: usize = 16;
 pub const PRIMARY_REF_NONE: u8 = 7;
 pub const REFS_PER_FRAME: usize = 7;
 pub const TOTAL_REFS_PER_FRAME: usize = REFS_PER_FRAME + 1;
@@ -422,6 +423,9 @@ pub struct SequenceHeader {
     pub num_same_ref_comp: u8,
 
     pub tip: bool,
+    /// enable_tip as coded: 0 off, 1 TIP as reference and output, 2 TIP as
+    /// output only. `tip` is `tip_mode != 0`.
+    pub tip_mode: u8,
     pub tip_hole_fill: bool,
     pub mv_traj: bool,
     pub bawp: bool,
@@ -715,7 +719,7 @@ pub struct FrameHeader {
     pub primary_ref_frame: u8,
     pub secondary_ref_frame: u8,
     pub n_ref_frames: u8,
-    pub refresh_frame_flags: u8,
+    pub refresh_frame_flags: u16,
     pub allow_intrabc: u8,
     pub allow_global_intrabc: u8,
     pub allow_local_intrabc: u8,

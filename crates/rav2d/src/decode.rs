@@ -4483,6 +4483,28 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
         }
     }
 
+    // ---- CCSO maps (decode.c, "CCSO map") ---------------------------------
+    // A plane with sb_reuse takes its per-SB CCSO flags from the map of the
+    // reference it names; this frame's flags are kept for later frames. Without
+    // the maps every sb_reuse flag read as off and CCSO silently did not run.
+    fc.prev_ccsomap = Default::default();
+    fc.cur_ccsomap.clear();
+    if frame_hdr.ccso.enabled != 0 {
+        let n_planes = if seq_hdr.layout == crate::headers::PixelLayout::I400 {
+            1
+        } else {
+            3
+        };
+        for p in 0..n_planes {
+            if frame_hdr.ccso.p[p].sb_reuse == 0 {
+                continue;
+            }
+            let r = frame_hdr.ccso.p[p].refidx as usize;
+            fc.prev_ccsomap[p] = c.refs[frame_hdr.refidx[r] as usize].ccsomap.clone();
+        }
+        fc.cur_ccsomap = vec![0; 3 * (fc.sb256w * fc.sb256h) as usize];
+    }
+
     // ---- skip_mode_refs (decode.c:5687-5691) ------------------------------
     let skip_mode_r1 = (frame_hdr.skip_mode_enabled != 0
         && frame_hdr.n_ref_frames > 1
@@ -4525,7 +4547,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
         None
     };
     let refresh = frame_hdr.refresh_frame_flags;
-    for i in 0..8 {
+    for i in 0..crate::headers::NUM_REF_FRAMES {
         if refresh & (1 << i) != 0 {
             c.refs[i].p.pic = Some(shared.clone());
             c.refs[i].p.frame_hdr = Some(frame_hdr.clone());
@@ -4629,7 +4651,7 @@ fn next_deferred_ref(
 ) -> Option<usize> {
     let mut cand: Option<usize> = None;
     let mut bound = limit;
-    for n in 0..8usize {
+    for n in 0..crate::headers::NUM_REF_FRAMES {
         if mask & (1 << n) != 0 {
             continue;
         }
@@ -4677,7 +4699,7 @@ pub(crate) fn queue_output(c: &mut crate::internal::DecoderContext, pic: crate::
     // Then any deferred frame that directly follows the one just shown, and
     // whatever directly follows that.
     loop {
-        let next = (0..8usize).find(|&n| {
+        let next = (0..crate::headers::NUM_REF_FRAMES).find(|&n| {
             mask & (1 << n) == 0
                 && ref_slot_poc(c, n).is_some_and(|ipoc| {
                     crate::env::get_poc_diff(nb, ipoc as i32, c.dpb_poc as i32) == 1
@@ -5675,10 +5697,11 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 continue;
             }
             let val = if fi.ccso_sb_reuse[p] {
-                match recon.prev_ccsomap[p] {
-                    Some(prev) => prev[ccso_idx + p],
-                    None => 0,
-                }
+                // A reference of another size has a map of another shape; dav2d
+                // reads past it, rav2d reads the flag as off.
+                recon.prev_ccsomap[p]
+                    .and_then(|prev| prev.get(ccso_idx + p).copied())
+                    .unwrap_or(0)
             } else {
                 let ctx = if bx - 64 >= fi.tile_col_start {
                     recon.lf_mask[recon.lf_idx - 1].ccso[p] as usize * 2
@@ -9666,33 +9689,18 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
         );
         return;
     }
-    let ref_data: (&[BD::Pixel], i32, i32) = match ref_pic.data[pl] {
-        Some(p) => {
-            let pw = if pl == 0 {
-                ref_pic.p.w
-            } else {
-                (ref_pic.p.w + ss_hor) >> ss_hor
-            };
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            // SAFETY: see `ref_plane_rows`.
-            (
-                unsafe {
-                    std::slice::from_raw_parts(
-                        p.as_ptr() as *const BD::Pixel,
-                        ref_stride * ref_plane_rows(ref_pic, pl),
-                    )
-                },
-                pw,
-                ph,
+    // An unscaled reference has the current frame's size, so it holds decoded
+    // samples over the whole 8-aligned area MC clips to.
+    let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
+        // SAFETY: see `ref_plane_rows`.
+        Some(p) => unsafe {
+            std::slice::from_raw_parts(
+                p.as_ptr() as *const BD::Pixel,
+                ref_stride * ref_plane_rows(ref_pic, pl),
             )
-        }
+        },
         None => return,
     };
-    let (ref_data, ref_pw, ref_ph) = ref_data;
 
     let left = 0i32;
     let top = 0i32;
@@ -9704,24 +9712,16 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     let dx = bx * h_mul + (mvx >> (3 + plss_hor));
     let dy = by * v_mul + (mvy >> (3 + plss_ver));
 
-    // dav2d only takes the unscaled direct path when the reference and current
-    // frame have identical dimensions (recon_tmpl.c:1569); the emu clamp bounds
-    // then equal the reference plane size. Use the reference's own dimensions as
-    // the clamp bounds so a malformed stream that points into a smaller/larger
-    // reference can never read past its buffer. For valid streams cur == ref, so
-    // these equal `right`/`bottom` and the result is unchanged.
-    let iw = imin(right, ref_pw);
-    let ih = imin(bottom, ref_ph);
+    // dav2d mc(): an unscaled reference is clipped to the current frame's
+    // 8-aligned extent (`f->bw * 4`, `f->bh * 4`), not to its visible size, so
+    // the decoded overhang past an odd width or height is read like any sample.
+    let iw = right;
+    let ih = bottom;
 
     let need_emu = dx - (mx != 0) as i32 * 3 < left
         || dy - (my != 0) as i32 * 3 < top
         || dx + bw4 * h_mul + (mx != 0) as i32 * 4 > right
-        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom
-        // Force emulation if the reference dimensions differ from the current
-        // frame (scaled refs are otherwise unhandled) so the direct read below
-        // cannot overflow a smaller reference buffer.
-        || ref_pw != right
-        || ref_ph != bottom;
+        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom;
 
     let w = (bw4 * h_mul) as usize;
     let h = (bh4 * v_mul) as usize;
@@ -9965,33 +9965,18 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     let v_mul = 4 >> plss_ver;
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
-    let ref_data: (&[BD::Pixel], i32, i32) = match ref_pic.data[pl] {
-        Some(p) => {
-            let pw = if pl == 0 {
-                ref_pic.p.w
-            } else {
-                (ref_pic.p.w + ss_hor) >> ss_hor
-            };
-            let ph = if pl == 0 {
-                ref_pic.p.h
-            } else {
-                (ref_pic.p.h + ss_ver) >> ss_ver
-            };
-            // SAFETY: see `ref_plane_rows`.
-            (
-                unsafe {
-                    std::slice::from_raw_parts(
-                        p.as_ptr() as *const BD::Pixel,
-                        ref_stride * ref_plane_rows(ref_pic, pl),
-                    )
-                },
-                pw,
-                ph,
+    // An unscaled reference has the current frame's size, so it holds decoded
+    // samples over the whole 8-aligned area MC clips to.
+    let ref_data: &[BD::Pixel] = match ref_pic.data[pl] {
+        // SAFETY: see `ref_plane_rows`.
+        Some(p) => unsafe {
+            std::slice::from_raw_parts(
+                p.as_ptr() as *const BD::Pixel,
+                ref_stride * ref_plane_rows(ref_pic, pl),
             )
-        }
+        },
         None => return,
     };
-    let (ref_data, ref_pw, ref_ph) = ref_data;
 
     let left = 0i32;
     let top = 0i32;
@@ -10003,19 +9988,14 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     let dx = bx * h_mul + (mvx >> (3 + plss_hor));
     let dy = by * v_mul + (mvy >> (3 + plss_ver));
 
-    // See inter_mc_plane_8bpc: clamp the emu bounds to the reference plane size
-    // and force emulation when the reference dimensions differ from the current
-    // frame, so a malformed reference cannot be read out of bounds. No-op for
-    // valid streams where the reference and current frame match.
-    let iw = imin(right, ref_pw);
-    let ih = imin(bottom, ref_ph);
+    // As in inter_mc_plane_8bpc: clip to the 8-aligned frame extent.
+    let iw = right;
+    let ih = bottom;
 
     let need_emu = dx - (mx != 0) as i32 * 3 < left
         || dy - (my != 0) as i32 * 3 < top
         || dx + bw4 * h_mul + (mx != 0) as i32 * 4 > right
-        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom
-        || ref_pw != right
-        || ref_ph != bottom;
+        || dy + bh4 * v_mul + (my != 0) as i32 * 4 > bottom;
 
     let w = (bw4 * h_mul) as usize;
     let h = (bh4 * v_mul) as usize;
@@ -12529,7 +12509,7 @@ fn prep_opfl_prefetch_rect_8bpc<BD: crate::pixel::BitDepth>(
         Some(ptr) => unsafe {
             std::slice::from_raw_parts(
                 ptr.as_ptr() as *const BD::Pixel,
-                ref_stride * ref_pic.p.h as usize,
+                ref_stride * ref_plane_rows(ref_pic, 0),
             )
         },
         None => return,
@@ -12850,10 +12830,12 @@ fn opfl_pred_luma<BD: crate::pixel::BitDepth>(
                         },
                     };
                     for i in 0..2 {
+                        // Each 16x16 sub-block lands at its own place in tmp
+                        // (dav2d &tmp[i][(y * 4 * bw4 + x) * 4]).
                         let off = (y * 4) as usize * yw + (x * 4) as usize;
                         mc_prep_bounds_8bpc(
                             bd,
-                            &mut tmp[i],
+                            &mut tmp[i][off..],
                             yw,
                             refp[i],
                             0,
@@ -12871,7 +12853,6 @@ fn opfl_pred_luma<BD: crate::pixel::BitDepth>(
                             iclip(top[i], 0, h - 1),
                             iclip(top[i] + sh4 * 4 + 7, 1, h),
                         );
-                        let _ = off;
                     }
                     update_temporal_grid(
                         recon,
@@ -13265,10 +13246,12 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
     let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
     let b_mv0 = unsafe { b.data.inter.mv[0].c };
 
-    // The two TIP reference frame indices (f->rf.tip.ref).
+    // The two TIP reference frame indices (f->rf.tip.ref). A block with
+    // cwp_idx 16 predicts from the first one alone (dav2d 2f58a936).
+    let is_bidir = cwp_idx != 16;
     let tip_refs = unsafe { fi.tip.r };
     let r0 = tip_refs[0] as usize;
-    let r1 = tip_refs[1] as usize;
+    let r1 = if is_bidir { tip_refs[1] as usize } else { r0 };
 
     // ---- tip_pred config (recon_tmpl.c:2023-2057) -------------------------
     let frame_mode = recon.frm_hdr.tip.frame_mode as i32;
@@ -13287,6 +13270,9 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
     };
     let step = 2i32 << step_shift;
     opfl &= recon.seq_hdr.opfl_refine != 0 && recon.frm_hdr.has_bothside_refs != 0;
+    // dav2d's single-reference TIP has no intermediate buffer for OPFL to work
+    // in, so a stream cannot ask for it there.
+    opfl &= is_bidir;
 
     // BACP (block adaptive compound prediction) masked-blend predicate.
     let bacp = recon.seq_hdr.imp_msk_bld
@@ -13304,7 +13290,13 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
     let sad8x8_thr: u32 = if frame_mode == 1 { 6 } else { 15 };
     let t_stride = recon.rf.rp_stride;
     let t_swap = (recon.rf.ref_flip & (1u64 << (r0 * 8 + r1))) != 0;
-    let r_pair = fi.tip;
+    let r_pair = if is_bidir {
+        fi.tip
+    } else {
+        crate::levels::RefPair {
+            r: [tip_refs[0], tip_refs[0]],
+        }
+    };
 
     let w = fi.bw * 4;
     let h = fi.bh * 4;
@@ -13371,7 +13363,7 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
                 let mut rmv1 = [Mv::default(); 2];
                 let mut left = [0i32; 2];
                 let mut top = [0i32; 2];
-                for i in 0..2 {
+                for i in 0..=is_bidir as usize {
                     let tipmv = crate::refmvs::scale_mv(tmv, recon.rf.tip.sf[i]);
                     let cy = iclip(unsafe { tipmv.c.y } + b_mv0.y, -0xffff, 0xffff);
                     let cx = iclip(unsafe { tipmv.c.x } + b_mv0.x, -0xffff, 0xffff);
@@ -13383,6 +13375,10 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
                     };
                     top[i] = by * 4 + y * 4 + (cy >> 3) - 3;
                     left[i] = bx * 4 + x * 4 + (cx >> 3) - 3;
+                }
+                if !is_bidir {
+                    rmv1[1] = rmv1[0];
+                    cmv[1] = cmv[0];
                 }
                 crate::recon::scaleup_8pel_mv_for_chroma(&mut rmv1, layout);
 
@@ -13533,8 +13529,33 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
                     }
                     crate::recon::scaledown_16pel_mv_for_chroma(&mut cmv, layout);
                 } else {
-                    // non-opfl: plain prep-MC, full bounds.
-                    for i in 0..2 {
+                    // non-opfl: plain prep-MC, full bounds; a single-reference
+                    // block is predicted straight into the frame.
+                    if !is_bidir {
+                        let cy = unsafe { cmv[0].c.y };
+                        let cx = unsafe { cmv[0].c.x };
+                        let off = dst_off + (y * 4) as usize * y_stride + (x * 4) as usize;
+                        inter_mc_plane_8bpc(
+                            bd,
+                            &mut recon.dst_y[off..],
+                            y_stride,
+                            refp[0],
+                            0,
+                            bx + x,
+                            by + y,
+                            step,
+                            step,
+                            cx,
+                            cy,
+                            filter,
+                            ss_hor,
+                            ss_ver,
+                            fi.bw,
+                            fi.bh,
+                            recon.svc[r0],
+                        );
+                    }
+                    for i in (0..2).filter(|_| is_bidir) {
                         let cy = unsafe { cmv[i].c.y };
                         let cx = unsafe { cmv[i].c.x };
                         let off = (y * 4) as usize * yw + (x * 4) as usize;
@@ -13600,7 +13621,21 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
         // blend (COMP_INTER_NONE → COMP_INTER_AVG, cwp_idx==8).
         let have_bacp = bacp && luma_bacp;
         let (tmp0, tmp1) = tmp.split_at(1);
-        if have_bacp {
+        if !is_bidir {
+            // already predicted into the frame
+        } else if cwp_idx != 8 {
+            // TIP's global weighting (recon_tmpl.c COMP_INTER_NONE → w_avg).
+            mc_w_avg(
+                bd,
+                &mut recon.dst_y[dst_off..],
+                y_stride,
+                &tmp0[0],
+                &tmp1[0],
+                yw,
+                yh,
+                cwp_idx,
+            );
+        } else if have_bacp {
             mc_mask(
                 bd,
                 &mut recon.dst_y[dst_off..],
@@ -13690,6 +13725,56 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
         let mut chroma_bacp = false;
         for plane in (0..2usize).filter(|_| do_chroma_mc) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
+            if !is_bidir {
+                // dav2d rmv_uvpred, single reference: each grid unit straight
+                // into the frame with its stored chroma MV.
+                let refp0 = match recon.refp[r0].clone() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let rw4 = imin(cbw4, r_step);
+                let rh4 = imin(cbh4, r_step);
+                let h4 = imin(cbh4, fi.bh - cby);
+                let w4 = imin(cbw4, fi.bw - cbx);
+                let mut y = 0;
+                while y < h4 {
+                    let row = ((((cby + y) & 31) >> 1) as usize) * 16;
+                    let mut x = 0;
+                    while x < w4 {
+                        let rmv = recon.scratch.rmv[row + (((cbx + x) & 31) >> 1) as usize][0][0];
+                        let off = dst_off
+                            + ((y * 4 >> ss_ver) as usize) * uv_stride
+                            + (x * 4 >> ss_hor) as usize;
+                        let dst: &mut [BD::Pixel] = if plane == 0 {
+                            &mut recon.dst_u[off..]
+                        } else {
+                            &mut recon.dst_v[off..]
+                        };
+                        inter_mc_plane_8bpc(
+                            bd,
+                            dst,
+                            uv_stride,
+                            &refp0,
+                            1 + plane,
+                            cbx + x,
+                            cby + y,
+                            rw4,
+                            rh4,
+                            unsafe { rmv.c.x },
+                            unsafe { rmv.c.y },
+                            filter,
+                            ss_hor,
+                            ss_ver,
+                            fi.bw,
+                            fi.bh,
+                            recon.svc[r0],
+                        );
+                        x += rw4;
+                    }
+                    y += rh4;
+                }
+                continue;
+            }
             let _len = crate::mc_neon::compound_tmp_len(cw, ch);
             let mut tmp = [vec![0i16; _len], vec![0i16; _len]];
             let pl_bacp = rmv_uvpred(
@@ -13720,7 +13805,9 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
                 &mut recon.dst_v[dst_off..]
             };
             let (tmp0, tmp1) = tmp.split_at(1);
-            if use_bacp {
+            if cwp_idx != 8 {
+                mc_w_avg(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, cwp_idx);
+            } else if use_bacp {
                 mc_mask(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask);
             } else {
                 mc_avg(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
@@ -13940,7 +14027,7 @@ fn prep_opfl_prefetch_8bpc<BD: crate::pixel::BitDepth>(
         Some(ptr) => unsafe {
             std::slice::from_raw_parts(
                 ptr.as_ptr() as *const BD::Pixel,
-                ref_stride * ref_pic.p.h as usize,
+                ref_stride * ref_plane_rows(ref_pic, 0),
             )
         },
         None => return,
