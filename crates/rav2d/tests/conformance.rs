@@ -2158,13 +2158,14 @@ fn full_clip_failures(path: &PathBuf) -> Vec<String> {
         failures.push("dav2d produced no frames".into());
         return failures;
     }
+    // A short decode still compares the frames it produced: where the first
+    // of them diverges is what points at the bug.
     if got.len() != reference.len() {
         failures.push(format!(
             "frame count mismatch (rav2d={}, dav2d={})",
             got.len(),
             reference.len()
         ));
-        return failures;
     }
     let mut used = vec![false; reference.len()];
     for (gi, g) in got.iter().enumerate() {
@@ -2228,7 +2229,7 @@ fn full_clip_failures(path: &PathBuf) -> Vec<String> {
 /// inter clips; this sweep guarantees the whole corpus stays bit-exact end to
 /// end (intra + inter: single-ref/compound MC, warp, OBMC/interintra, TIP,
 /// opfl_pred, delta-q, segmentation, lossless, palette, multi-superblock-row).
-/// All 9 shipped clips are full-clip bit-exact across every coding-order frame.
+/// Every shipped clip must be full-clip bit-exact across every coding-order frame.
 #[test]
 fn bit_exact_full_clip_sweep() {
     let clips = [
@@ -2241,6 +2242,7 @@ fn bit_exact_full_clip_sweep() {
         "avm-v14.1.0-bus.352x288.l10.deltaq1.obu",
         "avm-v14.1.0-bus.352x288.l1.partial_lossless.obu",
         "avm-v14.1.0-hm.64x64.l5.filmgrain.obu",
+        "avm-v15.0.0-hm.64x64.l5.filmgrain.obu",
     ];
     let mut all = Vec::new();
     for clip in clips {
@@ -2365,6 +2367,38 @@ fn coverage_decode_no_panic() {
         checked > 0,
         "coverage_decode_no_panic: no vectors available"
     );
+}
+
+/// Quantizer matrices, on `avm.bus.64x64.l17.qm1.obu` from dav2d-test-data.
+///
+/// rav2d parsed `qm` in the frame header but never filled the per-frame tables,
+/// so matrices were silently ignored and every coefficient was dequantized flat.
+/// The keyframe and the first inter frame are bit-exact now, which covers both
+/// the DC and AC paths and intra and inter blocks.
+///
+/// The rest of the clip is not a gate yet: from the third coding-order frame
+/// (poc 8) the entropy stream desyncs. That frame uses coding tools upstream
+/// added after the port was made (see `zettel/port-follows-dav2d-of-2-may.md`).
+/// When it decodes, move the vector to `media/` (its avmdec md5 is next to it)
+/// and drop this test.
+#[test]
+fn bit_exact_qm_first_frames() {
+    let path = data("avm.bus.64x64.l17.qm1.obu");
+    let reference = dav2d_decode_invisible(&path);
+    let got = rav2d_decode(&path);
+    assert!(got.len() >= 2, "rav2d produced {} frames", got.len());
+    for i in 0..2 {
+        assert_eq!(
+            (got[i].w, got[i].h, got[i].layout),
+            (reference[i].w, reference[i].h, reference[i].layout)
+        );
+        for pl in 0..3 {
+            assert!(
+                got[i].planes[pl] == reference[i].planes[pl],
+                "qm1 frame {i} plane {pl} differs from dav2d"
+            );
+        }
+    }
 }
 
 /// Documents (and pins, via `#[ignore]`) the one coverage vector that is NOT a

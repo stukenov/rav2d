@@ -1764,6 +1764,7 @@ pub struct QmTables {
     qm_tbl_4x4: [[[u8; 16]; 2]; 15],
     qm_tbl_4x8: [[[u8; 32]; 2]; 15],
     qm_tbl_4x16: [[[u8; 64]; 2]; 15],
+    qm_tbl_4x32: [[[u8; 128]; 2]; 15],
     qm_tbl_8x4: [[[u8; 32]; 2]; 15],
     qm_tbl_8x8: [[[u8; 64]; 2]; 15],
     qm_tbl_8x16: [[[u8; 128]; 2]; 15],
@@ -1772,6 +1773,7 @@ pub struct QmTables {
     qm_tbl_16x8: [[[u8; 128]; 2]; 15],
     qm_tbl_16x16: [[[u8; 256]; 2]; 15],
     qm_tbl_16x32: [[[u8; 512]; 2]; 15],
+    qm_tbl_32x4: [[[u8; 128]; 2]; 15],
     qm_tbl_32x8: [[[u8; 256]; 2]; 15],
     qm_tbl_32x32: [[[u8; 1024]; 2]; 15],
 }
@@ -1809,6 +1811,14 @@ impl QmTables {
             s if s == RectTxfmSize::Rtx32x64 as usize => Some(&self.qm_tbl_32x32[i][j]),
             s if s == RectTxfmSize::Rtx64x16 as usize => Some(&self.qm_tbl_16x32[i][j]),
             s if s == RectTxfmSize::Rtx16x64 as usize => Some(&QM_TBL_32X16[i][j]),
+            // AV2's 1:8 and 1:16 sizes (dav2d_init_predefined_qm_tables); the
+            // 64-sample side reuses the 32-sample table, as for the sizes above.
+            s if s == RectTxfmSize::Rtx4x32 as usize => Some(&self.qm_tbl_32x4[i][j]),
+            s if s == RectTxfmSize::Rtx32x4 as usize => Some(&self.qm_tbl_4x32[i][j]),
+            s if s == RectTxfmSize::Rtx8x64 as usize => Some(&self.qm_tbl_32x8[i][j]),
+            s if s == RectTxfmSize::Rtx64x8 as usize => Some(&self.qm_tbl_8x32[i][j]),
+            s if s == RectTxfmSize::Rtx4x64 as usize => Some(&self.qm_tbl_32x4[i][j]),
+            s if s == RectTxfmSize::Rtx64x4 as usize => Some(&self.qm_tbl_4x32[i][j]),
             _ => None,
         }
     }
@@ -1819,11 +1829,19 @@ impl QmTables {
 /// This corresponds to `dav2d_init_qm_tables()` in the C code.
 /// Instead of filling global mutable state, it returns a [`QmTables`] struct
 /// that owns all the derived data.
+/// The predefined quantizer matrices, built once (dav2d builds them at library
+/// init, `dav2d_init_predefined_qm_tables`).
+pub fn qm_tables() -> &'static QmTables {
+    static TABLES: std::sync::OnceLock<Box<QmTables>> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| Box::new(init_qm_tables()))
+}
+
 pub fn init_qm_tables() -> QmTables {
     let mut tables = QmTables {
         qm_tbl_4x4: [[[0u8; 16]; 2]; 15],
         qm_tbl_4x8: [[[0u8; 32]; 2]; 15],
         qm_tbl_4x16: [[[0u8; 64]; 2]; 15],
+        qm_tbl_4x32: [[[0u8; 128]; 2]; 15],
         qm_tbl_8x4: [[[0u8; 32]; 2]; 15],
         qm_tbl_8x8: [[[0u8; 64]; 2]; 15],
         qm_tbl_8x16: [[[0u8; 128]; 2]; 15],
@@ -1832,6 +1850,7 @@ pub fn init_qm_tables() -> QmTables {
         qm_tbl_16x8: [[[0u8; 128]; 2]; 15],
         qm_tbl_16x16: [[[0u8; 256]; 2]; 15],
         qm_tbl_16x32: [[[0u8; 512]; 2]; 15],
+        qm_tbl_32x4: [[[0u8; 128]; 2]; 15],
         qm_tbl_32x8: [[[0u8; 256]; 2]; 15],
         qm_tbl_32x32: [[[0u8; 1024]; 2]; 15],
     };
@@ -1865,6 +1884,9 @@ pub fn init_qm_tables() -> QmTables {
             let v = subsample(&QM_TBL_32X16[i][j], 0, 16, 1, 2);
             tables.qm_tbl_32x8[i][j].copy_from_slice(&v);
 
+            let v = subsample(&QM_TBL_32X16[i][j], 32, 16, 1, 4);
+            tables.qm_tbl_32x4[i][j].copy_from_slice(&v);
+
             // Step 3: transpose to get the remaining sizes
             let v = transpose(&tables.qm_tbl_8x4[i][j], 8, 4);
             tables.qm_tbl_4x8[i][j].copy_from_slice(&v);
@@ -1877,6 +1899,9 @@ pub fn init_qm_tables() -> QmTables {
 
             let v = transpose(&tables.qm_tbl_32x8[i][j], 32, 8);
             tables.qm_tbl_8x32[i][j].copy_from_slice(&v);
+
+            let v = transpose(&tables.qm_tbl_32x4[i][j], 32, 4);
+            tables.qm_tbl_4x32[i][j].copy_from_slice(&v);
 
             let v = transpose(&QM_TBL_32X16[i][j], 32, 16);
             tables.qm_tbl_16x32[i][j].copy_from_slice(&v);

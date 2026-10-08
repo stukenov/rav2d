@@ -321,6 +321,16 @@ pub fn decode_frame_init(
 
     if frame_hdr.quant.qm.enabled == 0 {
         *qm = Default::default();
+    } else {
+        // decode.c: f->qm[tx][pl] = dav2d_qm_tbl[level][pl != 0][tx]; level 15
+        // is the flat matrix, which is no table at all.
+        let tables = crate::quantizer::qm_tables();
+        let q = &frame_hdr.quant.qm;
+        for (tx, row) in qm.iter_mut().enumerate() {
+            row[0] = tables.get(q.y[0] as usize, 0, tx).map(<[u8]>::to_vec);
+            row[1] = tables.get(q.u[0] as usize, 1, tx).map(<[u8]>::to_vec);
+            row[2] = tables.get(q.v[0] as usize, 1, tx).map(<[u8]>::to_vec);
+        }
     }
 
     if n_tc > 1 {

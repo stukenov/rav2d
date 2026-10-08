@@ -1385,7 +1385,12 @@ pub fn decode_coefs(
     let tcq_en = p.tcq_enabled && !chroma && tx_class == 0 && !p.lossless;
     let mut hr_avg: i32 = 0;
     let mut tcq_state: i32 = if tcq_en { -0x80000000i32 } else { 0 };
-    let has_qm = p.qm.is_some() && (*txtp as u8) < txtp::IDTX;
+    // recon_tmpl.c: no matrix for the identity/WHT types or the 1-D classes.
+    let has_qm = p.qm.is_some()
+        && *txtp as u8 != txtp::IDTX
+        && *txtp as u8 != txtp::WHT_WHT
+        && tx_class != 2
+        && tx_class != 3;
     let mut dq_shift = tcq_en as i32 + 3 + imax(0, t_dim.ctx as i32 - 2);
     let mut dc_sign_level: u32 = 1 << 6;
 
@@ -1650,7 +1655,7 @@ pub fn decode_coefs(
 
                 // sign & dequant for AC
                 tcq_state = if tcq_en { -0x80000000i32 } else { 0 };
-                let ac_dq = p.dq_tbl[1];
+                let ac_dq_flat = p.dq_tbl[1];
                 for i in (1..=eob).rev() {
                     if $tx_cl == 0 {
                         rc = if is_stx {
@@ -1683,6 +1688,17 @@ pub fn decode_coefs(
                         if chroma { 5 } else { 8 }
                     } else {
                         6
+                    };
+                    let ac_dq = match p.qm {
+                        Some(qm) if has_qm => {
+                            let qi = if is_stx {
+                                scan[i as usize] as usize
+                            } else {
+                                rc
+                            };
+                            (ac_dq_flat * qm[qi] as u32 + 16) >> 5
+                        }
+                        _ => ac_dq_flat,
                     };
                     let mut tok = tok_val;
                     let ac_val: i32;
@@ -1777,43 +1793,27 @@ pub fn decode_coefs(
     dc_sign_level = ((dc_sign as i32 - 1) & (2 << 6)) as u32;
 
     if has_qm {
-        let qm_tbl = p.qm.unwrap();
-        dc_dq = (dc_dq * qm_tbl[0] as i32 + 16) >> 5;
-        if dc_tok == 15 {
-            dc_tok = 0;
-            dc_tok &= 0xfffff;
-            let dq_val = ((dc_dq * dc_tok) & 0xffffff) >> dq_shift;
-            let dq_val = imin(dq_val, cf_max + dc_sign as i32);
-            cul_level = dc_tok as u32;
-            cf[0] = if dc_sign != 0 { -dq_val } else { dq_val };
-        } else {
-            let dq_val = dc_dq * dc_tok;
-            cul_level = dc_tok as u32;
-            let dq_val = dq_val >> dq_shift;
-            let dq_val = imin(dq_val, cf_max + dc_sign as i32);
-            cf[0] = if dc_sign != 0 { -dq_val } else { dq_val };
-        }
-    } else {
-        let max_br = if chroma { 5 } else { 8 };
-        let tcq_bit = (tcq_state & 2) >> 1;
-        let dc_val: i32;
-        if dc_tok >= max_br - tcq_en as i32 {
-            let hr = decode_hr(msac, hr_avg);
-            dc_tok += hr << tcq_en as i32;
-            dc_tok &= 0xfffff;
-            let v = (dc_tok << tcq_en as i32) - tcq_bit;
-            dc_val = imin(
-                ((((v as u32).wrapping_mul(dc_dq as u32)) & 0xffffff).wrapping_add(4) >> dq_shift)
-                    as i32,
-                cf_max + dc_sign as i32,
-            );
-        } else {
-            let v = (dc_tok << tcq_en as i32) - tcq_bit;
-            dc_val = (((v as u32).wrapping_mul(dc_dq as u32)).wrapping_add(4) >> dq_shift) as i32;
-        }
-        cul_level += dc_tok as u32;
-        cf[0] = if dc_sign != 0 { -dc_val } else { dc_val };
+        dc_dq = (dc_dq * p.qm.unwrap()[0] as i32 + 16) >> 5;
     }
+    let max_br = if chroma { 5 } else { 8 };
+    let tcq_bit = (tcq_state & 2) >> 1;
+    let dc_val: i32;
+    if dc_tok >= max_br - tcq_en as i32 {
+        let hr = decode_hr(msac, hr_avg);
+        dc_tok += hr << tcq_en as i32;
+        dc_tok &= 0xfffff;
+        let v = (dc_tok << tcq_en as i32) - tcq_bit;
+        dc_val = imin(
+            ((((v as u32).wrapping_mul(dc_dq as u32)) & 0xffffff).wrapping_add(4) >> dq_shift)
+                as i32,
+            cf_max + dc_sign as i32,
+        );
+    } else {
+        let v = (dc_tok << tcq_en as i32) - tcq_bit;
+        dc_val = (((v as u32).wrapping_mul(dc_dq as u32)).wrapping_add(4) >> dq_shift) as i32;
+    }
+    cul_level += dc_tok as u32;
+    cf[0] = if dc_sign != 0 { -dc_val } else { dc_val };
 
     if env_flag!("RAV2D_CF") {
         eprintln!(
