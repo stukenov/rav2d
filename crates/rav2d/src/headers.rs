@@ -705,7 +705,7 @@ pub struct FrameHeader {
     pub frame_presentation_delay: u32,
     pub show_immediate: u8,
     pub show_implicit: u8,
-    pub cross_frame_context: u8,
+    pub no_cross_frame_context: u8,
     pub disable_cdf_update: u8,
     pub allow_screen_content_tools: u8,
     pub force_integer_mv: u8,

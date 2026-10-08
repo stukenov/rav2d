@@ -888,7 +888,7 @@ pub fn parse_frame_hdr(
         if hdr.frame_type == FrameType::Inter {
             hdr.primary_ref_signaled = gb.get_bit() as u8;
             if obu_type != ObuType::LeadingTip && obu_type != ObuType::Tip {
-                hdr.cross_frame_context = gb.get_bit() as u8;
+                hdr.no_cross_frame_context = gb.get_bit() as u8;
             }
             if hdr.primary_ref_signaled != 0 {
                 hdr.primary_ref_frame = gb.get_bits(3) as u8;

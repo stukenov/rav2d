@@ -675,8 +675,15 @@ pub fn decode_coefs(
         *res_ctx = 0x40;
         *txtp = if !chroma && p.fsc {
             txtp::IDTX as u16
+        } else if p.lossless {
+            // Lossless blocks larger than 4x4 use the identity transform.
+            if p.tx == 0 {
+                txtp::WHT_WHT as u16
+            } else {
+                txtp::IDTX as u16
+            }
         } else {
-            (p.lossless as u16) * txtp::WHT_WHT as u16
+            txtp::DCT_DCT as u16
         };
         return -1;
     }

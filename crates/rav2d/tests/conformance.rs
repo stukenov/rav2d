@@ -2223,6 +2223,27 @@ fn full_clip_failures(path: &PathBuf) -> Vec<String> {
     failures
 }
 
+/// Debug helper: the full-clip comparison against dav2d for one clip, printed
+/// instead of asserted. `CLIP` names a file under `tests/data/media` or
+/// `tests/data`.
+#[test]
+#[ignore = "debug report, run with CLIP=<file> --ignored --nocapture"]
+fn full_clip_report() {
+    let clip = std::env::var("CLIP").expect("set CLIP");
+    let path = if media(&clip).exists() {
+        media(&clip)
+    } else {
+        data(&clip)
+    };
+    let failures = full_clip_failures(&path);
+    if failures.is_empty() {
+        eprintln!("{clip}: full clip bit-exact");
+    }
+    for f in failures {
+        eprintln!("{clip}: {f}");
+    }
+}
+
 /// Full-corpus reconstruction gate (in-loop filters off): EVERY coding-order
 /// frame of EVERY shipped conformance clip must reconstruct bit-exact vs dav2d.
 /// The dedicated `bit_exact_full_clip_*` gates above pin individual multi-frame
@@ -2243,6 +2264,7 @@ fn bit_exact_full_clip_sweep() {
         "avm-v14.1.0-bus.352x288.l1.partial_lossless.obu",
         "avm-v14.1.0-hm.64x64.l5.filmgrain.obu",
         "avm-v15.0.0-hm.64x64.l5.filmgrain.obu",
+        "avm.bus.64x64.l17.qm1.obu",
     ];
     let mut all = Vec::new();
     for clip in clips {
@@ -2367,38 +2389,6 @@ fn coverage_decode_no_panic() {
         checked > 0,
         "coverage_decode_no_panic: no vectors available"
     );
-}
-
-/// Quantizer matrices, on `avm.bus.64x64.l17.qm1.obu` from dav2d-test-data.
-///
-/// rav2d parsed `qm` in the frame header but never filled the per-frame tables,
-/// so matrices were silently ignored and every coefficient was dequantized flat.
-/// The keyframe and the first inter frame are bit-exact now, which covers both
-/// the DC and AC paths and intra and inter blocks.
-///
-/// The rest of the clip is not a gate yet: from the third coding-order frame
-/// (poc 8) the entropy stream desyncs. That frame uses coding tools upstream
-/// added after the port was made (see `zettel/port-follows-dav2d-of-2-may.md`).
-/// When it decodes, move the vector to `media/` (its avmdec md5 is next to it)
-/// and drop this test.
-#[test]
-fn bit_exact_qm_first_frames() {
-    let path = data("avm.bus.64x64.l17.qm1.obu");
-    let reference = dav2d_decode_invisible(&path);
-    let got = rav2d_decode(&path);
-    assert!(got.len() >= 2, "rav2d produced {} frames", got.len());
-    for i in 0..2 {
-        assert_eq!(
-            (got[i].w, got[i].h, got[i].layout),
-            (reference[i].w, reference[i].h, reference[i].layout)
-        );
-        for pl in 0..3 {
-            assert!(
-                got[i].planes[pl] == reference[i].planes[pl],
-                "qm1 frame {i} plane {pl} differs from dav2d"
-            );
-        }
-    }
 }
 
 /// Documents (and pins, via `#[ignore]`) the one coverage vector that is NOT a
