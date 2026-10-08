@@ -167,6 +167,8 @@ pub const ANGLE_HAS_LEFT_FLAG: i32 = 1 << 16;
 pub const ANGLE_HAS_TOP_FLAG: i32 = 1 << 17;
 pub const ANGLE_DIP_FLAG: i32 = 1 << 18;
 pub const ANGLE_IS_LUMA: i32 = 1 << 19;
+/// The sequence enables IBP (dav2d 0ec113a5: gates the Z1/Z3 corner filter).
+pub const ANGLE_SEQHDR_IBP_FLAG: i32 = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

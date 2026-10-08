@@ -159,7 +159,9 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
                 && have_top
                 && mrl_idx == 0
                 && enable_edge_filter
-                && tw4 + th4 >= 6;
+                && tw4 + th4 >= 6
+                // dav2d 0ec113a5: without IBP in the sequence, only Z2 keeps it.
+                && ((intra_flags & crate::levels::ANGLE_SEQHDR_IBP_FLAG) != 0 || mode == Z2_PRED);
         }
         0 => {
             mode = if apply_dip {
@@ -641,7 +643,11 @@ mod tests {
         let dst_off = 4 * stride + 4;
         let mut tl = vec![0u8; 512];
         let o = 256usize;
-        let flags = 45 | ANGLE_HAS_TOP_FLAG | ANGLE_HAS_LEFT_FLAG | ANGLE_USE_EDGE_FILTER_FLAG;
+        let flags = 45
+            | ANGLE_HAS_TOP_FLAG
+            | ANGLE_HAS_LEFT_FLAG
+            | ANGLE_USE_EDGE_FILTER_FLAG
+            | ANGLE_SEQHDR_IBP_FLAG;
         let result = prepare_intra_edges_8bpc(
             1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 1, 3, 3, flags, &mut tl, o,
         );
@@ -651,6 +657,15 @@ mod tests {
         let top_val = tl[o + 1] as i32;
         let expected = ((raw_tl + (left_val + raw_tl + top_val) * 5 + 8) >> 4) as u8;
         assert_eq!(tl[o], expected);
+
+        // Without IBP in the sequence a Z1 block leaves the corner unfiltered
+        // (dav2d 0ec113a5).
+        let mut tl = vec![0u8; 512];
+        let flags = flags & !ANGLE_SEQHDR_IBP_FLAG;
+        prepare_intra_edges_8bpc(
+            1, 1, 4, 4, 0, 0, &dst, dst_off, stride, None, 1, 3, 3, flags, &mut tl, o,
+        );
+        assert_eq!(tl[o], dst[dst_off - stride - 1]);
     }
 
     #[test]

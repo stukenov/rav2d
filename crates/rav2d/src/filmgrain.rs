@@ -274,8 +274,10 @@ pub fn fgy_32x32xn<P: Pixel>(
     let mut seed = [0u32; 2];
     for i in 0..rows {
         seed[i] = in_seed;
-        seed[i] ^= ((((row_num - i as i32) * 37 + 178) & 0xFF) as u32) << 8;
-        seed[i] ^= (((row_num - i as i32) * 173 + 105) & 0xFF) as u32;
+        // dav2d 12e0b3d0: the row number is in units of the grain block size.
+        let rel_row_num = (row_num - i as i32) << data.block_size;
+        seed[i] ^= (((rel_row_num * 37 + 178) & 0xFF) as u32) << 8;
+        seed[i] ^= ((rel_row_num * 173 + 105) & 0xFF) as u32;
     }
 
     let mut offsets = [[[0i32; 2]; 2]; 2];
@@ -444,8 +446,10 @@ pub fn fguv_32x32xn<P: Pixel>(
     let mut seed = [0u32; 2];
     for i in 0..rows {
         seed[i] = in_seed;
-        seed[i] ^= ((((row_num - i as i32) * 37 + 178) & 0xFF) as u32) << 8;
-        seed[i] ^= (((row_num - i as i32) * 173 + 105) & 0xFF) as u32;
+        // dav2d 12e0b3d0: the row number is in units of the grain block size.
+        let rel_row_num = (row_num - i as i32) << data.block_size;
+        seed[i] ^= (((rel_row_num * 37 + 178) & 0xFF) as u32) << 8;
+        seed[i] ^= ((rel_row_num * 173 + 105) & 0xFF) as u32;
     }
 
     let mut offsets = [[[0i32; 2]; 2]; 2];

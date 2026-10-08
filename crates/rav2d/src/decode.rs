@@ -1911,8 +1911,10 @@ pub fn extend_warpmv(
     sb_step: i32,
     gmv_matrix: &[i32; 6],
 ) {
+    // dav2d 1fe7c807: the top-left comes from the SB-row cache whenever the
+    // offset crosses the SB's left edge, odd 4px positions included.
     let r = if y_off == -1 && (by & (sb_step - 1)) == 0 {
-        if x_off < 0 && (bx & (sb_step - 1)) == 0 {
+        if bx + x_off < (bx & !(sb_step - 1)) {
             &rt.ra_tl
         } else {
             &rt.ra[rt.ra_off + ((bx + x_off) >> 1) as usize]
@@ -5739,7 +5741,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             let mut delta_q = msac.decode_symbol_adapt(cdf_m.delta_q(), 7) as i32;
             if delta_q == 7 {
                 let n_bits = 1 + msac.decode_bools_bypass(3) as i32;
-                delta_q = msac.decode_bools_bypass(n_bits as u32) as i32 + 1 + (1 << n_bits);
+                delta_q = msac.decode_bools_bypass(n_bits as u32) as i32 + 5 + (1 << n_bits);
             }
             if delta_q != 0 {
                 if msac.decode_bool_bypass() != 0 {
@@ -9207,7 +9209,13 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
             )
         } else {
             let csplit_row = (bs as i32 - BlockSize::Bs128x128 as i32) as usize;
-            let csi = (ss_hor + ss_ver) as usize;
+            // dav2d b07a0380: lossless chroma is not interleaved over 2x2 luma
+            // 64x64s; it splits like luma.
+            let csi = if recon.frame.seg_lossless[b.seg_id as usize] != 0 {
+                0
+            } else {
+                (ss_hor + ss_ver) as usize
+            };
             (
                 16,
                 if lbs == BlockSize::Invalid {
@@ -9222,7 +9230,7 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
                 },
             )
         };
-
+        let il = step == 32 || recon.frame.seg_lossless[b.seg_id as usize] != 0;
         let mut sub_by = by;
         let mut sub_cby = cby;
         let mut yy = 0;
@@ -9232,7 +9240,7 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
             let mut xx = 0;
             while sub_bx < x_end {
                 // cbs2[0] = coef-read stage, cbs2[1] = recon stage (recon_tmpl.c:3111).
-                let (read_cbs, recon_cbs) = if step == 32 {
+                let (read_cbs, recon_cbs) = if il {
                     (cbs2i, cbs2i)
                 } else {
                     let read = if ((xx & ss_hor) | (yy & ss_ver)) == 0 {
@@ -9318,7 +9326,7 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
                 }
 
                 sub_bx += step;
-                if step == 32 {
+                if il {
                     sub_cbx += step;
                 } else if (xx & ss_hor) == ss_hor {
                     sub_cbx += step << ss_hor;
@@ -9326,7 +9334,7 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
                 xx += 1;
             }
             sub_by += step;
-            if step == 32 {
+            if il {
                 sub_cby += step;
             } else if (yy & ss_ver) == ss_ver {
                 sub_cby += step << ss_ver;
@@ -15092,7 +15100,13 @@ fn recon_b_inter_split<BD: crate::pixel::BitDepth>(
         )
     } else {
         let csplit_row = (bs as i32 - BlockSize::Bs128x128 as i32) as usize;
-        let csi = (ss_hor + ss_ver) as usize;
+        // dav2d b07a0380: lossless chroma is not interleaved over 2x2 luma
+        // 64x64s; it splits like luma.
+        let csi = if recon.frame.seg_lossless[b.seg_id as usize] != 0 {
+            0
+        } else {
+            (ss_hor + ss_ver) as usize
+        };
         (
             16,
             if lbs == BlockSize::Invalid {
@@ -15108,7 +15122,7 @@ fn recon_b_inter_split<BD: crate::pixel::BitDepth>(
         )
     };
     let _ = (has_luma, has_chroma);
-
+    let il = step == 32 || recon.frame.seg_lossless[b.seg_id as usize] != 0;
     let mut sub_by = by;
     let mut sub_cby = cby;
     let mut yy = 0;
@@ -15119,7 +15133,7 @@ fn recon_b_inter_split<BD: crate::pixel::BitDepth>(
         while sub_bx < x_end {
             // cbs2[0] = chroma coef-read stage, cbs2[1] = chroma recon stage
             // (recon_tmpl.c:3108-3117).
-            let (read_cbs, recon_cbs) = if step == 32 {
+            let (read_cbs, recon_cbs) = if il {
                 (cbs2i, cbs2i)
             } else {
                 let read = if ((xx & ss_hor) | (yy & ss_ver)) == 0 {
@@ -15177,7 +15191,7 @@ fn recon_b_inter_split<BD: crate::pixel::BitDepth>(
             )?;
 
             sub_bx += step;
-            if step == 32 {
+            if il {
                 sub_cbx += step;
             } else if (xx & ss_hor) == ss_hor {
                 sub_cbx += step << ss_hor;
@@ -15185,7 +15199,7 @@ fn recon_b_inter_split<BD: crate::pixel::BitDepth>(
             xx += 1;
         }
         sub_by += step;
-        if step == 32 {
+        if il {
             sub_cby += step;
         } else if (yy & ss_ver) == ss_ver {
             sub_cby += step << ss_ver;
@@ -16030,7 +16044,16 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                 let mut x = 0;
                 while x < cw4ss {
                     let i = (y * cbw4ss as i32 + x) as usize;
-                    let mut txtp: u16 = 0;
+                    // Seed from the luma txtp_map like dav2d (`uv_txtp = y_txtp`,
+                    // recon_tmpl.c:3623/3635). Intra blocks derive their own type,
+                    // but IntraBC chroma is coded as inter and keeps this seed.
+                    let (sy, sx) = if !sdp_active && b.bs == b.cbs {
+                        (cby + (y << ss_ver), cbx + (x << ss_hor))
+                    } else {
+                        (cby, cbx)
+                    };
+                    let mut txtp: u16 =
+                        recon.scratch.txtp_map[(sy & 15) as usize * 16 + (sx & 15) as usize];
                     let mut res_ctx: u8 = 0;
                     // TU coefficient region is txw*txh*16 coefs (= ctw*cth), placed at
                     // i*16 within the per-plane block buffer (recon_tmpl.c cf[pl][i*16]).
@@ -16292,6 +16315,11 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                     let intra_flags = is_sm_flag
                         | if apply_ibp {
                             crate::levels::ANGLE_IBP_FLAG
+                        } else {
+                            0
+                        }
+                        | if recon.frame.seq_ibp {
+                            crate::levels::ANGLE_SEQHDR_IBP_FLAG
                         } else {
                             0
                         }
@@ -16855,6 +16883,15 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
             return Err(());
         }
         let stx = (txtp >> 8) as i32;
+        // Record the luma type for the chroma seed (recon_tmpl.c:2549): IntraBC
+        // chroma is coded as inter and starts from this txtp_map entry.
+        let by15 = (by & 15) as usize;
+        let bx15 = (bx & 15) as usize;
+        for yy in by15..imin(by15 as i32 + th4, 16) as usize {
+            for xx in bx15..imin(bx15 as i32 + tw4, 16) as usize {
+                recon.scratch.txtp_map[yy * 16 + xx] = txtp & 0xff;
+            }
+        }
         (eob, stx, (txtp & 0xff) as u32)
     };
 
@@ -16971,6 +17008,11 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
             }
             | if apply_ibp {
                 crate::levels::ANGLE_IBP_FLAG
+            } else {
+                0
+            }
+            | if recon.frame.seq_ibp {
+                crate::levels::ANGLE_SEQHDR_IBP_FLAG
             } else {
                 0
             }

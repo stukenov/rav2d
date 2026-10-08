@@ -33,3 +33,8 @@ b10           64x64   6  10 420
 i444          64x64   6  8  444 --profile=1
 i422          64x64   6  8  422 --profile=2
 i400          64x64   6  8  400 --monochrome
+noibp         64x64   10 8  420 --enable-ibp=0
+lossless128   128x128 3  8  420 --lossless=1
+b128          128x128 6  8  420
+nocdef        64x64   6  8  420 --enable-cdef=0
+norest        64x64   6  8  420 --enable-restoration=0
