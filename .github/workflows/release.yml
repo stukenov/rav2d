@@ -1,0 +1,91 @@
+name: Release binaries
+
+# Prebuilt `rav2d` CLI binaries, so trying the decoder does not need a Rust
+# toolchain. A pushed v* tag attaches them to that tag's GitHub release (the
+# release must exist, or the upload step fails loudly); a manual run only keeps
+# them as workflow artifacts, which is how a change to this file gets tested.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin, cross: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p rav2d-cli --target ${{ matrix.target }}
+
+      # A binary that cannot decode a vector correctly must not ship. The cross
+      # build (x86_64 macOS on an arm64 runner) cannot run here.
+      - name: Check against avmdec's md5
+        if: ${{ !matrix.cross }}
+        run: |
+          clip=crates/rav2d/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu
+          target/${{ matrix.target }}/release/rav2d "$clip" --verify "$clip.md5"
+
+      - name: Package
+        id: package
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [ "$GITHUB_REF_TYPE" = tag ] || version=$(git rev-parse --short HEAD)
+          name=rav2d-$version-${{ matrix.target }}
+          mkdir "$name"
+          cp README.md LICENSE "$name"/
+          if [ "${{ runner.os }}" = Windows ]; then
+            cp target/${{ matrix.target }}/release/rav2d.exe "$name"/
+            7z a "$name.zip" "$name" > /dev/null
+            archive=$name.zip
+          else
+            cp target/${{ matrix.target }}/release/rav2d "$name"/
+            tar czf "$name.tar.gz" "$name"
+            archive=$name.tar.gz
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.archive }}.sha256"

@@ -91,6 +91,11 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
 
+      # The CLI tests decode the media vectors through the binary: md5 against
+      # avmdec, stdout, .yuv, --skip/--limit, exit codes.
+      - name: cargo test (CLI)
+        run: cargo test -p rav2d-cli
+
       - name: cargo build --release
         run: cargo build --release --workspace
         env:
@@ -112,8 +117,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout (no submodules)
         uses: actions/checkout@v4
@@ -127,8 +135,8 @@ jobs:
       - name: build and run the CLI on the vendored asm
         run: |
           cargo build --release --locked -p rav2d-cli
-          ./target/release/rav2d crates/rav2d/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu -o out.y4m
-          head -c 64 out.y4m | head -1
+          clip=crates/rav2d/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu
+          ./target/release/rav2d "$clip" --verify "$clip.md5"
 
   # rust-version in Cargo.toml is a promise to users on older toolchains; check
   # it, since nothing else here builds with anything but the latest stable.

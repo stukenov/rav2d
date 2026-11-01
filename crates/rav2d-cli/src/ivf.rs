@@ -42,11 +42,13 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<IvfHeader> {
     })
 }
 
-#[allow(dead_code)]
 pub struct IvfFrame {
     pub data: Vec<u8>,
-    pub timestamp: u64,
 }
+
+/// Larger than any real compressed frame; a size field past it is a corrupt
+/// file, and trusting it would mean allocating up to 4 GiB up front.
+const MAX_FRAME_SIZE: usize = 256 << 20;
 
 pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Option<IvfFrame>> {
     let mut hdr = [0u8; IVF_FRAME_HEADER_SIZE];
@@ -57,12 +59,15 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Option<IvfFrame>> {
     }
 
     let size = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
-    let timestamp = u64::from_le_bytes([
-        hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11],
-    ]);
+    if size > MAX_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("IVF frame of {size} bytes, the file is corrupt"),
+        ));
+    }
 
     let mut data = vec![0u8; size];
     reader.read_exact(&mut data)?;
 
-    Ok(Some(IvfFrame { data, timestamp }))
+    Ok(Some(IvfFrame { data }))
 }

@@ -95,7 +95,9 @@
         <h2>Quick Start</h2>
         <pre style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0;"><code># Use it (Rust 1.88+, no C toolchain needed)
 cargo add rav2d
-cargo install rav2d-cli    # rav2d input.obu -o out.y4m
+cargo install rav2d-cli    # or a prebuilt binary from GitHub releases
+rav2d input.obu -o out.y4m
+rav2d input.obu --verify input.obu.md5   # check against avmdec
 
 # Run the conformance suite (needs the dav2d C reference)
 git submodule update --init

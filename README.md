@@ -80,12 +80,16 @@ loop {
 
 ### CLI
 
+Prebuilt binaries for Linux, macOS and Windows are attached to each [GitHub release](https://github.com/stukenov/rav2d/releases); with a Rust toolchain, `cargo install rav2d-cli` works too.
+
 ```sh
-cargo install rav2d-cli
-rav2d input.ivf -o output.y4m      # decode IVF → Y4M
-rav2d input.ivf                    # decode-only benchmark
-rav2d input.ivf -o out.y4m --limit 100 --no-grain
+rav2d in.obu -o out.y4m                # decode to Y4M (.yuv and .md5 by extension)
+rav2d in.ivf -o - | ffplay -           # watch it
+rav2d in.obu --verify in.obu.md5       # check against avmdec's md5
+rav2d in.obu --info                    # what is in the stream
 ```
+
+See the [CLI README](crates/rav2d-cli/README.md) for every option.
 
 ## Performance
 
@@ -110,7 +114,7 @@ DYLD_LIBRARY_PATH=dav2d/build/src cargo bench -p rav2d   # prints a rav2d-vs-dav
 |-------|-------------|
 | [`rav2d`](crates/rav2d/) | Main decoder library — safe Rust API |
 | [`rav2d-sys`](crates/rav2d-sys/) | Raw FFI bindings to dav2d (bindgen), used only by the test suite as the conformance oracle; not published |
-| [`rav2d-cli`](crates/rav2d-cli/) | Command-line decoder (IVF → Y4M) |
+| [`rav2d-cli`](crates/rav2d-cli/) | Command-line decoder: IVF or raw OBU to Y4M, YUV or MD5 |
 
 > **Note:** `rav2d` itself is pure Rust and does **not** link the C library — the NEON assembly it dispatches to is vendored under `crates/rav2d/vendor/dav2d-asm`, so `cargo add rav2d` works with no submodule and no C toolchain. `rav2d-sys` is the conformance oracle: it binds `dav2d.h` so the test suite can decode the same bitstream with both decoders and compare. It is a path-only dev-dependency, dropped from the published manifest entirely, and CI keeps it that way with a `cargo publish --dry-run` job that runs against a checkout with the submodule removed.
 
