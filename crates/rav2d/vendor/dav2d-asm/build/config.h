@@ -97,7 +97,8 @@
 
 #define PIC 3
 
-#define PREFIX 1
+/* PREFIX (leading underscore on symbols) is Mach-O only; rav2d's build.rs
+ * defines it for Apple targets, so ELF builds link. */
 
 #define TRIM_DSP_FUNCTIONS 1
 

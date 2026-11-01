@@ -161,6 +161,7 @@ fn build_neon_mc() {
     // Match dav2d's release flags for the asm/data. NDEBUG keeps assert() out of
     // the asm macros; PIC is already defined in config.h so we don't pass -DPIC.
     cc.define("NDEBUG", None);
+    target_defines(&mut cc);
     cc.flag_if_supported("-std=c99");
     // The .S use the .arch/.arch_extension directives gated by config.h; clang
     // handles them. Silence the benign config.h-controlled warnings.
@@ -169,6 +170,19 @@ fn build_neon_mc() {
 
     // Tell the linker NEON MC is available so src/mc_neon.rs enables dispatch.
     println!("cargo:rustc-cfg=rav2d_neon_mc");
+}
+
+/// Target-specific defines the vendored `config.h` cannot carry, since it is
+/// shared by every target the crate builds for.
+///
+/// `PREFIX` makes `asm.S` emit symbols with a leading underscore, which is the
+/// Mach-O convention; on ELF the Rust side references the bare name and the
+/// link fails (issue #7). A submodule `config.h` generated on macOS defines it
+/// as well, with the same value, which the preprocessor accepts.
+fn target_defines(cc: &mut cc::Build) {
+    if env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+        cc.define("PREFIX", "1");
+    }
 }
 
 /// Shared include dirs matching dav2d's own asm build (see build.ninja).
@@ -223,6 +237,7 @@ fn build_neon_ipred() {
         cc.include(inc);
     }
     cc.define("NDEBUG", None);
+    target_defines(&mut cc);
     cc.flag_if_supported("-std=c99");
     cc.warnings(false);
     cc.compile("rav2d_ipred_neon");

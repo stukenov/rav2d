@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
 
     env:
@@ -72,9 +72,9 @@ jobs:
 
       # On aarch64 the decoder dispatches MC/ipred to the NEON kernels; rerun the
       # conformance corpus with the scalar Rust path forced on so both stay
-      # bit-exact. The macOS runner is aarch64.
+      # bit-exact. Runs on both aarch64 runners (macOS and Linux).
       - name: cargo test (conformance, scalar fallback)
-        if: runner.os == 'macOS'
+        if: runner.arch == 'ARM64'
         run: cargo test -p rav2d --test conformance
         env:
           RAV2D_NEON_OFF: all
@@ -101,9 +101,19 @@ jobs:
   # dav2d submodule — so it can be published to crates.io. This job removes the
   # submodule before running the publish verification to prove the vendored NEON
   # asm path (crates/rav2d/vendor/dav2d-asm) is self-contained.
+  #
+  # It runs on every target the vendored asm serves: the test job above always
+  # has the submodule, so its own config.h, and never builds the vendored path
+  # on aarch64 Linux, which is how issue #7 (Mach-O symbol prefix on ELF)
+  # shipped. The CLI build links the asm into a binary, which the library
+  # dry-run alone does not do.
   publish-dry-run:
-    name: publish dry-run (rav2d standalone)
-    runs-on: ubuntu-latest
+    name: standalone build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout (no submodules)
         uses: actions/checkout@v4
@@ -113,3 +123,30 @@ jobs:
 
       - name: cargo publish --dry-run (rav2d)
         run: cargo publish -p rav2d --dry-run
+
+      - name: build and run the CLI on the vendored asm
+        run: |
+          cargo build --release --locked -p rav2d-cli
+          ./target/release/rav2d crates/rav2d/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu -o out.y4m
+          head -c 64 out.y4m | head -1
+
+  # rust-version in Cargo.toml is a promise to users on older toolchains; check
+  # it, since nothing else here builds with anything but the latest stable.
+  msrv:
+    name: MSRV (rust-version)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (no submodules)
+        uses: actions/checkout@v4
+
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(awk -F'"' '/^rust-version/ {print $2}' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: cargo check
+        run: cargo check --locked -p rav2d -p rav2d-cli
