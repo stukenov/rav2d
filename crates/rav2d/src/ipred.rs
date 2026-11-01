@@ -2526,16 +2526,20 @@ pub fn cfl_pred<BD: BitDepth>(
             u_lp = (u_lp as isize + cstride) as usize;
             v_lp = (v_lp as isize + cstride) as usize;
         }
+        // Rows below the frame edge repeat the last visible left neighbour
+        // (C `uleft[-cstride]`, where `uleft` already points one column left).
+        let u_last = u_buf[(u_lp as isize - cstride) as usize - 1];
+        let v_last = v_buf[(v_lp as isize - cstride) as usize - 1];
         for y in ylim..h {
             if !skipv || y & 1 == 0 {
                 dc[0] += l;
-                dc[1] += Into::<i32>::into(u_buf[(u_lp as isize - cstride) as usize]);
-                dc[2] += Into::<i32>::into(v_buf[(v_lp as isize - cstride) as usize]);
+                dc[1] += Into::<i32>::into(u_last);
+                dc[2] += Into::<i32>::into(v_last);
             }
             if n_left > 0 && (y & (step - 1)) ^ (step >> 1) == 0 {
                 edge[0][i] = BD::Pixel::from_i32(l >> 3);
-                edge[1][i] = u_buf[(u_lp as isize - cstride) as usize];
-                edge[2][i] = v_buf[(v_lp as isize - cstride) as usize];
+                edge[1][i] = u_last;
+                edge[2][i] = v_last;
                 i += 1;
             }
         }
@@ -3558,6 +3562,56 @@ mod tests {
             for x in 0..4 {
                 assert_eq!(u_buf[off + y * 16 + x], 128);
                 assert_eq!(v_buf[off + y * 16 + x], 128);
+            }
+        }
+    }
+
+    /// A block that crosses the bottom of the frame (`hpad > 0`) derives its
+    /// implicit alpha as if the rows below the frame repeated the last visible
+    /// left neighbour. The port once read the block's own column there, which
+    /// is not predicted yet (1080p crowd_run, chroma off at the bottom edge).
+    #[test]
+    fn test_cfl_pred_implicit_pads_left_neighbour_below_frame() {
+        const S: usize = 32;
+        let off = S + 1; // block at (1, 1); its left neighbours are column 0
+        let mut ypx = vec![0u8; S * 18];
+        let mut u = vec![0u8; S * 18];
+        let mut v = vec![0u8; S * 18];
+        // 12 visible rows; luma below them repeats the last one, as the
+        // padded prediction assumes. Chroma below them is junk.
+        for y in 0..16 {
+            let r = (1 + y) * S;
+            let yv = y.min(11);
+            ypx[r] = (40 + 9 * yv) as u8;
+            for x in 1..5 {
+                ypx[r + x] = (50 + 7 * yv + 3 * x) as u8;
+            }
+            u[r] = if y < 12 { (200 - 5 * y) as u8 } else { 255 };
+            v[r] = if y < 12 { (60 + 3 * y) as u8 } else { 255 };
+        }
+        let flags = CFL_HAS_LEFT as u32;
+        let run = |hpad: usize, u_buf: &mut Vec<u8>, v_buf: &mut Vec<u8>| {
+            let empty = [0u8; 8];
+            cfl_pred_8bpc(
+                &empty, 0, &empty, 0, &empty, 0, &ypx, off, u_buf, off, v_buf, off, S as isize,
+                S as isize, 0, hpad, 4, 16, flags, true, 0, 0,
+            );
+        };
+        // Padded: rows 12..16 are below the frame, the block area is unset.
+        let (mut u_pad, mut v_pad) = (u.clone(), v.clone());
+        run(1, &mut u_pad, &mut v_pad);
+        // Reference: the same rows written out as the padding defines them.
+        let (mut u_ref, mut v_ref) = (u.clone(), v.clone());
+        for y in 12..16 {
+            u_ref[(1 + y) * S] = u_ref[12 * S];
+            v_ref[(1 + y) * S] = v_ref[12 * S];
+        }
+        run(0, &mut u_ref, &mut v_ref);
+        for y in 0..12 {
+            for x in 0..4 {
+                let i = off + y * S + x;
+                assert_eq!(u_pad[i], u_ref[i], "u at ({x},{y})");
+                assert_eq!(v_pad[i], v_ref[i], "v at ({x},{y})");
             }
         }
     }

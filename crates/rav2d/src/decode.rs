@@ -2336,6 +2336,11 @@ pub struct ReconScratch {
     /// Current palette block's packed index map (`t->scratch.pal_idx_y`). `pack`
     /// stores two indices per byte; sized for the largest palette block (64x64).
     pub pal_idx_y: Box<[u8; 64 * 64]>,
+    /// Compound mask (`t->scratch.seg_mask`). Kept across the 64x64 units of a
+    /// wider block: each unit's luma `w_mask` writes its part of the
+    /// difference-weighted mask, and the chroma pass, run once with the last
+    /// unit, blends with the mask of the whole block.
+    pub seg_mask: Vec<u8>,
 }
 
 impl Default for ReconScratch {
@@ -2353,6 +2358,7 @@ impl Default for ReconScratch {
             al_pal: [[[0u16; 8]; 64]; 2],
             pal: [0u16; 8],
             pal_idx_y: Box::new([0u8; 64 * 64]),
+            seg_mask: vec![0u8; 128 * 128],
         }
     }
 }
@@ -12094,6 +12100,53 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
     chroma_stage: ChromaPhase,
     fi: &SbFrameInfo,
 ) -> Result<(), ()> {
+    // The mask outlives this call (see `ReconScratch::seg_mask`); take it out
+    // of the scratch so `recon` can still be borrowed mutably below.
+    let mut seg_mask = std::mem::take(&mut recon.scratch.seg_mask);
+    seg_mask.resize(128 * 128, 0);
+    let res = recon_b_inter_compound_unit(
+        recon,
+        msac,
+        cdf_m,
+        a,
+        l,
+        b,
+        bx,
+        by,
+        cbx,
+        cby,
+        lbs,
+        cbs,
+        has_luma,
+        has_chroma,
+        chroma_stage,
+        fi,
+        &mut seg_mask,
+    );
+    recon.scratch.seg_mask = seg_mask;
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recon_b_inter_compound_unit<BD: crate::pixel::BitDepth>(
+    recon: &mut ReconCtx<BD>,
+    msac: &mut MsacContext,
+    cdf_m: &mut CdfModeContext,
+    a: &mut BlockContext,
+    l: &mut BlockContext,
+    b: &Av2Block,
+    bx: i32,
+    by: i32,
+    cbx: i32,
+    cby: i32,
+    lbs: BlockSize,
+    cbs: BlockSize,
+    has_luma: bool,
+    has_chroma: bool,
+    chroma_stage: ChromaPhase,
+    fi: &SbFrameInfo,
+    seg_mask: &mut [u8],
+) -> Result<(), ()> {
     let bd = recon.bd;
     let refs = unsafe { b.ref_pair.r };
     let ref0 = refs[0] as usize;
@@ -12176,8 +12229,6 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
     }
 
     // ---- luma ----
-    let mut seg_mask = vec![0u8; 128 * 128];
-    let mut seg_mask_stride = 0usize;
     if has_luma {
         let b_dim = &BLOCK_DIMENSIONS[lbs as u8 as usize];
         let bw4 = b_dim[0] as i32;
@@ -12193,19 +12244,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
         if is_opfl {
             let w4 = imin(bw4, fi.bw - bx);
             let h4 = imin(bh4, fi.bh - by);
-            opfl_bacp = opfl_pred_luma(
-                recon,
-                &mut tmp,
-                &mut seg_mask,
-                b,
-                bx,
-                by,
-                bw4,
-                bh4,
-                w4,
-                h4,
-                fi,
-            );
+            opfl_bacp = opfl_pred_luma(recon, &mut tmp, seg_mask, b, bx, by, bw4, bh4, w4, h4, fi);
         } else {
             for i in 0..2 {
                 if warp_use[i] {
@@ -12277,7 +12316,17 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
             }
             3 => {
                 // SEG: luma w_mask derives subsampled seg mask for chroma reuse.
-                seg_mask_stride = imin(bw4 * 4 >> ss_hor, 64) as usize;
+                // The stride and offset follow the whole block, so the 64x64
+                // units of a wider block each fill their own part (C
+                // `mask_stride` from `b->bs`).
+                let bs_w4 = BLOCK_DIMENSIONS[b.bs as u8 as usize][0] as i32;
+                let seg_mask_stride = imin(bs_w4 * 4 >> ss_hor, 64) as usize;
+                let mask_off = if imin(bw4, bh4) < 16 {
+                    0
+                } else {
+                    ((by >> ss_ver) & 15) as usize * 4 * seg_mask_stride
+                        + ((bx >> ss_hor) & 15) as usize * 4
+                };
                 let (a0, a1) = if mask_sign == 0 {
                     (&tmp0[0], &tmp1[0])
                 } else {
@@ -12291,7 +12340,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                     a1,
                     w,
                     h,
-                    &mut seg_mask,
+                    &mut seg_mask[mask_off..],
                     seg_mask_stride,
                     mask_sign,
                     ss_hor != 0,
@@ -12311,7 +12360,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                     };
                     if bacp == 2 {
                         bacp = crate::recon::get_mask(
-                            &mut seg_mask,
+                            seg_mask,
                             (bw4 * 4) as usize,
                             bx,
                             0,
@@ -12526,7 +12575,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                     cby,
                     r_pair,
                     false,
-                    &mut seg_mask,
+                    seg_mask,
                     fi,
                 );
                 if pl == 1 {
@@ -12601,7 +12650,14 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                     } else {
                         (&tmp1[0], &tmp0[0])
                     };
-                    mc_mask(bd, dst, uv_stride, a0, a1, cw, ch, &seg_mask);
+                    // The mask of the whole block, written by the luma units.
+                    let mask_off = if imin(cbw4, cbh4) < 16 {
+                        0
+                    } else {
+                        ((cby >> ss_ver) & 15) as usize * 4 * cw
+                            + ((cbx >> ss_hor) & 15) as usize * 4
+                    };
+                    mc_mask(bd, dst, uv_stride, a0, a1, cw, ch, &seg_mask[mask_off..]);
                 }
                 _ => {
                     if cwp_idx == 8 {
@@ -12613,7 +12669,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                         // NOT inherited from the luma plane.
                         if is_opfl {
                             if chroma_bacp {
-                                mc_mask(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask);
+                                mc_mask(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, seg_mask);
                             } else {
                                 mc_avg(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
                             }
@@ -12621,7 +12677,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                             if pl == 1 {
                                 chroma_bacp = if imp_base {
                                     crate::recon::get_mask(
-                                        &mut seg_mask,
+                                        seg_mask,
                                         (cbw4 * 4 >> ss_hor) as usize,
                                         cbx >> ss_hor,
                                         0,
@@ -12640,7 +12696,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                                 };
                             }
                             if chroma_bacp {
-                                mc_mask(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, &seg_mask);
+                                mc_mask(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch, seg_mask);
                             } else {
                                 mc_avg(bd, dst, uv_stride, &tmp0[0], &tmp1[0], cw, ch);
                             }
@@ -12652,7 +12708,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
             }
             let _ = opfl_bacp_chroma;
         }
-        let _ = (seg_mask_stride, cb_dim);
+        let _ = cb_dim;
 
         // Chroma residual per uvtx TU (both planes + CCTX).
         let seg_id = b.seg_id as usize;
@@ -14968,7 +15024,9 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
                 h4c,
                 bx,
                 by,
-                bs,
+                // The whole coding block, not the 64x64 unit being predicted:
+                // the units of a wider block share one model (C `b->bs`).
+                unsafe { BlockSize::from_raw(b.bs) },
                 fi,
             );
         } else if motion_mode == MotionMode::InterIntra as u8
