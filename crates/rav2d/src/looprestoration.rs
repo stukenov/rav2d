@@ -2000,10 +2000,13 @@ fn lr_stripe<P: Pixel>(
             None
         };
 
-        // GDF prep: compute the per-pixel error into gdf_err.
+        // GDF prep: compute the per-pixel error into gdf_err. Unlike the
+        // Wiener kernels, which skip the first 2 of the 6 saved rows
+        // themselves (looprestoration_tmpl.c `lpf += 2 * stride`), gdf_prep
+        // reads all 6 from the start of the slot.
         if gdf_enabled {
             let (top_slice, top_off): (&[P], usize) = match cdef_top {
-                Some(off) => (&ctx.lr_cdef_line[plane_u], off),
+                Some(off) => (&ctx.lr_cdef_line[plane_u], off - 2 * stride_u),
                 None => (&ctx.lr_db_line[plane_u], lpf_off),
             };
             gdf_prep(

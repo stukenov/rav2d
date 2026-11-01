@@ -2137,17 +2137,30 @@ const AVMENC_PENDING: &[(&str, &str)] = &[
     ),
     ("avmenc-resize.obu", "dav2d hangs on it; scaled references"),
     (
-        "avmenc-tiles.obu",
-        "key frame off by 1 near tile edges (GDF stripes, chroma deblock); later frames fail",
+        "avmenc-tilesnolf.obu",
+        "disable_loopfilters_across_tiles is parsed but no filter honours it yet",
     ),
 ];
 
 /// Vectors where rav2d follows avm and dav2d does not: only avmdec's md5 is
 /// checked, the frame-by-frame comparison against dav2d is skipped.
-const AVMENC_AVMDEC_ONLY: &[(&str, &str)] = &[(
-    "avmenc-unitsb.obu",
-    "dav2d reads the GDF adaptive bit only for frames over 128px; avm counts units",
-)];
+const AVMENC_AVMDEC_ONLY: &[(&str, &str)] = &[
+    (
+        "avmenc-unitsb.obu",
+        "dav2d reads the GDF adaptive bit only for frames over 128px; avm counts units",
+    ),
+    // dav2d cannot decode streams with more than one tile: it fails to parse
+    // avmenc-tiles and stops after a frame or two of the others.
+    ("avmenc-tiles.obu", "dav2d cannot decode multi-tile streams"),
+    (
+        "avmenc-tilecols.obu",
+        "dav2d cannot decode multi-tile streams",
+    ),
+    (
+        "avmenc-tilerows.obu",
+        "dav2d cannot decode multi-tile streams",
+    ),
+];
 
 fn avmenc_pending(path: &std::path::Path) -> Option<&'static str> {
     let name = path.file_name()?.to_str()?;

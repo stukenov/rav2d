@@ -211,6 +211,38 @@ pub fn init_quant_tables_fi(fi: &SbFrameInfo, qidx: i32, dq: &mut [[[u32; 2]; 3]
     }
 }
 
+/// Reset the left context at the start of a tile's superblock row. The
+/// deblocking transform levels (`tx_lpf_*`) are kept when `tile_col > 0`:
+/// tile columns are decoded interleaved per superblock row, so `l` still holds
+/// the right edge of the tile to the left on these rows, and avm filters a
+/// tile edge with the real neighbour's transform size, not with the
+/// "no neighbour" default dav2d resets to.
+fn reset_left_context(l: &mut BlockContext, keyframe: bool, is_tip_frame: bool, tile_col: usize) {
+    let (y, uv) = (l.tx_lpf_y, l.tx_lpf_uv);
+    reset_context(l, keyframe, is_tip_frame);
+    if tile_col > 0 {
+        l.tx_lpf_y = y;
+        l.tx_lpf_uv = uv;
+    }
+}
+
+/// Give tile row `tr` the deblocking transform levels its top edge sees in
+/// avm: the bottom row of tile row `tr - 1`, not the reset default (see
+/// `reset_left_context`).
+fn inherit_above_tx_lpf(a: &mut [BlockContext], tr: usize, sb256w: usize) {
+    if tr == 0 {
+        return;
+    }
+    for i in 0..sb256w {
+        let (y, uv) = (
+            a[(tr - 1) * sb256w + i].tx_lpf_y,
+            a[(tr - 1) * sb256w + i].tx_lpf_uv,
+        );
+        a[tr * sb256w + i].tx_lpf_y = y;
+        a[tr * sb256w + i].tx_lpf_uv = uv;
+    }
+}
+
 pub fn reset_context(ctx: &mut BlockContext, keyframe: bool, is_tip_frame: bool) {
     ctx.tx_lpf_y.fill(3);
     ctx.tx_lpf_uv.fill(2);
@@ -2246,6 +2278,7 @@ pub struct ReconFrameCtx<'a> {
     pub seq_fsc: bool,
     pub seq_ist: [bool; 2],
     pub seq_cctx: bool,
+    pub chroma_dctonly: bool,
     pub layout: crate::headers::PixelLayout,
     // Extra frame/seq state needed by the reconstruction (coef + intra) leaf.
     pub bitdepth: u32,
@@ -3030,6 +3063,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
         seq_fsc: seq_hdr.fsc,
         seq_ist: seq_hdr.ist,
         seq_cctx: seq_hdr.cctx,
+        chroma_dctonly: seq_hdr.chroma_dctonly,
         layout: seq_hdr.layout,
         bitdepth: bitdepth_v,
         seg_lossless: frame_hdr.segmentation.lossless,
@@ -3247,6 +3281,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                     (Vec::new(), Vec::new(), Vec::new())
                 };
             for tr in 0..rows {
+                inherit_above_tx_lpf(a, tr as usize, sb256w as usize);
                 // Collect per-tile-col MSAC state that must stay live across the sby
                 // loop (each tile-col's symbol decoder advances one sbrow at a time but
                 // we now interleave tile-cols within a sbrow).
@@ -3349,7 +3384,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                             if by < rs || by >= re {
                                 continue;
                             }
-                            reset_context(&mut l, keyframe, is_tip);
+                            reset_left_context(&mut l, keyframe, is_tip, tc);
                             decode_tile_sbrow_entropy(
                                 bd_local,
                                 &fis[tc],
@@ -3430,6 +3465,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                         for ctx in a.iter_mut().skip(base).take(n) {
                             reset_context(ctx, keyframe, is_tip);
                         }
+                        inherit_above_tx_lpf(a, tr as usize, n);
                     }
                     // PHASE A: decode every superblock-row across all tile-cols.
                     let mut by = row_rs;
@@ -3478,7 +3514,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                             if by < rs || by >= re {
                                 continue;
                             }
-                            reset_context(&mut l, keyframe, is_tip);
+                            reset_left_context(&mut l, keyframe, is_tip, tc);
                             decode_tile_sbrow_entropy(
                                 bd_local,
                                 &fis[tc],
@@ -3562,7 +3598,7 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
                             if by < rs || by >= re {
                                 continue;
                             }
-                            reset_context(&mut l, keyframe, is_tip);
+                            reset_left_context(&mut l, keyframe, is_tip, tc);
                             decode_tile_sbrow_entropy(
                                 bd_local,
                                 &fis[tc],
@@ -4035,6 +4071,33 @@ fn filter_sbrow<BD: crate::pixel::BitDepth + crate::internal::LfPixelBufs>(
         // before luma, and the chroma single-Wiener reads luma cross-component
         // (dav2d's f->lf.p[0]).
         let luma_snapshot = dst_y.to_vec();
+        // The rows just above a tile row, as they are before this superblock
+        // row's restoration rewrites them: avm filters a tile row's first
+        // stripe against the unfiltered rows across the boundary
+        // (`copy_above = 0`), and dav2d keeps them in `lr_cdef_line`
+        // (lr_apply_tmpl.c `copyNlines`, slot `tile_row - 1`). Luma keeps 6
+        // rows, chroma 2.
+        let tile_row_start = lf.start_of_tile_row.get(sby as usize).copied().unwrap_or(0);
+        let mut cdef_line: [Vec<BD::Pixel>; 3] = Default::default();
+        if sby > 0 && tile_row_start & 1 != 0 {
+            let slot = (tile_row_start >> 1) as usize - 1;
+            let y0 = (sby as usize) << (6 + frame_hdr.sb128 as usize);
+            let ss_ver = (seq_hdr.layout == crate::headers::PixelLayout::I420) as usize;
+            let planes: [(&[BD::Pixel], usize, usize, usize); 3] = [
+                (&*dst_y, fp.y_stride.unsigned_abs(), 6, y0),
+                (&*dst_u, fp.uv_stride.unsigned_abs(), 2, y0 >> ss_ver),
+                (&*dst_v, fp.uv_stride.unsigned_abs(), 2, y0 >> ss_ver),
+            ];
+            for (pl, (src, stride, n, top)) in planes.into_iter().enumerate() {
+                if src.is_empty() || top < n {
+                    continue;
+                }
+                let mut buf = vec![BD::Pixel::default(); (slot + 1) * n * stride];
+                let rows = &src[(top - n) * stride..top * stride];
+                buf[slot * n * stride..].copy_from_slice(rows);
+                cdef_line[pl] = buf;
+            }
+        }
         let dsp_lr = crate::dsp::LoopRestorationDSPContext::default();
         // PC/NS wiener tables, selected by the qidx bucket computed in init_wiener
         // (dav2d decode.c:82-99). Empty slices when the corresponding filter type
@@ -4067,7 +4130,7 @@ fn filter_sbrow<BD: crate::pixel::BitDepth + crate::internal::LfPixelBufs>(
             mask: &lf.mask,
             lr_mask: &lf.lr_mask,
             lr_db_line: BD::lr_db_line(lf),
-            lr_cdef_line: BD::lr_cdef_line(lf),
+            lr_cdef_line: &cdef_line,
             lf_p_luma: &luma_snapshot,
             base_q: lf.base_q,
             gdf_ref_dst_idx: lf.gdf_ref_dst_idx,
@@ -9516,8 +9579,9 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
 /// `alpha`. `plane` is 0 for luma, 1 for U, 2 for V. `bawp_idx` is the parsed
 /// per-block index (luma); chroma always passes 1.
 ///
-/// Edge handling assumes a single tile (`col_start == row_start == 0`) and the
-/// single-thread, full-frame-alias decode used by the conformance harness, so
+/// Neighbour availability follows the current tile (recon_tmpl.c `bawp`), and
+/// the single-thread, full-frame-alias decode used by the conformance harness
+/// means
 /// the top template row resolves to `dst[-stride]` in both the in-SB and the
 /// SB-edge case (recon_tmpl.c:2780-2783 with `prefilter_data_full_frame`).
 #[allow(clippy::too_many_arguments)]
@@ -9577,11 +9641,18 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
     // defaults
     recon.bawp_ab[plane] = (256, 0);
 
-    // Inter BAWP (refp != cur): tile edges span the whole frame.
-    let tile_top_edge = 0i32;
-    let tile_left_edge = 0i32;
-    let tile_bottom_edge = fi.bh * v_mul;
-    let tile_right_edge = fi.bw * h_mul;
+    // Inter BAWP may reference anywhere in the frame; IntraBC morph
+    // (`ref_pic == None`, refp == cur) stays inside the current tile.
+    let (tile_top_edge, tile_left_edge, tile_bottom_edge, tile_right_edge) = if ref_pic.is_none() {
+        (
+            fi.tile_row_start * v_mul,
+            fi.tile_col_start * h_mul,
+            fi.tile_row_end * v_mul,
+            fi.tile_col_end * h_mul,
+        )
+    } else {
+        (0, 0, fi.bh * v_mul, fi.bw * h_mul)
+    };
 
     let mvx = (mv.x + 3 + (mv.x >= 0) as i32) >> (3 + ss_hor);
     let mvy = (mv.y + 3 + (mv.y >= 0) as i32) >> (3 + ss_ver);
@@ -9615,9 +9686,9 @@ fn bawp_plane<BD: crate::pixel::BitDepth>(
             [[0, 4], [3, 3], [4, 4]],
         ],
     ];
-    // Single tile: col_start == row_start == 0.
-    let have_left = bx > 0;
-    let have_above = by > 0;
+    // The template neighbours must be in the current tile.
+    let have_left = bx > fi.tile_col_start;
+    let have_above = by > fi.tile_row_start;
     let lw4 = (imin(crate::intops::ulog2(w4 as u32), 2) - ss_hor) as usize;
     let lh4 = (imin(crate::intops::ulog2(h4 as u32), 2) - ss_ver) as usize;
     let idx = (have_above && have_left) as usize;
@@ -10914,7 +10985,7 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
             seq_fsc: recon.frame.seq_fsc,
             seq_ist: recon.frame.seq_ist,
             seq_cctx: recon.frame.seq_cctx,
-            chroma_dctonly: false,
+            chroma_dctonly: recon.frame.chroma_dctonly,
             reduced_txtp_set: recon.frame.reduced_txtp_set,
             tcq_enabled: recon.frame.tcq,
             parity_hiding: recon.frm_hdr.parity_hiding != 0,
@@ -11255,7 +11326,7 @@ fn inter_chroma_residual_8bpc<BD: crate::pixel::BitDepth>(
                             seq_fsc: recon.frame.seq_fsc,
                             seq_ist: recon.frame.seq_ist,
                             seq_cctx: recon.frame.seq_cctx,
-                            chroma_dctonly: false,
+                            chroma_dctonly: recon.frame.chroma_dctonly,
                             reduced_txtp_set: recon.frame.reduced_txtp_set,
                             tcq_enabled: recon.frame.tcq,
                             parity_hiding: recon.frm_hdr.parity_hiding != 0,
@@ -16231,7 +16302,7 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
                         seq_fsc: recon.frame.seq_fsc,
                         seq_ist: recon.frame.seq_ist,
                         seq_cctx: recon.frame.seq_cctx,
-                        chroma_dctonly: false,
+                        chroma_dctonly: recon.frame.chroma_dctonly,
                         reduced_txtp_set: recon.frame.reduced_txtp_set,
                         tcq_enabled: recon.frame.tcq,
                         parity_hiding: recon.frm_hdr.parity_hiding != 0,
@@ -16999,7 +17070,7 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
             seq_fsc: recon.frame.seq_fsc,
             seq_ist: recon.frame.seq_ist,
             seq_cctx: recon.frame.seq_cctx,
-            chroma_dctonly: false,
+            chroma_dctonly: recon.frame.chroma_dctonly,
             reduced_txtp_set: recon.frame.reduced_txtp_set,
             tcq_enabled: recon.frame.tcq,
             parity_hiding: recon.frm_hdr.parity_hiding != 0,
@@ -18844,6 +18915,7 @@ mod tests {
                 seq_fsc: false,
                 seq_ist: [false; 2],
                 seq_cctx: false,
+                chroma_dctonly: false,
                 layout: crate::headers::PixelLayout::I420,
                 bitdepth: 8,
                 seg_lossless: [0u8; crate::headers::MAX_SEGMENTS],

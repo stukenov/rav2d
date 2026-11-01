@@ -26,6 +26,9 @@ rtxtype2      64x64   10 8  420 --reduced-tx-type-set=2
 mfh           64x64   10 8  420 --enable-mfh-obu-signaling=1
 unitsb        128x64  6  8  420 --ccso-unit-matches-sb=1 --gdf-unit-matches-sb=1
 tiles         128x128 4  8  420 --tile-columns=1 --tile-rows=1
+tilecols      128x64  4  8  420 --tile-columns=1
+tilerows      64x128  4  8  420 --tile-rows=1
+tilesnolf     128x128 4  8  420 --tile-columns=1 --tile-rows=1 --disable-loopfilters-across-tiles=1
 resize        64x64   10 8  420 --resize-mode=1 --resize-denominator=12
 grain         64x64   6  8  420 --film-grain-test=1
 odd           66x50   6  8  420
@@ -34,6 +37,7 @@ i444          64x64   6  8  444 --profile=1
 i422          64x64   6  8  422 --profile=2
 i400          64x64   6  8  400 --monochrome
 noibp         64x64   10 8  420 --enable-ibp=0
+chromadct     64x64   10 8  420 --enable-chroma-dctonly=1
 lossless128   128x128 3  8  420 --lossless=1
 b128          128x128 6  8  420
 nocdef        128x128 6  8  420 --enable-cdef=0
