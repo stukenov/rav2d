@@ -4569,11 +4569,13 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
 
     // ---- decode -----------------------------------------------------------
     let in_cdf_ref = fc.in_cdf.take();
-    // Multi-threaded settings run the two-pass decode (entropy pass staging
-    // blocks/coefficients, then a bitstream-free reconstruction pass) — the
-    // foundation the sbrow pipeline schedules across; single-threaded settings
-    // keep the fused single pass.
-    let n_passes = if n_tc > 1 { 2 } else { 1 };
+    // Always the fused single pass. The two-pass decode (entropy pass staging
+    // blocks/coefficients, then a bitstream-free reconstruction pass) is the
+    // foundation for an sbrow pipeline that does not exist yet, so it bought
+    // no parallelism, and it was wrong: with n_tc > 1 it changed the output of
+    // 28 of 41 test vectors (see zettel two-pass-decode-is-off). Turn it back
+    // on together with the scheduler, gated by mt_matches_single_thread.
+    let n_passes = 1;
     decode_frame(&mut fc, n_tc, n_passes, in_cdf_ref.as_ref(), qcat)?;
 
     // ---- Reference-list + CDF update per refresh_frame_flags (decode.c:5694) ----

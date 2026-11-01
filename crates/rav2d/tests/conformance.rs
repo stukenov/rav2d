@@ -2898,17 +2898,23 @@ fn hbd_decode_smoke() {
 /// a determinism guard.
 #[test]
 fn mt_matches_single_thread() {
-    let media_clips = [
-        "avm-v14.1.0-bus.64x64.l5.obu",
-        "avm-v14.1.0-bus.64x64.l5.lossless.obu",
-        "avm-v14.1.0-bus.64x64.l5.opfl0-refinemv0.obu",
-        "avm-v14.1.0-bus.64x64.l1.sdp0.obu",
-        "avm-v14.1.0-bus.64x64.l1.sdp1.obu",
-        "avm-v14.1.0-bus.352x288.l5.seg1.obu",
-        "avm-v14.1.0-bus.352x288.l10.deltaq1.obu",
-        "avm-v14.1.0-bus.352x288.l1.partial_lossless.obu",
-        "avm-v14.1.0-hm.64x64.l5.filmgrain.obu",
-    ];
+    // Every vector that decodes correctly, not a hand-picked list: the qm1
+    // clip was added after this test and differed between 1 and 4 threads
+    // for months without anything noticing.
+    let mut clips: Vec<PathBuf> = std::fs::read_dir(media(""))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "obu"))
+                .collect()
+        })
+        .unwrap_or_default();
+    clips.extend(
+        avmenc_vectors()
+            .into_iter()
+            .filter(|p| avmenc_pending(p).is_none()),
+    );
+    clips.sort();
     let data_clips = ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"];
 
     let mut failures = Vec::new();
@@ -2951,8 +2957,9 @@ fn mt_matches_single_thread() {
         }
     };
 
-    for clip in media_clips {
-        check(clip, &media(clip));
+    for clip in &clips {
+        let name = clip.file_name().unwrap().to_string_lossy().to_string();
+        check(&name, clip);
     }
     for clip in data_clips {
         check(clip, &data(clip));
