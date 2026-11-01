@@ -574,7 +574,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rav2d"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cc",
  "criterion",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "rav2d-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "rav2d",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "rav2d-sys"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bindgen",
  "cc",
