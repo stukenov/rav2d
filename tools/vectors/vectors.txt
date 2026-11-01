@@ -42,3 +42,8 @@ lossless128   128x128 3  8  420 --lossless=1
 b128          128x128 6  8  420
 nocdef        128x128 6  8  420 --enable-cdef=0
 norest        128x128 6  8  420 --enable-restoration=0
+# avmenc-crowd540 is not made by generate.sh: it is the first 4 frames of
+# crowd_run_1080p50 (Xiph derf) halved with half_y4m.py to 960x540, then
+#   avmenc --good --cpu-used=5 --end-usage=q --qp=150 --limit=4 --obu
+# (about 30 minutes). It has 64x128 COMP_SEG blocks, which no bus_cif crop
+# produces; see zettel/small-vectors-miss-big-block-paths.md.

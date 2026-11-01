@@ -15,8 +15,9 @@ The last two share a cause: blocks over 64px are predicted in 64x64
 units, and per-block state (the BAWP model, the mask) must span the units.
 
 Crops of the same clip (512x264 at qp 150, 190, 230) did not reproduce
-any of them: at that size the encoder chooses differently. The CfL case
-is pinned by a unit test; the 1080p streams stay outside the repository
-(390 KB each, about 7000 s to encode on a runner without multithreading).
-Run them by hand before a release: `tools/vectors` has no recipe for them
-yet, the clip is `crowd_run_1080p50` from Xiph derf.
+any of them: at that size the encoder chooses differently. The clip halved
+to 960x540 (`avmenc-crowd540`, 140 KB) catches the mask bug; the CfL case
+is pinned by a unit test. Nothing small catches the BAWP one, so the 1080p
+streams (390 KB each, about 7000 s to encode on a runner without
+multithreading) stay outside the repository and are run by hand before a
+release.

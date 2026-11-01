@@ -8,7 +8,7 @@
 
 **rav2d** is a memory-safe **AV2** video decoder in Rust, ported from [dav2d](https://code.videolan.org/videolan/dav2d) (the C reference decoder, an AV2 fork of dav1d).
 
-> The entire C decode path has been ported to Rust and is **bit-exact** with dav2d: every coding-order frame of every shipped conformance clip matches byte-for-byte, with in-loop filters off **and** on, for both 8-bit and 10-bit streams. On top of that, 33 of the 38 vectors encoded with the AOM reference encoder (`tests/data/avmenc`) match the md5 of `avmdec`, the AV2 reference decoder; the other five are listed [below](#status). **850 library (845 on x86) + 25 conformance + 16 CLI tests pass**, on the NEON and the all-scalar path alike.
+> The entire C decode path has been ported to Rust and is **bit-exact** with dav2d: every coding-order frame of every shipped conformance clip matches byte-for-byte, with in-loop filters off **and** on, for both 8-bit and 10-bit streams. On top of that, 34 of the 39 vectors encoded with the AOM reference encoder (`tests/data/avmenc`) match the md5 of `avmdec`, the AV2 reference decoder; the other five are listed [below](#status). **850 library (845 on x86) + 25 conformance + 16 CLI tests pass**, on the NEON and the all-scalar path alike.
 
 ## Status
 
