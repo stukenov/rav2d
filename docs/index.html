@@ -4,14 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>rav2d — Memory-Safe AV2 Video Decoder in Rust</title>
-    <meta name="description" content="rav2d is a complete Rust port of dav2d, the AV2 video decoder. 80K lines of memory-safe Rust, bit-exact with the C reference, 868 tests. Eliminates buffer overflows at compile time.">
+    <meta name="description" content="rav2d is a complete Rust port of dav2d, the AV2 video decoder. 78K lines of memory-safe Rust, bit-exact with the C reference and checked against the AOM reference decoder.">
     <meta property="og:title" content="rav2d — Memory-Safe AV2 Video Decoder in Rust">
-    <meta property="og:description" content="Complete Rust port of dav2d (AV2 decoder). 80K lines, bit-exact, 868 tests. Memory safety for untrusted bitstream parsing.">
+    <meta property="og:description" content="Rust port of dav2d (AV2 decoder). 78K lines, bit-exact with dav2d. Memory safety for untrusted bitstream parsing.">
     <meta property="og:url" content="https://stukenov.github.io/rav2d/">
     <meta property="og:type" content="website">
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="rav2d — Memory-Safe AV2 Video Decoder">
-    <meta name="twitter:description" content="Complete Rust port of dav2d. 80K lines, bit-exact, 868 tests. Buffer overflows eliminated at compile time.">
+    <meta name="twitter:description" content="Rust port of dav2d. 78K lines, bit-exact with dav2d. Memory safety for untrusted bitstreams.">
     <style>
         :root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --border: #30363d; --card: #161b22; }
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -45,13 +45,13 @@
 <body>
     <div class="container">
         <h1><span>rav2d</span></h1>
-        <p class="tagline">Memory-safe AV2 video decoder — complete Rust port of dav2d</p>
+        <p class="tagline">Memory-safe AV2 video decoder — a Rust port of dav2d</p>
 
         <div class="stats">
-            <div class="stat"><div class="stat-value">80K</div><div class="stat-label">Lines of Rust</div></div>
-            <div class="stat"><div class="stat-value">868</div><div class="stat-label">Tests Passing</div></div>
+            <div class="stat"><div class="stat-value">78K</div><div class="stat-label">Lines of Rust</div></div>
+            <div class="stat"><div class="stat-value">874</div><div class="stat-label">Tests Passing</div></div>
             <div class="stat"><div class="stat-value">bit-exact</div><div class="stat-label">vs dav2d, every frame</div></div>
-            <div class="stat"><div class="stat-value">100%</div><div class="stat-label">C Logic Ported</div></div>
+            <div class="stat"><div class="stat-value">29 / 34</div><div class="stat-label">AOM encoder vectors match avmdec</div></div>
         </div>
 
         <a href="https://github.com/stukenov/rav2d" class="cta">View on GitHub →</a>
@@ -81,7 +81,6 @@
             <div class="module">Motion compensation</div>
             <div class="module">Inverse transforms</div>
             <div class="module">Reference management</div>
-            <div class="module">Thread task scheduling</div>
             <div class="module">Compound prediction</div>
         </div>
 
@@ -94,13 +93,13 @@
         </ol>
 
         <h2>Quick Start</h2>
-        <pre style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0;"><code># Build dav2d first
-cd dav2d && mkdir build && cd build
-meson setup .. && ninja
+        <pre style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0;"><code># Use it (Rust 1.88+, no C toolchain needed)
+cargo add rav2d
+cargo install rav2d-cli    # rav2d input.obu -o out.y4m
 
-# Build & test rav2d
-cd ../..
-cargo build
+# Run the conformance suite (needs the dav2d C reference)
+git submodule update --init
+cd dav2d && meson setup build && ninja -C build && cd ..
 DYLD_LIBRARY_PATH=dav2d/build/src cargo test -p rav2d</code></pre>
 
         <h2>Related Projects</h2>

@@ -1,6 +1,8 @@
 [package]
 name = "rav2d-sys"
 version.workspace = true
+# Test-only conformance oracle; see README.md.
+publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

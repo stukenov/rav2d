@@ -2,7 +2,7 @@
 
 Raw FFI bindings to the [dav2d](https://code.videolan.org/videolan/dav2d) AV2 decoder C library, generated via [bindgen](https://github.com/rust-lang/rust-bindgen) from dav2d's public `dav2d.h`.
 
-These bindings link the dav2d C decoder so the pure-Rust [`rav2d`](../rav2d/) crate can run it side by side as the **bit-exact conformance reference** (re-exported as `rav2d::sys`). They wrap the public decode API — `dav2d_open` / `dav2d_send_data` / `dav2d_get_picture` / settings / picture types — not dav2d's internal DSP tables (those are not in the public header).
+These bindings link the dav2d C decoder so the test suite of the pure-Rust [`rav2d`](../rav2d/) crate can run it side by side as the **bit-exact conformance reference**. The crate is a path-only dev-dependency of `rav2d`, is not part of its published manifest, and is not itself published (`publish = false`; the 0.1 and 0.2 releases on crates.io are obsolete). They wrap the public decode API — `dav2d_open` / `dav2d_send_data` / `dav2d_get_picture` / settings / picture types — not dav2d's internal DSP tables (those are not in the public header).
 
 > The reusable NEON assembly dispatch lives in the [`rav2d`](../rav2d/) crate (`build.rs` + `mc_neon`/`ipred_neon`), which assembles dav2d's `.S` kernels directly; it is not exposed here.
 
