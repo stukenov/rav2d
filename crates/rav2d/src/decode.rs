@@ -409,7 +409,9 @@ pub fn setup_tile(
     if let Some(cdf) = in_cdf {
         ts.cdf = cdf.clone();
     } else {
-        ts.cdf = crate::cdf::CdfContext::init_from_defaults(qcat);
+        // Callers pass the frame's materialized defaults; this is only reached
+        // without a frame context.
+        ts.cdf = crate::cdf::CdfContext::init_from_defaults(qcat, false);
     }
     ts.last_qidx = frame_hdr.quant.yac as i32;
     ts.msac_buf = data.to_vec();
@@ -1567,6 +1569,7 @@ pub fn read_tx_part(
     bs: BlockSize,
     lossless: bool,
     txfm_switchable: bool,
+    reduced_tx_part_set: bool,
 ) {
     use crate::tables::BLOCK_DIMENSIONS;
 
@@ -1602,8 +1605,12 @@ pub fn read_tx_part(
                     as u8;
             } else if imax(bw4, bh4) >= 4 {
                 let ctx = (bw4 >= 4) as usize;
-                let tx_part_4way =
-                    msac.decode_bool_adapt(cdf_m.tx_part_1d(b.fsc as usize, inter, ctx));
+                // A reduced partition set has no 4-way split and codes no bit.
+                let tx_part_4way = if reduced_tx_part_set {
+                    0
+                } else {
+                    msac.decode_bool_adapt(cdf_m.tx_part_1d(b.fsc as usize, inter, ctx))
+                };
                 b.tx_part = TxPartition::H as u8 + ctx as u8 + tx_part_4way as u8 * 2;
             } else {
                 debug_assert!(bs == BlockSize::Bs4x8 || bs == BlockSize::Bs8x4);
@@ -2052,6 +2059,8 @@ pub struct SbFrameInfo {
     /// — the frame flag is inter-only syntax and stays 0 on key frames).
     pub seq_bawp: bool,
     pub txfm_switchable: bool,
+    /// `seq_hdr.reduced_tx_part_set`: no 4-way 1-D transform partition.
+    pub reduced_tx_part_set: bool,
     pub skip_mode_refs: RefPair,
     pub n_ref_frames: u8,
     pub warp_motion: bool,
@@ -2190,6 +2199,7 @@ impl SbFrameInfo {
             bawp: frame_hdr.bawp != 0,
             seq_bawp: seq_hdr.bawp,
             txfm_switchable: frame_hdr.txfm_mode == crate::headers::TxfmMode::Switchable,
+            reduced_tx_part_set: seq_hdr.reduced_tx_part_set,
             skip_mode_refs,
             n_ref_frames: frame_hdr.n_ref_frames,
             warp_motion: frame_hdr.warp_motion != 0,
@@ -4219,15 +4229,32 @@ pub fn decode_frame(
         }
     })?;
 
-    // Finalize the output CDF (dav2d decode.c:5256-5272). For the single-thread
-    // path the update tile's adapted CDF becomes `out_cdf` with its symbol counts
-    // reset. avg_cdf_type (tile CDF shift/accumulate) is not exercised by the
-    // single-tile bring-up clips and is deferred. Only produced when CDF update
-    // is enabled (otherwise refs keep `in_cdf`, handled by the ref-list update).
+    // Finalize the output CDF (dav2d decode.c, after decode_frame_main), with
+    // its symbol counts reset. With avg_cdf_type and more than one tile it is
+    // the average of all tiles' adapted CDFs (each shifted by log2 of the tile
+    // count, then summed); otherwise the update tile's. Only produced when CDF
+    // update is enabled (otherwise refs keep `in_cdf`, handled by the ref-list
+    // update).
     if frame_hdr.tip.frame_mode != 2 && frame_hdr.disable_cdf_update == 0 {
-        let upd = frame_hdr.tiling.update as usize;
-        if let Some(ts) = fc.ts.get(upd) {
-            let mut out = ts.cdf.clone();
+        let t = &frame_hdr.tiling.t;
+        let shift = (t.log2_cols + t.log2_rows) as u32;
+        let n_tiles = 1usize << shift;
+        // dav2d averages over 1 << shift tile states; uniform tiling can code
+        // fewer tiles than that, and then there is nothing to average over.
+        let all_tiles = t.cols as usize * t.rows as usize == n_tiles && fc.ts.len() == n_tiles;
+        let out = if shift != 0 && seq_hdr.avg_cdf_type != 0 && all_tiles {
+            let mut out = fc.ts[0].cdf.clone();
+            out.shift(&fc.ts[0].cdf, shift);
+            for ts in &fc.ts[1..n_tiles] {
+                out.shift_accumulate(&ts.cdf, shift);
+            }
+            Some(out)
+        } else {
+            fc.ts
+                .get(frame_hdr.tiling.update as usize)
+                .map(|ts| ts.cdf.clone())
+        };
+        if let Some(mut out) = out {
             out.reset_count(frame_hdr.is_key_or_intra());
             fc.out_cdf = Some(std::sync::Arc::new(out));
         }
@@ -4393,7 +4420,13 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
         || frame_hdr.no_cross_frame_context != 0
     {
         fc.use_pri_sec_cdf = 0;
-        None
+        // Materialized, so a reference refreshed without CDF update keeps the
+        // defaults of its own quantizer category, as dav2d's static context
+        // does, rather than taking the category of whichever frame reads it.
+        Some(crate::cdf::CdfContext::init_from_defaults(
+            qcat,
+            seq_hdr.reduced_tx_part_set,
+        ))
     } else {
         // Primary/secondary CDF averaging (decode.c:5477-5491). When enabled the
         // entropy context is the weighted average of the primary and secondary
@@ -4408,16 +4441,21 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
         let pri_ref = frame_hdr.refidx[p_ref_idx as usize] as usize;
         if use_pri_sec {
             let sec_ref = frame_hdr.refidx[s_ref_idx as usize] as usize;
-            let default_cdf = crate::cdf::CdfContext::init_from_defaults(qcat);
+            let default_cdf =
+                crate::cdf::CdfContext::init_from_defaults(qcat, seq_hdr.reduced_tx_part_set);
             let src1 = c.refs[pri_ref].cdf.as_deref().unwrap_or(&default_cdf);
             let src2 = c.refs[sec_ref].cdf.as_deref().unwrap_or(&default_cdf);
-            let mut out = crate::cdf::CdfContext::init_from_defaults(qcat);
+            let mut out =
+                crate::cdf::CdfContext::init_from_defaults(qcat, seq_hdr.reduced_tx_part_set);
             out.pri_sec_average(
                 &src1.m, &src1.coef, &src1.mv, &src1.dmv, &src2.m, &src2.coef, &src2.mv, &src2.dmv,
             );
             Some(out)
         } else {
-            c.refs[pri_ref].cdf.as_ref().map(|a| (**a).clone())
+            Some(c.refs[pri_ref].cdf.as_ref().map_or_else(
+                || crate::cdf::CdfContext::init_from_defaults(qcat, seq_hdr.reduced_tx_part_set),
+                |a| (**a).clone(),
+            ))
         }
     };
 
@@ -6266,7 +6304,15 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     // TX partition (intra path)
     if b.is_intra != 0 && !intrabc && has_luma {
         let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
-        read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
+        read_tx_part(
+            msac,
+            cdf_m,
+            &mut b,
+            bs,
+            __seg_ll,
+            fi.txfm_switchable,
+            fi.reduced_tx_part_set,
+        );
     }
     if trace_blk {
         eprintln!(
@@ -6473,7 +6519,15 @@ fn decode_b<BD: crate::pixel::BitDepth>(
 
         // TX partition for IntraBC
         let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
-        read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
+        read_tx_part(
+            msac,
+            cdf_m,
+            &mut b,
+            bs,
+            __seg_ll,
+            fi.txfm_switchable,
+            fi.reduced_tx_part_set,
+        );
         if trace_blk {
             eprintln!(
                 "  CK ibc_txpart tx_part={} tx_size_ll={} rng={}",
@@ -7918,7 +7972,15 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         // TX partition for inter
         if has_luma {
             let __seg_ll = fi.seg_lossless[b.seg_id as usize] != 0;
-            read_tx_part(msac, cdf_m, &mut b, bs, __seg_ll, fi.txfm_switchable);
+            read_tx_part(
+                msac,
+                cdf_m,
+                &mut b,
+                bs,
+                __seg_ll,
+                fi.txfm_switchable,
+                fi.reduced_tx_part_set,
+            );
         }
 
         // Inter context write-back
@@ -9715,7 +9777,19 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     // sampling position advances by fractional steps (recon_tmpl.c:1611).
     if svc[0].scale != 0 || svc[1].scale != 0 {
         inter_mc_plane_scaled(
-            bd, dst, dst_stride, ref_pic, pl, bx, by, bw4, bh4, mvx, mvy, filter, ss_hor, ss_ver,
+            bd,
+            ScaledDst::Put(dst, dst_stride),
+            ref_pic,
+            pl,
+            bx,
+            by,
+            bw4,
+            bh4,
+            mvx,
+            mvy,
+            filter,
+            ss_hor,
+            ss_ver,
             svc,
         );
         return;
@@ -9850,15 +9924,23 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// Scaled-reference motion compensation for one plane (put path). Port of the
-/// `refp != &f->cur` branch of dav2d's `mc()` (recon_tmpl.c:1611-1670): computes
-/// the scaled source window, emulates the edge into a scratch buffer when it
-/// overhangs the reference, then runs the fractional-step 8-tap kernel.
+/// Where to output one scaled-reference prediction: straight to pixels (`mc`,
+/// the put path) or to the i16 intermediate that compound blending reads
+/// (`mct`, the prep path).
+enum ScaledDst<'a, P> {
+    Put(&'a mut [P], usize),
+    Prep(&'a mut [i16], usize),
+}
+
+/// Scaled-reference motion compensation for one plane. Port of the
+/// `refp != &f->cur` branch of dav2d's `mc()` (recon_tmpl.c): computes the
+/// scaled source window, emulates the edge into a scratch buffer when it
+/// overhangs the reference, then runs the fractional-step kernel the block's
+/// filter selects (`mc_scaled` / `mct_scaled`, 8-tap or bilinear).
 #[allow(clippy::too_many_arguments)]
 fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
     bd: BD,
-    dst: &mut [BD::Pixel],
-    dst_stride: usize,
+    out: ScaledDst<'_, BD::Pixel>,
     ref_pic: &crate::picture::Picture,
     pl: usize,
     bx: i32,
@@ -9891,10 +9973,8 @@ fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
         None => return,
     };
 
-    let ss_hor_pl = plss_hor;
-    let ss_ver_pl = plss_ver;
-    let orig_pos_x = (bx * h_mul << 4) + mvx * (1 << (ss_hor_pl == 0) as i32);
-    let orig_pos_y = (by * v_mul << 4) + mvy * (1 << (ss_ver_pl == 0) as i32);
+    let orig_pos_x = (bx * h_mul << 4) + mvx * (1 << (plss_hor == 0) as i32);
+    let orig_pos_y = (by * v_mul << 4) + mvy * (1 << (plss_ver == 0) as i32);
     let scale_mv = |val: i32, scale: i32| -> i32 {
         let tmp = val as i64 * scale as i64 + (scale as i64 - 0x4000) * 8;
         crate::intops::apply_sign64((tmp.abs() + 128) >> 8, tmp) + 32
@@ -9913,15 +9993,10 @@ fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
     // and the shift (dav2d mc(): `(w + ss_hor) >> ss_hor` with plane ss), so
     // luma is exactly `w`, not `w + frame_ss`. Mixing frame and plane ss here
     // left luma one column/row too wide and corrupted the right/bottom emu clamp.
-    let rw = (ref_pic.p.w + ss_hor_pl) >> ss_hor_pl;
-    let rh = (ref_pic.p.h + ss_ver_pl) >> ss_ver_pl;
+    let rw = (ref_pic.p.w + plss_hor) >> plss_hor;
+    let rh = (ref_pic.p.h + plss_ver) >> plss_ver;
     let w = (bw4 * h_mul) as usize;
     let h = (bh4 * v_mul) as usize;
-
-    // dav2d b->filter: 0=REGULAR,1=SMOOTH,2=SHARP -> 8tap; 3=BILINEAR. The scaled
-    // path uses the 8-tap kernel for all (bilin-scaled is unused by AVM streams
-    // seen so far; fall back to REGULAR 8-tap if a bilinear block appears).
-    let filter_type = if filter == 3 { 0 } else { filter as i32 };
 
     // The scaled window is [left-3, top-3] .. spanning (right-left+7)x(bottom-top+7).
     let win_w = (right - left + 7) as usize;
@@ -9944,27 +10019,31 @@ fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
             left - 3,
             top - 3,
         );
-        (&emu_buf[..], emu_stride * 3 + 3, emu_stride)
+        (&emu_buf[..], emu_stride * 3 + 3, emu_stride as isize)
     } else {
         let off = (top as usize) * ref_stride + left as usize;
-        (ref_data, off, ref_stride)
+        (ref_data, off, ref_stride as isize)
     };
 
-    crate::mc::put_8tap_scaled(
-        bd,
-        dst,
-        dst_stride,
-        src,
-        src_off,
-        src_stride as isize,
-        w,
-        h,
-        pos_x & 0x3ff,
-        pos_y & 0x3ff,
-        step_x,
-        step_y,
-        filter_type,
-    );
+    let (mx, my) = (pos_x & 0x3ff, pos_y & 0x3ff);
+    // b->filter: 0=REGULAR, 1=SMOOTH, 2=SHARP use the 8-tap kernels; 3=BILINEAR
+    // its own (dav2d's mc_scaled/mct_scaled tables are indexed the same way).
+    let bilin = filter == 3;
+    let ft = filter as i32;
+    match out {
+        ScaledDst::Put(dst, ds) if bilin => crate::mc::put_bilin_scaled(
+            bd, dst, ds, src, src_off, src_stride, w, h, mx, my, step_x, step_y,
+        ),
+        ScaledDst::Put(dst, ds) => crate::mc::put_8tap_scaled(
+            bd, dst, ds, src, src_off, src_stride, w, h, mx, my, step_x, step_y, ft,
+        ),
+        ScaledDst::Prep(tmp, ts) if bilin => crate::mc::prep_bilin_scaled(
+            bd, tmp, ts, src, src_off, src_stride, w, h, mx, my, step_x, step_y,
+        ),
+        ScaledDst::Prep(tmp, ts) => crate::mc::prep_8tap_scaled(
+            bd, tmp, ts, src, src_off, src_stride, w, h, mx, my, step_x, step_y, ft,
+        ),
+    }
 }
 
 /// Translational MC into an intermediate i16 `tmp` buffer (recon_tmpl.c `mc`
@@ -9989,7 +10068,30 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     cur_bw: i32,
     cur_bh: i32,
+    svc: [ScalableMotionParams; 2],
 ) {
+    // A reference of another size goes through the scaled kernels, as in
+    // dav2d's `mc()`; the unscaled code below assumes the current frame's size.
+    if svc[0].scale != 0 || svc[1].scale != 0 {
+        let tmp_stride = (bw4 * (4 >> if pl != 0 { ss_hor } else { 0 })) as usize;
+        inter_mc_plane_scaled(
+            bd,
+            ScaledDst::Prep(tmp, tmp_stride),
+            ref_pic,
+            pl,
+            bx,
+            by,
+            bw4,
+            bh4,
+            mvx,
+            mvy,
+            filter,
+            ss_hor,
+            ss_ver,
+            svc,
+        );
+        return;
+    }
     let plss_ver = if pl != 0 { ss_ver } else { 0 };
     let plss_hor = if pl != 0 { ss_hor } else { 0 };
     let h_mul = 4 >> plss_hor;
@@ -12067,6 +12169,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                         ss_ver,
                         fi.bw,
                         fi.bh,
+                        recon.svc[refs[i] as usize],
                     );
                 }
             }
@@ -12392,6 +12495,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                             ss_ver,
                             fi.bw,
                             fi.bh,
+                            recon.svc[refs[i] as usize],
                         );
                     }
                 }
@@ -13608,6 +13712,7 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
                             ss_ver,
                             fi.bw,
                             fi.bh,
+                            [recon.svc[r0], recon.svc[r1]][i],
                         );
                     }
                     update_temporal_grid(
@@ -14204,7 +14309,27 @@ fn inter_mc_plane_prep_at_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     cur_bw: i32,
     cur_bh: i32,
+    svc: [ScalableMotionParams; 2],
 ) {
+    if svc[0].scale != 0 || svc[1].scale != 0 {
+        inter_mc_plane_scaled(
+            bd,
+            ScaledDst::Prep(&mut tmp[off..], tmp_stride),
+            ref_pic,
+            pl,
+            bx,
+            by,
+            bw4,
+            bh4,
+            mvx,
+            mvy,
+            filter,
+            ss_hor,
+            ss_ver,
+            svc,
+        );
+        return;
+    }
     mc_prep_bounds_8bpc(
         bd,
         &mut tmp[off..],
@@ -19195,7 +19320,15 @@ mod tests {
         let mut msac = make_msac(&data);
         let mut cdf_m = make_default_cdf_mode();
         let mut b = make_default_block();
-        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs4x4, false, true);
+        read_tx_part(
+            &mut msac,
+            &mut cdf_m,
+            &mut b,
+            BlockSize::Bs4x4,
+            false,
+            true,
+            false,
+        );
         assert_eq!(b.tx_part, TxPartition::None as u8);
     }
 
@@ -19263,7 +19396,15 @@ mod tests {
         let mut msac = make_msac(&data);
         let mut cdf_m = make_default_cdf_mode();
         let mut b = make_default_block();
-        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs4x4, true, false);
+        read_tx_part(
+            &mut msac,
+            &mut cdf_m,
+            &mut b,
+            BlockSize::Bs4x4,
+            true,
+            false,
+            false,
+        );
         assert_eq!(b.tx_size_ll, 0);
         assert_eq!(b.tx_part, TxPartition::None as u8);
     }
@@ -19276,7 +19417,15 @@ mod tests {
         let mut b = make_default_block();
         b.is_intra = 1;
         b.fsc = 1;
-        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs8x8, true, false);
+        read_tx_part(
+            &mut msac,
+            &mut cdf_m,
+            &mut b,
+            BlockSize::Bs8x8,
+            true,
+            false,
+            false,
+        );
         assert!(b.tx_size_ll <= 1);
     }
 
@@ -19294,6 +19443,7 @@ mod tests {
             BlockSize::Bs16x16,
             false,
             true,
+            false,
         );
         assert_eq!(b.tx_part, TxPartition::None as u8);
     }
@@ -19305,7 +19455,15 @@ mod tests {
         let mut cdf_m = make_default_cdf_mode();
         let mut b = make_default_block();
         b.skip_txfm = 0;
-        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs8x8, false, true);
+        read_tx_part(
+            &mut msac,
+            &mut cdf_m,
+            &mut b,
+            BlockSize::Bs8x8,
+            false,
+            true,
+            false,
+        );
         assert!(b.tx_part <= TxPartition::V5 as u8);
     }
 
@@ -19316,7 +19474,15 @@ mod tests {
         let mut cdf_m = make_default_cdf_mode();
         let mut b = make_default_block();
         b.skip_txfm = 0;
-        read_tx_part(&mut msac, &mut cdf_m, &mut b, BlockSize::Bs8x4, false, true);
+        read_tx_part(
+            &mut msac,
+            &mut cdf_m,
+            &mut b,
+            BlockSize::Bs8x4,
+            false,
+            true,
+            false,
+        );
         assert!(b.tx_part <= TxPartition::V5 as u8);
     }
 
@@ -20310,6 +20476,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -20423,6 +20590,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -20538,6 +20706,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -20638,6 +20807,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -20738,6 +20908,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -20836,6 +21007,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -20936,6 +21108,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -21038,6 +21211,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -21141,6 +21315,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -21250,6 +21425,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -21355,6 +21531,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -21469,6 +21646,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,
@@ -21586,6 +21764,7 @@ mod tests {
             max_drl_bits: 3,
             bawp: false,
             txfm_switchable: true,
+            reduced_tx_part_set: false,
             skip_mode_refs: RefPair { pair: 0 },
             n_ref_frames: 7,
             warp_motion: false,

@@ -155,9 +155,12 @@ fn inv_dst_1d(c: &mut [i32], start: usize, stride: usize, mat: &[i8], n: usize, 
     let mut mi = 0;
 
     for i in 0..n {
+        // dav2d sums in `int`; on coefficients no encoder produces the sum
+        // leaves i32, which C wraps in practice. Wrap explicitly so a hostile
+        // stream cannot panic a debug build; valid input never gets near it.
         let mut sum = 0i32;
         for j in 0..n {
-            sum += mat[mi] as i32 * c[start + j * stride];
+            sum = sum.wrapping_add((mat[mi] as i32).wrapping_mul(c[start + j * stride]));
             mi += 1;
         }
         sums[i] = sum;

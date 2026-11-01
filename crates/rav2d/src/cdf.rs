@@ -1830,15 +1830,60 @@ pub static DEFAULT_COEF_CDF: [CdfCoefContext; 4] = [
     },
 ];
 
+/// `tx_part_2d` defaults when the sequence sets `reduced_tx_part_set`
+/// (dav2d `default_tx_part_2d_cdf[1]`); `DEFAULT_CDF.m` holds `[0]`.
+/// Same flat `[2][2][14][8]` layout as `CdfModeContext::tx_part_2d`.
+static DEFAULT_TX_PART_2D_REDUCED: [u16; 448] = [
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+    28087, 23406, 18725, 14043, 9362, 4681, 0, 0, 28087, 23406, 18725, 14043, 9362, 4681, 0, 0,
+];
+
+/// Offset of `tx_part_2d` in `CdfModeContext::data` (see the accessor).
+const TX_PART_2D_OFF: usize = 1832;
+
 pub fn cdf_thread_init_static_qcat(qidx: u32) -> u32 {
     (qidx > 90) as u32 + (qidx > 140) as u32 + (qidx > 190) as u32
 }
 
 impl CdfContext {
-    pub fn init_from_defaults(qcat: usize) -> Self {
+    /// The default CDFs for a frame of quantizer category `qcat`
+    /// (dav2d `dav2d_cdf_thread_copy` of a static context). A sequence with
+    /// `reduced_tx_part_set` starts `tx_part_2d` from its own table.
+    pub fn init_from_defaults(qcat: usize, reduced_tx_part_set: bool) -> Self {
+        let mut m = DEFAULT_CDF.m.clone();
+        if reduced_tx_part_set {
+            m.data[TX_PART_2D_OFF..TX_PART_2D_OFF + DEFAULT_TX_PART_2D_REDUCED.len()]
+                .copy_from_slice(&DEFAULT_TX_PART_2D_REDUCED);
+        }
         Self {
             coef: DEFAULT_COEF_CDF[qcat].clone(),
-            m: DEFAULT_CDF.m.clone(),
+            m,
             mv: DEFAULT_CDF.mv.clone(),
             dmv: DEFAULT_CDF.mv.clone(),
         }
@@ -1888,10 +1933,28 @@ impl CdfContext {
                 dst[i] = ((s1[i] as u32 * 7 + s2[i] as u32 + 4) >> 3) as u16;
             }
         }
+        // dav2d averages the count/para word as one u16, assuming both sides
+        // share the para byte. They do not when the two references started
+        // from different quantizer categories, and the fraction of the para
+        // difference then lands in the count byte, past the 32 the adaptation
+        // rate table is sized for (dav2d asserts there in debug and reads past
+        // `dav2d_msac_rate` in release). Keep the C arithmetic, so every case
+        // dav2d decodes stays bit-exact, and saturate the count.
+        fn clamp_counts(data: &mut [u16], off: usize, n1d: usize) {
+            let [count, para] = data[off + n1d].to_ne_bytes();
+            if count > 32 {
+                data[off + n1d] = u16::from_ne_bytes([32, para]);
+            }
+        }
         avg(&mut self.m.data, &src1_m.data, &src2_m.data);
         avg(&mut self.coef.data, &src1_coef.data, &src2_coef.data);
         avg(&mut self.mv.data, &src1_mv.data, &src2_mv.data);
         avg(&mut self.dmv.data, &src1_dmv.data, &src2_dmv.data);
+        visit_mode_kf_entries(|o, n| clamp_counts(&mut self.m.data, o, n));
+        visit_mode_nonkf_entries(|o, n| clamp_counts(&mut self.m.data, o, n));
+        visit_coef_entries(|o, n| clamp_counts(&mut self.coef.data, o, n));
+        visit_mv_entries(|o, n| clamp_counts(&mut self.mv.data, o, n));
+        visit_mv_entries(|o, n| clamp_counts(&mut self.dmv.data, o, n));
     }
 }
 
@@ -2450,7 +2513,7 @@ mod tests {
 
     #[test]
     fn test_init_from_defaults() {
-        let ctx = CdfContext::init_from_defaults(0);
+        let ctx = CdfContext::init_from_defaults(0, false);
         assert_eq!(ctx.m.data[0], 7226);
         assert_eq!(ctx.coef.data[0], 7009);
     }
@@ -2552,8 +2615,8 @@ mod tests {
 
     #[test]
     fn test_cdf_shift_from_defaults() {
-        let src = CdfContext::init_from_defaults(0);
-        let mut dst = CdfContext::init_from_defaults(0);
+        let src = CdfContext::init_from_defaults(0, false);
+        let mut dst = CdfContext::init_from_defaults(0, false);
         dst.shift(&src, 1);
         assert_eq!(dst.m.data[0], src.m.data[0] >> 1);
         assert_eq!(dst.coef.data[0], src.coef.data[0] >> 1);
@@ -2561,8 +2624,8 @@ mod tests {
 
     #[test]
     fn test_cdf_shift_accumulate_from_defaults() {
-        let src = CdfContext::init_from_defaults(0);
-        let mut dst = CdfContext::init_from_defaults(0);
+        let src = CdfContext::init_from_defaults(0, false);
+        let mut dst = CdfContext::init_from_defaults(0, false);
         let orig_m0 = dst.m.data[0];
         let orig_c0 = dst.coef.data[0];
         dst.shift_accumulate(&src, 1);
@@ -2572,7 +2635,7 @@ mod tests {
 
     #[test]
     fn test_cdf_reset_count_keyframe() {
-        let mut ctx = CdfContext::init_from_defaults(0);
+        let mut ctx = CdfContext::init_from_defaults(0, false);
         let cp_before_mv = ctx.mv.data[113]; // shell_set count_para
         ctx.reset_count(true);
         assert_eq!(ctx.mv.data[113], cp_before_mv); // mv not touched for kf
@@ -2580,21 +2643,63 @@ mod tests {
 
     #[test]
     fn test_cdf_reset_count_nonkeyframe() {
-        let mut ctx = CdfContext::init_from_defaults(0);
+        let mut ctx = CdfContext::init_from_defaults(0, false);
         ctx.reset_count(false);
         // both dmv and mv should be processed
     }
 
     #[test]
     fn test_cdf_pri_sec_average() {
-        let s1 = CdfContext::init_from_defaults(0);
-        let s2 = CdfContext::init_from_defaults(1);
-        let mut dst = CdfContext::init_from_defaults(0);
+        let s1 = CdfContext::init_from_defaults(0, false);
+        let s2 = CdfContext::init_from_defaults(1, false);
+        let mut dst = CdfContext::init_from_defaults(0, false);
         dst.pri_sec_average(
             &s1.m, &s1.coef, &s1.mv, &s1.dmv, &s2.m, &s2.coef, &s2.mv, &s2.dmv,
         );
         let expected = ((s1.m.data[0] as u32 * 7 + s2.m.data[0] as u32 + 4) >> 3) as u16;
         assert_eq!(dst.m.data[0], expected);
+    }
+
+    /// Fuzz crash (October 2026): references that started from different
+    /// quantizer categories carry different para bytes, and averaging the
+    /// count/para word as one u16 pushed counts past 32, which panicked in
+    /// the symbol adaptation. Every count must stay within the rate table.
+    #[test]
+    fn test_cdf_pri_sec_average_keeps_counts_in_range() {
+        let mut s1 = CdfContext::init_from_defaults(0, false);
+        let s2 = CdfContext::init_from_defaults(3, false);
+        // Adapted CDFs carry nonzero counts; saturate them like a long tile.
+        visit_coef_entries(|o, n| {
+            let [_, para] = s1.coef.data[o + n].to_ne_bytes();
+            s1.coef.data[o + n] = u16::from_ne_bytes([32, para]);
+        });
+        let mut dst = CdfContext::init_from_defaults(0, false);
+        dst.pri_sec_average(
+            &s1.m, &s1.coef, &s1.mv, &s1.dmv, &s2.m, &s2.coef, &s2.mv, &s2.dmv,
+        );
+        let mut paras_differ = false;
+        visit_coef_entries(|o, n| {
+            paras_differ |= s1.coef.data[o + n] >> 8 != s2.coef.data[o + n] >> 8;
+            assert!(dst.coef.data[o + n] & 0xff <= 32, "count over 32 at {o}");
+        });
+        assert!(
+            paras_differ,
+            "test needs categories with different para bytes"
+        );
+    }
+
+    /// `reduced_tx_part_set` swaps in its own `tx_part_2d` defaults and
+    /// touches nothing else.
+    #[test]
+    fn test_init_from_defaults_reduced_tx_part_set() {
+        let a = CdfContext::init_from_defaults(2, false);
+        let b = CdfContext::init_from_defaults(2, true);
+        let r = TX_PART_2D_OFF..TX_PART_2D_OFF + DEFAULT_TX_PART_2D_REDUCED.len();
+        assert_eq!(&b.m.data[r.clone()], &DEFAULT_TX_PART_2D_REDUCED[..]);
+        assert_ne!(&a.m.data[r.clone()], &b.m.data[r.clone()]);
+        assert_eq!(a.m.data[..r.start], b.m.data[..r.start]);
+        assert_eq!(a.m.data[r.end..], b.m.data[r.end..]);
+        assert_eq!(a.coef.data[..], b.coef.data[..]);
     }
 
     #[test]

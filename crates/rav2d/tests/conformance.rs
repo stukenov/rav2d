@@ -2609,8 +2609,8 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
 /// Scaled reference motion compensation gate. `resize-10bit-superres.obu` codes
 /// a 128x128 keyframe then a run of 64x64 inter frames that reference it, so
 /// every inter block motion-compensates from a larger reference through the
-/// scaled-MC path (svc scale/step != 0). `#[ignore]`d until that path is ported;
-/// un-ignore once the scaled 8-tap kernel lands and this must be bit-exact.
+/// scaled-MC path (svc scale/step != 0). Single-reference prediction only:
+/// no vector yet takes a compound or TIP prediction from a scaled reference.
 #[test]
 fn bit_exact_scaled_ref_sweep() {
     let path = data("resize-10bit-superres.obu");
