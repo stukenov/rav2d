@@ -250,7 +250,7 @@ pub fn get_dc_sign_ctx(t_dim: &TxfmInfo, a: &[u8], l: &[u8]) -> u32 {
     (s != 0) as u32 + (s > 0) as u32
 }
 
-/// Context for the parity-hidden DC token (dav2d get_ph_ctx): the clipped
+/// Context for the parity-hidden DC token (dav2d `get_ph_ctx)`: the clipped
 /// magnitudes of the five nearest coefficients.
 fn get_ph_ctx(levels: &[i8], tx_class: u8, stride: usize) -> u32 {
     let mag = |v: i8| (v as u8 as u32).min(3);
@@ -299,7 +299,10 @@ pub fn get_lo_ctx(
     let offset: u32;
     if tx_class == 0 {
         add!(levels[off + stride + 1]);
-        if !chroma {
+        if chroma {
+            lim = 3;
+            offset = if plane == 1 { 0 } else { 4 };
+        } else {
             lo_mag +=
                 (levels[off + 2] as u32).min(lim) + (levels[off + 2 * stride] as u32).min(lim);
             if lo_freq {
@@ -327,25 +330,20 @@ pub fn get_lo_ctx(
                 };
                 lim = 4;
             }
-        } else {
-            lim = 3;
-            offset = if plane == 1 { 0 } else { 4 };
         }
+    } else if chroma {
+        offset = 8;
+        lim = 3;
     } else {
-        if !chroma {
-            lim = 3;
-            add!(levels[off + 2]);
-            lo_mag += (levels[off + 3] as u32).min(3) + (levels[off + 4] as u32).min(3);
-            if lo_freq {
-                offset = if xy == 0 { 21 } else { 28 };
-                lim = if xy == 0 { 6 } else { 4 };
-            } else {
-                offset = 15;
-                lim = 4;
-            }
+        lim = 3;
+        add!(levels[off + 2]);
+        lo_mag += (levels[off + 3] as u32).min(3) + (levels[off + 4] as u32).min(3);
+        if lo_freq {
+            offset = if xy == 0 { 21 } else { 28 };
+            lim = if xy == 0 { 6 } else { 4 };
         } else {
-            offset = 8;
-            lim = 3;
+            offset = 15;
+            lim = 4;
         }
     }
 
@@ -661,7 +659,7 @@ pub fn decode_coefs(
         }
         msac.decode_bool_adapt(coef.skip_v(sctx))
     } else {
-        let i = if !p.intra || p.fsc { 1 } else { 0 };
+        let i = usize::from(!p.intra || p.fsc);
         if env_flag!("RAV2D_CF") {
             eprintln!(
                 "CF pl={} SKIPCDF i={} txctx={} sctx={} cdf0={} rng={}",
@@ -791,11 +789,11 @@ pub fn decode_coefs(
     if p.lossless {
         if chroma {
             if p.intra {
-                let y_fsc = if !p.sdp_active {
-                    p.fsc
-                } else {
+                let y_fsc = if p.sdp_active {
                     let idx = (p.cby & 15) as usize * 16 + (p.cbx & 15) as usize;
                     p.luma_fsc_map[idx] != 0
+                } else {
+                    p.fsc
                 };
                 *txtp = if y_fsc {
                     txtp::IDTX as u16
@@ -854,7 +852,7 @@ pub fn decode_coefs(
         } else if p.reduced_txtp_set == 2 {
             *txtp = txtp::DCT_DCT as u16;
         } else {
-            let sz_ctx = ((t_dim.lw + t_dim.lh) >> 1) as usize;
+            let sz_ctx = u8::midpoint(t_dim.lw, t_dim.lh) as usize;
             let tx_idx = if p.reduced_txtp_set != 0 {
                 msac.decode_bool_adapt(mode.txtp_ext_reduced(t_dim.min as usize)) as usize
             } else {
@@ -1905,8 +1903,8 @@ pub struct McParams {
     pub bottom: i32,
 }
 
-/// IntraBC block-copy prediction for one plane (8bpc). Mirrors `mc(... &f->cur,
-/// DAV2D_FILTER_BILINEAR ...)` in `dav2d_recon_b` (recon_tmpl.c:3150 / 3591):
+/// `IntraBC` block-copy prediction for one plane (8bpc). Mirrors `mc(... &f->cur,
+/// DAV2D_FILTER_BILINEAR ...)` in `dav2d_recon_b` (`recon_tmpl.c:3150` / 3591):
 /// copies an already-decoded region of the *current* plane (src == dst buffer)
 /// at the block-vector offset into the block at (bx,by), applying the AV2
 /// bilinear subpel filter. `bx`,`by` are in 4x4 units; `mvx`,`mvy` are the
@@ -2006,7 +2004,7 @@ pub fn intrabc_pred<BD: crate::pixel::BitDepth>(
         if my != 0 {
             // 2-pass: horizontal into mid (16-bit), then vertical.
             let mut mid = vec![0i32; src_w * (h + 1)];
-            for ry in 0..(h + 1) {
+            for ry in 0..=h {
                 for x in 0..w {
                     let s = ry * src_stride + x;
                     let v = 16 * srcbuf[s] + mx * (srcbuf[s + 1] - srcbuf[s]);

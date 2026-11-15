@@ -993,11 +993,7 @@ fn deblock_h_sb64y(
             3
         } else if vmask[2] & (1 << y) != 0 {
             2
-        } else if vmask[1] & (1 << y) != 0 {
-            1
-        } else {
-            0
-        };
+        } else { usize::from(vmask[1] & (1 << y) != 0) };
         let max_width_pos = MAX_WIDTH_Y[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos
@@ -1043,11 +1039,7 @@ fn deblock_v_sb64y(
             3
         } else if vmask[2] & (1 << x) != 0 {
             2
-        } else if vmask[1] & (1 << x) != 0 {
-            1
-        } else {
-            0
-        };
+        } else { usize::from(vmask[1] & (1 << x) != 0) };
         let max_width_pos = MAX_WIDTH_Y[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos
@@ -1091,11 +1083,7 @@ fn deblock_h_sb64uv(
         }
         let level = if vmask[2] & (1 << y) != 0 {
             2
-        } else if vmask[1] & (1 << y) != 0 {
-            1
-        } else {
-            0
-        };
+        } else { usize::from(vmask[1] & (1 << y) != 0) };
         let max_width_pos = MAX_WIDTH_UV[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos
@@ -1139,11 +1127,7 @@ fn deblock_v_sb64uv(
         }
         let level = if vmask[2] & (1 << x) != 0 {
             2
-        } else if vmask[1] & (1 << x) != 0 {
-            1
-        } else {
-            0
-        };
+        } else { usize::from(vmask[1] & (1 << x) != 0) };
         let max_width_pos = MAX_WIDTH_UV[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos
@@ -1471,8 +1455,8 @@ fn edge_thr(cur: i32, prev: i32) -> i32 {
     }
 }
 
-/// Port of `setup_thr_cols_sb64`: builds the transposed per-4px q_thr/side_thr
-/// arrays for one 64-wide column (dst_stride = 16, stored transposed).
+/// Port of `setup_thr_cols_sb64`: builds the transposed per-4px `q_thr/side_thr`
+/// arrays for one 64-wide column (`dst_stride` = 16, stored transposed).
 #[allow(clippy::too_many_arguments)]
 fn setup_thr_cols(
     q_thr_dst: &mut [u16; 256],
@@ -1566,7 +1550,7 @@ fn setup_thr_rows(
     }
 }
 
-/// Bottom-of-frame crop of overhanging 32-long tx edges (db_apply_tmpl.c:551).
+/// Bottom-of-frame crop of overhanging 32-long tx edges (`db_apply_tmpl.c:551`).
 /// Must run before the rows pass reads `filter_y[1]`. Operates on the mutable
 /// mask, so it is driven from `filter_sbrow` (which holds `&mut lf.mask`).
 pub fn deblock_crop_bottom_edge(
@@ -1636,16 +1620,16 @@ fn deblock64_cols<BD: BitDepth>(
     let uv_h4 = h4 >> ctx.ss_ver;
     let y64idx = ((y64 & 3) << 2) as usize;
 
-    let seg_stride = if !ctx.cur_segmap.is_empty() {
-        ctx.b4_stride
-    } else {
+    let seg_stride = if ctx.cur_segmap.is_empty() {
         0
+    } else {
+        ctx.b4_stride
     };
     // segmap base for this 64-row band's top row.
-    let seg_band = if !ctx.cur_segmap.is_empty() {
-        (y64 as isize) * 16 * seg_stride
-    } else {
+    let seg_band = if ctx.cur_segmap.is_empty() {
         0
+    } else {
+        (y64 as isize) * 16 * seg_stride
     };
 
     // luma columns
@@ -1673,10 +1657,10 @@ fn deblock64_cols<BD: BitDepth>(
             let w4 = imin(ctx.bw - x64 * 16, 16);
             let mut q_thr = [0u16; 256];
             let mut side_thr = [0u16; 256];
-            let (seg, seg_off): (&[u8], isize) = if !ctx.cur_segmap.is_empty() {
-                (ctx.cur_segmap, seg_band + (x64 as isize) * 16)
-            } else {
+            let (seg, seg_off): (&[u8], isize) = if ctx.cur_segmap.is_empty() {
                 (&PLACEHOLDER_SEGMAP, 0)
+            } else {
+                (ctx.cur_segmap, seg_band + (x64 as isize) * 16)
             };
             setup_thr_cols(
                 &mut q_thr,
@@ -1747,15 +1731,15 @@ fn deblock64_cols<BD: BitDepth>(
     }
 
     // chroma columns
-    let uv_seg_stride = if !ctx.segmap_uv.is_empty() {
+    let uv_seg_stride = if ctx.segmap_uv.is_empty() {
+        0
+    } else {
         ctx.uv_segmap_stride
-    } else {
-        0
     };
-    let uv_seg_band = if !ctx.segmap_uv.is_empty() {
-        (y64 as isize) * (16 >> ctx.ss_ver) as isize * uv_seg_stride
-    } else {
+    let uv_seg_band = if ctx.segmap_uv.is_empty() {
         0
+    } else {
+        (y64 as isize) * (16 >> ctx.ss_ver) as isize * uv_seg_stride
     };
     let mut prev_qidx = -1i32;
     let mut lut = [[[0u32; 16]; 2]; 2];
@@ -1780,13 +1764,13 @@ fn deblock64_cols<BD: BitDepth>(
         }
         let bx4_base = (((x64 & 3) * 16) >> ctx.ss_hor) as usize;
         let uv_w4 = imin(ctx.bw - x64 * 16, 16) >> ctx.ss_hor;
-        let (seg, seg_off): (&[u8], isize) = if !ctx.segmap_uv.is_empty() {
+        let (seg, seg_off): (&[u8], isize) = if ctx.segmap_uv.is_empty() {
+            (&PLACEHOLDER_SEGMAP, 0)
+        } else {
             (
                 ctx.segmap_uv,
                 uv_seg_band + (x64 as isize) * (16 >> ctx.ss_hor) as isize,
             )
-        } else {
-            (&PLACEHOLDER_SEGMAP, 0)
         };
         let mut q_thr = [[0u16; 256]; 2];
         let mut side_thr = [[0u16; 256]; 2];
@@ -1862,7 +1846,7 @@ fn deblock64_cols<BD: BitDepth>(
 }
 
 /// Whether the 64px column `x64` starts a tile other than the first (dav2d
-/// `tile_end == x64 * 16`, db_apply_tmpl.c).
+/// `tile_end == x64 * 16`, `db_apply_tmpl.c`).
 fn is_tile_col_edge(hdr: &FrameHeader, x64: i32) -> bool {
     let t = &hdr.tiling.t;
     let sbl2 = 4 + hdr.sb128 as i32;
@@ -1897,15 +1881,15 @@ fn deblock64_rows<BD: BitDepth>(
         None
     };
 
-    let seg_stride = if !ctx.cur_segmap.is_empty() {
+    let seg_stride = if ctx.cur_segmap.is_empty() {
+        0
+    } else {
         ctx.b4_stride
-    } else {
-        0
     };
-    let seg_band = if !ctx.cur_segmap.is_empty() {
-        (y64 as isize) * 16 * seg_stride
-    } else {
+    let seg_band = if ctx.cur_segmap.is_empty() {
         0
+    } else {
+        (y64 as isize) * 16 * seg_stride
     };
 
     if ctx.frame_hdr.deblock.level_y[1] != 0 {
@@ -1943,21 +1927,21 @@ fn deblock64_rows<BD: BitDepth>(
                     }
                     above_lut = Some(&a_lut);
                     // above segmap row is the row directly above seg_band.
-                    if !ctx.cur_segmap.is_empty() {
+                    if ctx.cur_segmap.is_empty() {
+                        above_seg = Some((&PLACEHOLDER_SEGMAP, 0));
+                    } else {
                         above_seg =
                             Some((ctx.cur_segmap, seg_band + (x64 as isize) * 16 - seg_stride));
-                    } else {
-                        above_seg = Some((&PLACEHOLDER_SEGMAP, 0));
                     }
                 }
             }
             let w4 = imin(ctx.bw - x64 * 16, 16);
             let mut q_thr = [0u16; 256];
             let mut side_thr = [0u16; 256];
-            let (seg, seg_off): (&[u8], isize) = if !ctx.cur_segmap.is_empty() {
-                (ctx.cur_segmap, seg_band + (x64 as isize) * 16)
-            } else {
+            let (seg, seg_off): (&[u8], isize) = if ctx.cur_segmap.is_empty() {
                 (&PLACEHOLDER_SEGMAP, 0)
+            } else {
+                (ctx.cur_segmap, seg_band + (x64 as isize) * 16)
             };
             setup_thr_rows(
                 &mut q_thr,
@@ -2011,15 +1995,15 @@ fn deblock64_rows<BD: BitDepth>(
         return;
     }
 
-    let uv_seg_stride = if !ctx.segmap_uv.is_empty() {
+    let uv_seg_stride = if ctx.segmap_uv.is_empty() {
+        0
+    } else {
         ctx.uv_segmap_stride
-    } else {
-        0
     };
-    let uv_seg_band = if !ctx.segmap_uv.is_empty() {
-        (y64 as isize) * (16 >> ctx.ss_ver) as isize * uv_seg_stride
-    } else {
+    let uv_seg_band = if ctx.segmap_uv.is_empty() {
         0
+    } else {
+        (y64 as isize) * (16 >> ctx.ss_ver) as isize * uv_seg_stride
     };
     let mut l_qidx = -1i32;
     let mut al_qidx = -1i32;
@@ -2058,24 +2042,24 @@ fn deblock64_rows<BD: BitDepth>(
                     al_qidx = a_qidx;
                 }
                 above_present = true;
-                if !ctx.segmap_uv.is_empty() {
+                if ctx.segmap_uv.is_empty() {
+                    above_seg = Some((&PLACEHOLDER_SEGMAP, 0));
+                } else {
                     above_seg = Some((
                         ctx.segmap_uv,
                         uv_seg_band + (x64 as isize) * (16 >> ctx.ss_hor) as isize - uv_seg_stride,
                     ));
-                } else {
-                    above_seg = Some((&PLACEHOLDER_SEGMAP, 0));
                 }
             }
         }
         let uv_w4 = imin(ctx.bw - x64 * 16, 16) >> ctx.ss_hor;
-        let (seg, seg_off): (&[u8], isize) = if !ctx.segmap_uv.is_empty() {
+        let (seg, seg_off): (&[u8], isize) = if ctx.segmap_uv.is_empty() {
+            (&PLACEHOLDER_SEGMAP, 0)
+        } else {
             (
                 ctx.segmap_uv,
                 uv_seg_band + (x64 as isize) * (16 >> ctx.ss_hor) as isize,
             )
-        } else {
-            (&PLACEHOLDER_SEGMAP, 0)
         };
         let mut q_thr = [[0u16; 256]; 2];
         let mut side_thr = [[0u16; 256]; 2];

@@ -285,7 +285,7 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
             }
         }
     } else if e.needs_bottomleft {
-        debug_assert!(mode == IntraPredMode::SmoothVPred as u8);
+        debug_assert_eq!(mode, IntraPredMode::SmoothVPred as u8);
         let bl_idx = (o - 1 - th as isize) as usize;
         if !have_left {
             tl[bl_idx] = if have_top {
@@ -361,7 +361,7 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
             }
         }
     } else if e.needs_topright {
-        debug_assert!(mode == IntraPredMode::SmoothHPred as u8);
+        debug_assert_eq!(mode, IntraPredMode::SmoothHPred as u8);
         let tr_idx = (o + 1) as usize + tw;
         if !have_top {
             tl[tr_idx] = if have_left {
@@ -379,7 +379,7 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
 
     // Topleft pixel
     if e.needs_topleft {
-        debug_assert!(diag_mrl_idx == mrl_idx);
+        debug_assert_eq!(diag_mrl_idx, mrl_idx);
         if have_top && have_left {
             for i in (-(mrl_idx as isize))..0 {
                 tl[(o + i) as usize] = top_buf[(dst_top_off as isize - mrl_idx as isize - 1
@@ -399,7 +399,7 @@ pub fn prepare_intra_edges<BD: crate::pixel::BitDepth>(
                 fill_tl
             };
             let start = (o - mrl_idx as isize) as usize;
-            tl[start..start + 2 * mrl_idx + 1].fill(v);
+            tl[start..=(start + 2 * mrl_idx)].fill(v);
         }
         tl[(o + e_stride as isize) as usize] = if have_left {
             if have_top {

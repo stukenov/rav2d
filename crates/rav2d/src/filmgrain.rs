@@ -1035,11 +1035,10 @@ mod tests {
         let data = make_grain_data(0, 0);
         generate_grain_y(&mut buf, &data, 5678, 8);
         for row in &buf {
-            for &v in row.iter() {
+            for &v in row {
                 assert!(
                     (-128..=127).contains(&v),
-                    "grain value {} out of 8bpc range",
-                    v
+                    "grain value {v} out of 8bpc range"
                 );
             }
         }
@@ -1064,7 +1063,7 @@ mod tests {
         data.ar_coeffs[0][2] = 3;
         generate_grain_y(&mut buf, &data, 999, 8);
         for row in &buf {
-            for &v in row.iter() {
+            for &v in row {
                 assert!((-128..=127).contains(&v));
             }
         }
@@ -1115,7 +1114,7 @@ mod tests {
         data.ar_coeffs[1][2] = 2;
         generate_grain_uv(&mut buf, &buf_y, &data, 42, 0, false, false, 8);
         for row in &buf[..GRAIN_HEIGHT] {
-            for &v in row[..GRAIN_WIDTH].iter() {
+            for &v in &row[..GRAIN_WIDTH] {
                 assert!((-128..=127).contains(&v));
             }
         }
@@ -1200,7 +1199,7 @@ mod tests {
             &mut dst, &src, stride, &data, 100, pw, &scaling, &grain_lut, bh, 0, 8,
         );
         for &v in &dst {
-            assert!((16..=235).contains(&v), "restricted range violated: {}", v);
+            assert!((16..=235).contains(&v), "restricted range violated: {v}");
         }
     }
 
@@ -1334,7 +1333,7 @@ mod tests {
         let mut scaling = vec![0u8; 1024];
         generate_scaling_hbd(10, &[[0, 0], [100, 100]], &mut scaling);
         for i in 1..400 {
-            assert!(scaling[i] >= scaling[i - 1], "not monotonic at {}", i);
+            assert!(scaling[i] >= scaling[i - 1], "not monotonic at {i}");
         }
     }
 

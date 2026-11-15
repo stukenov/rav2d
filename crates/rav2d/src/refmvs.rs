@@ -80,7 +80,7 @@ pub fn quantize_mv(mv: Mv) -> QMv {
 pub fn dequantize_mv_comp(v: i32) -> i32 {
     let absv = v.unsigned_abs();
     debug_assert!(absv < 0x80);
-    let nbits = (absv >> 4).wrapping_sub(if absv >= 16 { 1 } else { 0 });
+    let nbits = (absv >> 4).wrapping_sub(u32::from(absv >= 16));
     let has_bits = (nbits != 0) as u32;
     let mut res = (absv - (nbits + has_bits) * 16) << nbits;
     res += (16 * has_bits) << nbits;
@@ -176,7 +176,7 @@ impl TrajMap {
     /// # Safety
     /// Reinterprets the (y, x) pair as a single u16 via pointer cast. Caller must ensure the struct is #[repr(C)] with matching layout.
     pub unsafe fn n(&self) -> u16 {
-        unsafe { *(self as *const Self as *const u16) }
+        unsafe { *std::ptr::from_ref::<Self>(self).cast::<u16>() }
     }
 }
 
@@ -675,7 +675,7 @@ pub fn mv_bank_add_inner(bank: &mut MvBank, r#ref: RefPair, mv: &[Mv; 2], cwp_id
     let sz = bank.size[c] as usize;
     let idx = bank.idx[c] as usize;
     let comp = ref1 != -1;
-    let comp_idx = if comp { 1 } else { 0 };
+    let comp_idx = usize::from(comp);
 
     let mut n = 0;
     while n < sz {
@@ -2217,7 +2217,7 @@ pub fn refmvs_find(
         // `start` is only used inside the `0..sz` loop (skipped when sz==0); use
         // wrapping arithmetic to mirror the C unsigned wraparound when sz==idx==0.
         let start = (sz + idx).wrapping_sub(1);
-        let comp_idx = if comp { 1 } else { 0 };
+        let comp_idx = usize::from(comp);
         'bank: for n in 0..sz {
             if *cnt >= lim {
                 break;
@@ -2282,7 +2282,7 @@ pub fn refmvs_find(
     // GMV candidate
     if *cnt < 6 && ref0 >= 0 {
         let last = *cnt as usize;
-        let comp_idx = if comp { 1 } else { 0 };
+        let comp_idx = usize::from(comp);
         let mut found = false;
         if st.iter_cntr < 16 {
             for n in 0..last {
@@ -3398,7 +3398,7 @@ pub fn init_frame(
         }
     }
 
-    rf.use_ref_frame_mvs = if rf.n_mfmvs > 0 { 1 } else { 0 };
+    rf.use_ref_frame_mvs = i32::from(rf.n_mfmvs > 0);
 }
 
 pub fn tile_sbrow_init(
@@ -3763,16 +3763,7 @@ pub fn splat_comp_wedgemv(
             if let Some(ref mut td) = t_dst.as_deref_mut() {
                 let ti = t_off + (x >> 1) as usize;
                 unsafe {
-                    if d != 2 {
-                        let idx = ((d ^ w_swap) == 0) as usize;
-                        let m = t_src.mv.mv[idx].n;
-                        td[ti].mv.n = m as u32 * 0x10001;
-                        td[ti].r#ref.pair = if m == INVALID_TRAJ {
-                            -1
-                        } else {
-                            (t_src.r#ref.r[idx] as u8 as i16) * 0x101
-                        };
-                    } else {
+                    if d == 2 {
                         let mv0n = t_src.mv.mv[0].n;
                         let mv1n = t_src.mv.mv[1].n;
                         if mv0n == INVALID_TRAJ {
@@ -3789,6 +3780,15 @@ pub fn splat_comp_wedgemv(
                         } else {
                             td[ti] = *t_src;
                         }
+                    } else {
+                        let idx = ((d ^ w_swap) == 0) as usize;
+                        let m = t_src.mv.mv[idx].n;
+                        td[ti].mv.n = m as u32 * 0x10001;
+                        td[ti].r#ref.pair = if m == INVALID_TRAJ {
+                            -1
+                        } else {
+                            (t_src.r#ref.r[idx] as u8 as i16) * 0x101
+                        };
                     }
                 }
             }
@@ -4752,7 +4752,7 @@ mod tests {
             },
         };
         let mut rp_traj: [Vec<Mv>; 7] = Default::default();
-        for v in rp_traj.iter_mut() {
+        for v in &mut rp_traj {
             *v = vec![invalid_mv; sz];
         }
         let invalid_map = TrajMap {
@@ -4905,7 +4905,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(rf.use_ref_frame_mvs, if rf.n_mfmvs > 0 { 1 } else { 0 });
+        assert_eq!(rf.use_ref_frame_mvs, i32::from(rf.n_mfmvs > 0));
         assert_eq!(rf.ref_sign[0], 0);
     }
 

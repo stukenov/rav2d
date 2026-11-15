@@ -25,7 +25,7 @@ impl Ref {
             ref_cnt: AtomicUsize::new(1),
             free_callback: Box::new(move || {
                 unsafe {
-                    crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), size, 64)
+                    crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), size, 64);
                 };
             }),
         }))
@@ -182,7 +182,7 @@ mod tests {
             Box::new(move || {
                 freed_clone.store(true, Ordering::Relaxed);
                 unsafe {
-                    crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), 64, 64)
+                    crate::mem::free_aligned(NonNull::new_unchecked(addr as *mut u8), 64, 64);
                 };
             }),
         );

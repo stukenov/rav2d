@@ -762,7 +762,7 @@ mod neon {
 }
 
 #[cfg(not(all(target_arch = "aarch64", rav2d_neon_mc)))]
-use neon::*;
+use neon::{put_8tap, prep_8tap, put_bilin, prep_bilin, avg, w_avg, mask, blend, w_mask, warp_affine_8x8, warp_affine_8x8t};
 
 #[allow(clippy::too_many_arguments)]
 pub fn put_8tap_8bpc(

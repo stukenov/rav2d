@@ -139,7 +139,7 @@ struct WedgeCodeType {
     y_offset: u8,
 }
 
-use WedgeDirection::*;
+use WedgeDirection::{Wedge0, Wedge14, Wedge27, Wedge45, Wedge63, Wedge90, Wedge117, Wedge135, Wedge153, Wedge166, Wedge180, Wedge194, Wedge207, Wedge225, Wedge243, Wedge270, Wedge297, Wedge315, Wedge333, Wedge346};
 
 static WEDGE_CODEBOOK_16: [WedgeCodeType; 68] = [
     WedgeCodeType {
@@ -715,7 +715,7 @@ fn init_wedge_masks(masks: &mut Masks) {
 
 fn init_ii_masks(masks: &mut Masks) {
     // DC mask: all 32
-    for v in masks.ii_dc.iter_mut() {
+    for v in &mut masks.ii_dc {
         *v = 32;
     }
 
@@ -909,7 +909,7 @@ mod tests {
         let masks = init_masks();
         // All non-DC inter-intra mask values should be in [0, 64].
         for &v in &masks.ii_nondc {
-            assert!(v <= 64, "ii_nondc values should be <= 64, got {}", v);
+            assert!(v <= 64, "ii_nondc values should be <= 64, got {v}");
         }
     }
 
@@ -917,7 +917,7 @@ mod tests {
     fn test_wedge_444_value_range() {
         let masks = init_masks();
         for &v in &masks.wedge_444 {
-            assert!(v <= 64, "wedge_444 values should be <= 64, got {}", v);
+            assert!(v <= 64, "wedge_444 values should be <= 64, got {v}");
         }
     }
 
@@ -926,7 +926,7 @@ mod tests {
         let masks = init_masks();
         // TMVP values should be 0, 1, or 2.
         for &v in &masks.wedge_tmvp {
-            assert!(v <= 2, "wedge_tmvp values should be 0, 1, or 2, got {}", v);
+            assert!(v <= 2, "wedge_tmvp values should be 0, 1, or 2, got {v}");
         }
     }
 

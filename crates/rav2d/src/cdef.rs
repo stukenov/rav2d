@@ -261,7 +261,7 @@ pub fn backup2lines_plane<P: Pixel>(
 }
 
 /// Backup a 2-pixel-wide column from a single plane for CDEF.
-/// Saves pixels at (x_off - 2) and (x_off - 1) for `rows` rows.
+/// Saves pixels at (`x_off` - 2) and (`x_off` - 1) for `rows` rows.
 pub fn backup2x8_plane<P: Pixel>(
     dst: &mut [[P; 2]],
     src: &[P],
@@ -590,7 +590,7 @@ pub struct CdefBrowParams<'a> {
     pub mask_cdef_idx: &'a [[i8; 16]],
     /// `noskip_mask[sb256x][by_idx][sb64x_idx]`, `by_idx = (by & 0x3e) >> 1`.
     pub mask_noskip: &'a [[[u16; 4]; 32]],
-    /// Per-cdef-index raw strengths (0..n_strengths) for Y and UV.
+    /// Per-cdef-index raw strengths (`0..n_strengths`) for Y and UV.
     pub y_strength: &'a [u8],
     pub uv_strength: &'a [u8],
     /// Per-SB256 lossless masks; CDEF (and CCSO) skip losslessly-coded blocks.
@@ -607,7 +607,7 @@ const UV_DIRS: [[u8; 8]; 2] = [[0, 1, 2, 3, 4, 5, 6, 7], [7, 0, 2, 4, 5, 6, 6, 6
 /// Backup the bottom 2 rows of the current 8-row band into a toggled CDEF line
 /// bank (each plane bank is laid out with the plane's positive stride spacing so
 /// the next band can read it as `top`). Port of dav2d `backup2lines`
-/// (cdef_apply_tmpl.c:41) for positive strides (single-thread path).
+/// (`cdef_apply_tmpl.c:41`) for positive strides (single-thread path).
 fn cdef_backup2lines_bank<P: Pixel>(
     bank: &mut [Vec<P>; 3],
     src_y: &[P],
@@ -901,13 +901,12 @@ pub fn cdef_brow<BD: BitDepth>(
                     let yr = (2 * by_idx).min(63);
                     let yl = p.mask_ll_y.get(sb256x);
                     let ul = p.mask_ll_uv.get(sb256x);
-                    let y0 = yl.map(|m| m[yr][sb64x_idx]).unwrap_or(0);
-                    let y1 = yl.map(|m| m[(yr + 1).min(63)][sb64x_idx]).unwrap_or(0);
+                    let y0 = yl.map_or(0, |m| m[yr][sb64x_idx]);
+                    let y1 = yl.map_or(0, |m| m[(yr + 1).min(63)][sb64x_idx]);
                     let uvr = ((2 * by_idx) >> ss_ver).min(63);
-                    let u0 = ul.map(|m| m[uvr][sb64x_idx]).unwrap_or(0);
+                    let u0 = ul.map_or(0, |m| m[uvr][sb64x_idx]);
                     let u1 = ul
-                        .map(|m| m[(uvr + (1 - ss_ver)).min(63)][sb64x_idx])
-                        .unwrap_or(0);
+                        .map_or(0, |m| m[(uvr + (1 - ss_ver)).min(63)][sb64x_idx]);
                     (y0, y1, u0, u1)
                 } else {
                     (0, 0, 0, 0)

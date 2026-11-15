@@ -1,6 +1,6 @@
 //! Portable SIMD kernels (via the `wide` crate) for the hot scalar inner loops.
 //!
-//! `wide` compiles one source to NEON (aarch64) / AVX2 (x86_64) / SSE / a scalar
+//! `wide` compiles one source to NEON (aarch64) / AVX2 (`x86_64`) / SSE / a scalar
 //! fallback, on **stable** Rust with a **safe** API (no `unsafe`, no nightly).
 //! Every kernel here is bit-exact with its scalar reference — the unit tests in
 //! this module assert SIMD output == an independent scalar reimplementation over
@@ -328,7 +328,7 @@ pub fn row_clip(tmp: &mut [i32], n: usize, rnd: i32, shift: i32, min: i32, max: 
     }
 }
 
-/// itx plain residual-add row (dpcm_flag 0): `dst[x] = clip(dst[x] + ((c[x]+rnd)>>shift))`.
+/// itx plain residual-add row (`dpcm_flag` 0): `dst[x] = clip(dst[x] + ((c[x]+rnd)>>shift))`.
 #[inline]
 pub fn residual_add_row<BD: BitDepth>(
     bd: BD,
@@ -1233,7 +1233,7 @@ mod tests {
                 let rows: Vec<Vec<u8>> = (0..nrows)
                     .map(|_| (0..bufw).map(|_| rng.u8b()).collect())
                     .collect();
-                let rowrefs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+                let rowrefs: Vec<&[u8]> = rows.iter().map(std::vec::Vec::as_slice).collect();
                 for col_off in [6usize, 7] {
                     let base_cell = 0usize;
                     let col0 = col_off + base_cell * 2;

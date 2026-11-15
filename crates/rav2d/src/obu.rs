@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::env::get_poc_diff;
 use crate::error::Rav2dError;
 use crate::getbits::GetBits;
-use crate::headers::*;
+use crate::headers::{PixelLayout, SegmentationDataSet, TileInfo, MAX_TILE_COLS, MAX_TILE_ROWS, FrameHeader, SequenceHeader, AdaptiveBoolean, FilmGrainData, ObuType, FrameType, PRIMARY_REF_NONE, FilterMode, MAX_SEGMENTS, RestorationType, TxfmMode, WarpedMotionType, ContentLightLevel, MasteringDisplay, ContentInterpretation, ScanType, ColorDescription, ColorPrimaries, TransferCharacteristics, MatrixCoefficients, ChromaSamplePosition, AspectRatio};
 use crate::internal::{DecoderContext, RefState, TileGroup};
 use crate::intops::{iclip, iclip_u8, imax, imin, ulog2};
 use crate::warpmv::resolve_divisor_32;
@@ -119,7 +119,7 @@ fn parse_tile_info(
         // residual overflow of col_start_sb on malformed input.
         while sbx < fsbw && (thdr.cols as usize) < crate::headers::MAX_TILE_COLS {
             thdr.col_start_sb[thdr.cols as usize] = (sbx * sbmul) as u16;
-            let add = tile_w + if extra > 0 { 1 } else { 0 };
+            let add = tile_w + i32::from(extra > 0);
             sbx += add;
             thdr.cols += 1;
             extra -= 1;
@@ -136,7 +136,7 @@ fn parse_tile_info(
         let mut sby = 0;
         while sby < fsbh && (thdr.rows as usize) < crate::headers::MAX_TILE_ROWS {
             thdr.row_start_sb[thdr.rows as usize] = (sby * sbmul) as u16;
-            let add = tile_h + if extra > 0 { 1 } else { 0 };
+            let add = tile_h + i32::from(extra > 0);
             sby += add;
             thdr.rows += 1;
             extra -= 1;
@@ -225,7 +225,7 @@ pub fn parse_tile_info_frmhdr(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, gb
     hdr.sb128 = if hdr.is_inter_or_switch() {
         seqhdr.sb128
     } else {
-        if seqhdr.sb128 != 0 { 1 } else { 0 }
+        u8::from(seqhdr.sb128 != 0)
     };
 
     let mut reuse_allowed = false;
@@ -234,17 +234,17 @@ pub fn parse_tile_info_frmhdr(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, gb
         let sbsz_log2 = 6 + hdr.sb128 as i32;
         let sbw = (hdr.width + sbsz_min1) >> sbsz_log2;
         let sbh = (hdr.height + sbsz_min1) >> sbsz_log2;
-        if !seqhdr.tiling.t.uniform {
+        if seqhdr.tiling.t.uniform {
+            let tile_w = (sbw + seqhdr.tiling.t.cols as i32 - 1) >> seqhdr.tiling.t.log2_cols;
+            let tile_h = (sbh + seqhdr.tiling.t.rows as i32 - 1) >> seqhdr.tiling.t.log2_rows;
+            reuse_allowed = tile_w * (seqhdr.tiling.t.cols as i32 - 1) < sbw
+                && tile_h * (seqhdr.tiling.t.rows as i32 - 1) < sbh;
+        } else {
             let seq_sbsz_min1 = (64i32 << seqhdr.sb128) - 1;
             let seq_sbsz_log2 = 6 + seqhdr.sb128 as i32;
             let seq_sbw = (seqhdr.max_width + seq_sbsz_min1) >> seq_sbsz_log2;
             let seq_sbh = (seqhdr.max_height + seq_sbsz_min1) >> seq_sbsz_log2;
             reuse_allowed = seq_sbw == sbw && seq_sbh == sbh;
-        } else {
-            let tile_w = (sbw + seqhdr.tiling.t.cols as i32 - 1) >> seqhdr.tiling.t.log2_cols;
-            let tile_h = (sbh + seqhdr.tiling.t.rows as i32 - 1) >> seqhdr.tiling.t.log2_rows;
-            reuse_allowed = tile_w * (seqhdr.tiling.t.cols as i32 - 1) < sbw
-                && tile_h * (seqhdr.tiling.t.rows as i32 - 1) < sbh;
         }
     }
 
@@ -254,7 +254,9 @@ pub fn parse_tile_info_frmhdr(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, gb
             || (seqhdr.tiling.present == AdaptiveBoolean::Adaptive && gb.get_bit() != 0))
     {
         hdr.tiling.t = seqhdr.tiling.t.clone();
-        if hdr.sb128 != seqhdr.sb128 {
+        if hdr.sb128 == seqhdr.sb128 {
+            sbmul = 1;
+        } else {
             debug_assert!(hdr.sb128 == 1 && seqhdr.sb128 == 2 && hdr.is_key_or_intra());
             sbmul = 2;
             for n in 0..hdr.tiling.t.rows as usize {
@@ -263,8 +265,6 @@ pub fn parse_tile_info_frmhdr(hdr: &mut FrameHeader, seqhdr: &SequenceHeader, gb
             for n in 0..hdr.tiling.t.cols as usize {
                 hdr.tiling.t.col_start_sb[n] *= 2;
             }
-        } else {
-            sbmul = 1;
         }
     } else {
         sbmul = if seqhdr.sb128 == 2 && hdr.is_key_or_intra() {
@@ -645,25 +645,21 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     } else {
         hdr.screen_content_tools = if gb.get_bit() != 0 {
             AdaptiveBoolean::Adaptive
+        } else if gb.get_bit() != 0 {
+            AdaptiveBoolean::On
+        } else {
+            AdaptiveBoolean::Off
+        };
+        hdr.force_integer_mv = if hdr.screen_content_tools == AdaptiveBoolean::Off {
+            AdaptiveBoolean::Adaptive
         } else {
             if gb.get_bit() != 0 {
+                AdaptiveBoolean::Adaptive
+            } else if gb.get_bit() != 0 {
                 AdaptiveBoolean::On
             } else {
                 AdaptiveBoolean::Off
             }
-        };
-        hdr.force_integer_mv = if hdr.screen_content_tools != AdaptiveBoolean::Off {
-            if gb.get_bit() != 0 {
-                AdaptiveBoolean::Adaptive
-            } else {
-                if gb.get_bit() != 0 {
-                    AdaptiveBoolean::On
-                } else {
-                    AdaptiveBoolean::Off
-                }
-            }
-        } else {
-            AdaptiveBoolean::Adaptive
         };
     }
 
@@ -698,11 +694,7 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
 
     hdr.avg_cdf = hdr.reduced_still_picture_header || gb.get_bit() != 0;
     if hdr.avg_cdf {
-        hdr.avg_cdf_type = if hdr.reduced_still_picture_header || gb.get_bit() != 0 {
-            1
-        } else {
-            0
-        };
+        hdr.avg_cdf_type = u8::from(hdr.reduced_still_picture_header || gb.get_bit() != 0);
     }
 
     if hdr.layout != PixelLayout::I400 {
@@ -806,7 +798,7 @@ pub fn parse_sequence_header(data: &[u8]) -> Result<SequenceHeader> {
     parse_seq_hdr(&mut gb, false)
 }
 
-/// dav2d DAV2D_MAX_MFH_NUM: multi-frame header ids are 1..16.
+/// dav2d `DAV2D_MAX_MFH_NUM`: multi-frame header ids are 1..16.
 pub const MAX_MFH_NUM: usize = 16;
 
 pub fn parse_frame_hdr(
@@ -1134,7 +1126,7 @@ pub fn parse_frame_hdr(
                 hdr.sb128 = if hdr.is_inter_or_switch() {
                     seqhdr.sb128
                 } else {
-                    if seqhdr.sb128 != 0 { 1 } else { 0 }
+                    u8::from(seqhdr.sb128 != 0)
                 };
                 hdr.tiling.t.rows = 1;
                 hdr.tiling.t.cols = 1;
@@ -1468,7 +1460,7 @@ pub fn parse_frame_hdr(
         // restoration
         if hdr.all_lossless == 0 && seqhdr.restoration {
             for p in 0..3usize {
-                let disable_mask = seqhdr.rst_disable_mask[if p != 0 { 1 } else { 0 }];
+                let disable_mask = seqhdr.rst_disable_mask[usize::from(p != 0)];
                 hdr.restoration.p[p].restoration_type = if disable_mask == 0 {
                     gb.get_bits(2) as u8
                 } else if disable_mask == 3 {
@@ -1554,7 +1546,7 @@ pub fn parse_frame_hdr(
                     continue;
                 }
                 let n_feat = 16 + 2 * (p != 0) as usize;
-                let n_ref_filters = if seqhdr.rst_disable_mask[if p != 0 { 1 } else { 0 }] & 1 != 0
+                let n_ref_filters = if seqhdr.rst_disable_mask[usize::from(p != 0)] & 1 != 0
                 {
                     16
                 } else {
@@ -1615,7 +1607,7 @@ pub fn parse_frame_hdr(
                     }
                 }
 
-                let n_filters = if seqhdr.rst_disable_mask[if p != 0 { 1 } else { 0 }] & 1 != 0 {
+                let n_filters = if seqhdr.rst_disable_mask[usize::from(p != 0)] & 1 != 0 {
                     16usize
                 } else {
                     64
@@ -2505,7 +2497,7 @@ pub fn get_ref_frames(
         } else if num[0] < num[1] {
             furthest_idx[1]
         } else {
-            furthest_idx[if maxpocdiff[0] < -maxpocdiff[1] { 1 } else { 0 }]
+            furthest_idx[usize::from(maxpocdiff[0] < -maxpocdiff[1])]
         };
         if idx < 7 {
             sort_idx.copy_within(idx + 1..8, idx);
@@ -3681,7 +3673,7 @@ mod tests {
         let data = [0x00, 0x80];
         let mut gb = GetBits::new(&data);
         let result = parse_fgm_hdr(&mut gb, PixelLayout::I420).unwrap();
-        assert!(result.iter().all(|x| x.is_none()));
+        assert!(result.iter().all(std::option::Option::is_none));
     }
 
     #[test]
@@ -3900,6 +3892,7 @@ mod tests {
         let mut failures = Vec::new();
         for entry in entries.unwrap().flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
+            #[allow(clippy::case_sensitive_file_extension_comparisons)] // corpus files are exactly `.obu`
             if !name.ends_with(".obu") {
                 continue;
             }

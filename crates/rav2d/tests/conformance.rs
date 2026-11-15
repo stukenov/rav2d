@@ -1,3 +1,60 @@
+// clippy pedantic exception policy for rav2d (audit `-D clippy::pedantic`).
+// rav2d is a faithful port of dav2d (C): the mechanical findings (~350 sites)
+// were already fixed; the groups below are intentional port-of-dav2d idioms
+// and remaining MaybeIncorrect-suggestion stragglers (Phase-2 candidates).
+// Source attributes are used instead of cargo [lints] tables because cargo
+// injects the latter as CLI --allow flags that a later `-D` would override.
+
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::ptr_cast_constness)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::many_single_char_names)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::struct_field_names)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::fn_params_excessive_bools)]
+#![allow(clippy::inline_always)]
+#![allow(clippy::trivially_copy_pass_by_ref)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::stable_sort_primitive)]
+#![allow(clippy::comparison_chain)]
+#![allow(clippy::unreadable_literal)]
+#![allow(clippy::decimal_bitwise_operands)]
+#![allow(clippy::verbose_bit_mask)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::no_effect_underscore_binding)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::assigning_clones)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::match_wildcard_for_single_variants)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::collapsible_else_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::unnecessary_box_returns)]
+#![allow(clippy::large_stack_arrays)]
+#![allow(clippy::format_push_string)]
+#![allow(clippy::default_trait_access)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::same_functions_in_if_condition)]
+#![allow(clippy::manual_slice_fill)]
+#![allow(clippy::manual_is_variant_and)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::assert_is_empty)]
+#![allow(clippy::manual_assert)]
+#![allow(clippy::explicit_iter_loop)]
+#![allow(clippy::overly_complex_bool_expr)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::format_collect)]
+
 //! Bit-exact conformance harness: decode a clip with the dav2d C reference (via
 //! the rav2d-sys FFI bindings) and with rav2d, and compare the output planes
 //! frame-by-frame.
@@ -5,7 +62,7 @@
 //! This is the acceptance gate reused by every reconstruction milestone. Run
 //! under the dav2d shared library, per CLAUDE.md:
 //!
-//!   DYLD_LIBRARY_PATH=$PWD/dav2d/build/src cargo test -p rav2d --test conformance
+//!   `DYLD_LIBRARY_PATH=$PWD/dav2d/build/src` cargo test -p rav2d --test conformance
 //!
 //! The full bit-exact comparison (`bit_exact_*`) is `#[ignore]`d until rav2d
 //! reconstruction produces pixels; the un-ignored test validates the reference
@@ -35,7 +92,7 @@ fn data(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data")).join(name)
 }
 
-/// Chroma subsampling (ss_hor, ss_ver) for a dav2d pixel layout.
+/// Chroma subsampling (`ss_hor`, `ss_ver`) for a dav2d pixel layout.
 /// I400=0, I420=1, I422=2, I444=3.
 fn ss(layout: i32) -> (i32, i32) {
     match layout {
@@ -71,7 +128,7 @@ unsafe fn extract_planes(pic: &rav2d_sys::Dav2dPicture) -> FramePlanes {
         }
         let pw = if pl == 0 { w } else { (w + ssh) >> ssh };
         let ph = if pl == 0 { h } else { (h + ssv) >> ssv };
-        let stride = pic.stride[if pl == 0 { 0 } else { 1 }];
+        let stride = pic.stride[usize::from(pl != 0)];
         let base = pic.data[pl] as *const u8;
         if base.is_null() {
             continue;
@@ -404,7 +461,7 @@ fn bit_exact_avm_reference_md5() {
     eprintln!("bit_exact_avm_reference_md5: {checked} vectors match avmdec");
 }
 
-/// DAV2D_INLOOPFILTER_ALL (deblock | cdef | ccso | wiener | gdf).
+/// `DAV2D_INLOOPFILTER_ALL` (deblock | cdef | ccso | wiener | gdf).
 const DAV2D_INLOOPFILTER_ALL: u32 = 31;
 
 /// Decode a clip with the dav2d C reference library, with in-loop filters off
@@ -425,18 +482,18 @@ pub fn dav2d_decode_invisible(path: &PathBuf) -> Vec<FramePlanes> {
 
     unsafe {
         let mut settings: sys::Dav2dSettings = std::mem::zeroed();
-        sys::dav2d_default_settings(&mut settings);
+        sys::dav2d_default_settings(&raw mut settings);
         settings.n_threads = 1;
         settings.apply_grain = 0;
         settings.inloop_filters = 0;
         settings.output_invisible_frames = 1;
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
-        let r = sys::dav2d_open(&mut ctx, &settings);
+        let r = sys::dav2d_open(&raw mut ctx, &raw const settings);
         assert_eq!(r, 0, "dav2d_open failed: {r}");
 
         let mut d: sys::Dav2dData = std::mem::zeroed();
-        let buf = sys::dav2d_data_create(&mut d, data.len());
+        let buf = sys::dav2d_data_create(&raw mut d, data.len());
         assert!(!buf.is_null(), "dav2d_data_create failed");
         std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
 
@@ -444,15 +501,15 @@ pub fn dav2d_decode_invisible(path: &PathBuf) -> Vec<FramePlanes> {
         loop {
             loop {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == EAGAIN || pr < 0 {
                     break;
                 }
                 frames.push(extract_planes(&pic));
-                sys::dav2d_picture_unref(&mut pic);
+                sys::dav2d_picture_unref(&raw mut pic);
             }
             if d.sz > 0 {
-                let sr = sys::dav2d_send_data(ctx, &mut d);
+                let sr = sys::dav2d_send_data(ctx, &raw mut d);
                 if sr < 0 && sr != EAGAIN {
                     panic!("dav2d_send_data failed: {sr}");
                 }
@@ -461,16 +518,16 @@ pub fn dav2d_decode_invisible(path: &PathBuf) -> Vec<FramePlanes> {
                 sys::dav2d_send_data(ctx, std::ptr::null_mut());
             } else {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == 0 {
                     frames.push(extract_planes(&pic));
-                    sys::dav2d_picture_unref(&mut pic);
+                    sys::dav2d_picture_unref(&raw mut pic);
                 } else {
                     break;
                 }
             }
         }
-        sys::dav2d_close(&mut ctx);
+        sys::dav2d_close(&raw mut ctx);
     }
 
     frames
@@ -485,7 +542,7 @@ pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePla
 
     unsafe {
         let mut settings: sys::Dav2dSettings = std::mem::zeroed();
-        sys::dav2d_default_settings(&mut settings);
+        sys::dav2d_default_settings(&raw mut settings);
         // Deterministic single-threaded reference. Film grain off so only the
         // in-loop filters differ between the pure-recon and filtered harnesses.
         settings.n_threads = 1;
@@ -493,12 +550,12 @@ pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePla
         settings.inloop_filters = inloop_filters;
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
-        let r = sys::dav2d_open(&mut ctx, &settings);
+        let r = sys::dav2d_open(&raw mut ctx, &raw const settings);
         assert_eq!(r, 0, "dav2d_open failed: {r}");
 
         // dav2d-owned data buffer.
         let mut d: sys::Dav2dData = std::mem::zeroed();
-        let buf = sys::dav2d_data_create(&mut d, data.len());
+        let buf = sys::dav2d_data_create(&raw mut d, data.len());
         assert!(!buf.is_null(), "dav2d_data_create failed");
         std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
 
@@ -507,7 +564,7 @@ pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePla
             // Drain all currently-available pictures.
             loop {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == EAGAIN {
                     break;
                 }
@@ -515,11 +572,11 @@ pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePla
                     break;
                 }
                 frames.push(extract_planes(&pic));
-                sys::dav2d_picture_unref(&mut pic);
+                sys::dav2d_picture_unref(&raw mut pic);
             }
 
             if d.sz > 0 {
-                let sr = sys::dav2d_send_data(ctx, &mut d);
+                let sr = sys::dav2d_send_data(ctx, &raw mut d);
                 if sr < 0 && sr != EAGAIN {
                     panic!("dav2d_send_data failed: {sr}");
                 }
@@ -530,17 +587,17 @@ pub fn dav2d_decode_filters(path: &PathBuf, inloop_filters: u32) -> Vec<FramePla
             } else {
                 // final drain pass already done above with no new pictures
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == 0 {
                     frames.push(extract_planes(&pic));
-                    sys::dav2d_picture_unref(&mut pic);
+                    sys::dav2d_picture_unref(&raw mut pic);
                 } else {
                     break;
                 }
             }
         }
 
-        sys::dav2d_close(&mut ctx);
+        sys::dav2d_close(&raw mut ctx);
     }
 
     frames
@@ -557,18 +614,18 @@ pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Ve
 
     unsafe {
         let mut settings: sys::Dav2dSettings = std::mem::zeroed();
-        sys::dav2d_default_settings(&mut settings);
+        sys::dav2d_default_settings(&raw mut settings);
         settings.n_threads = 1;
         settings.apply_grain = 0;
         settings.inloop_filters = inloop_filters;
         settings.output_invisible_frames = 1;
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
-        let r = sys::dav2d_open(&mut ctx, &settings);
+        let r = sys::dav2d_open(&raw mut ctx, &raw const settings);
         assert_eq!(r, 0, "dav2d_open failed: {r}");
 
         let mut d: sys::Dav2dData = std::mem::zeroed();
-        let buf = sys::dav2d_data_create(&mut d, data.len());
+        let buf = sys::dav2d_data_create(&raw mut d, data.len());
         assert!(!buf.is_null(), "dav2d_data_create failed");
         std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
 
@@ -576,15 +633,15 @@ pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Ve
         loop {
             loop {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == EAGAIN || pr < 0 {
                     break;
                 }
                 frames.push(extract_planes(&pic));
-                sys::dav2d_picture_unref(&mut pic);
+                sys::dav2d_picture_unref(&raw mut pic);
             }
             if d.sz > 0 {
-                let sr = sys::dav2d_send_data(ctx, &mut d);
+                let sr = sys::dav2d_send_data(ctx, &raw mut d);
                 if sr < 0 && sr != EAGAIN {
                     panic!("dav2d_send_data failed: {sr}");
                 }
@@ -593,16 +650,16 @@ pub fn dav2d_decode_filters_invisible(path: &PathBuf, inloop_filters: u32) -> Ve
                 sys::dav2d_send_data(ctx, std::ptr::null_mut());
             } else {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == 0 {
                     frames.push(extract_planes(&pic));
-                    sys::dav2d_picture_unref(&mut pic);
+                    sys::dav2d_picture_unref(&raw mut pic);
                 } else {
                     break;
                 }
             }
         }
-        sys::dav2d_close(&mut ctx);
+        sys::dav2d_close(&raw mut ctx);
     }
 
     frames
@@ -619,18 +676,18 @@ pub fn dav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
 
     unsafe {
         let mut settings: sys::Dav2dSettings = std::mem::zeroed();
-        sys::dav2d_default_settings(&mut settings);
+        sys::dav2d_default_settings(&raw mut settings);
         settings.n_threads = 1;
         settings.apply_grain = 1;
         settings.inloop_filters = DAV2D_INLOOPFILTER_ALL;
         settings.output_invisible_frames = 1;
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
-        let r = sys::dav2d_open(&mut ctx, &settings);
+        let r = sys::dav2d_open(&raw mut ctx, &raw const settings);
         assert_eq!(r, 0, "dav2d_open failed: {r}");
 
         let mut d: sys::Dav2dData = std::mem::zeroed();
-        let buf = sys::dav2d_data_create(&mut d, data.len());
+        let buf = sys::dav2d_data_create(&raw mut d, data.len());
         assert!(!buf.is_null(), "dav2d_data_create failed");
         std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
 
@@ -638,15 +695,15 @@ pub fn dav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
         loop {
             loop {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == EAGAIN || pr < 0 {
                     break;
                 }
                 frames.push(extract_planes(&pic));
-                sys::dav2d_picture_unref(&mut pic);
+                sys::dav2d_picture_unref(&raw mut pic);
             }
             if d.sz > 0 {
-                let sr = sys::dav2d_send_data(ctx, &mut d);
+                let sr = sys::dav2d_send_data(ctx, &raw mut d);
                 if sr < 0 && sr != EAGAIN {
                     panic!("dav2d_send_data failed: {sr}");
                 }
@@ -655,16 +712,16 @@ pub fn dav2d_decode_grain(path: &PathBuf) -> Vec<FramePlanes> {
                 sys::dav2d_send_data(ctx, std::ptr::null_mut());
             } else {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == 0 {
                     frames.push(extract_planes(&pic));
-                    sys::dav2d_picture_unref(&mut pic);
+                    sys::dav2d_picture_unref(&raw mut pic);
                 } else {
                     break;
                 }
             }
         }
-        sys::dav2d_close(&mut ctx);
+        sys::dav2d_close(&raw mut ctx);
     }
 
     frames
@@ -921,7 +978,7 @@ fn bit_exact_keyframe_luma() {
 
 /// M1b gate: frame-0 ALL PLANES (Y+U+V) must match the dav2d reference
 /// (in-loop filters off, film grain off), validating intra chroma reconstruction
-/// including CfL (explicit/implicit/MHCCP) and CCTX.
+/// including `CfL` (explicit/implicit/MHCCP) and CCTX.
 #[test]
 fn bit_exact_keyframe_allplanes() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
@@ -948,8 +1005,7 @@ fn bit_exact_keyframe_allplanes() {
         assert_eq!(
             r.len(),
             g.len(),
-            "frame 0 plane {} size differs",
-            plane_name
+            "frame 0 plane {plane_name} size differs"
         );
         let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
@@ -1017,8 +1073,7 @@ fn bit_exact_keyframe_filtered() {
         assert_eq!(
             r.len(),
             g.len(),
-            "frame 0 plane {} size differs",
-            plane_name
+            "frame 0 plane {plane_name} size differs"
         );
         let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
@@ -1077,12 +1132,9 @@ fn intra_frame0_sweep() {
         // appears in dav2d's coding-order output and can be matched to rav2d's.
         let reference = dav2d_decode_invisible(&path);
         let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rav2d_decode(&path)));
-        let got = match got {
-            Ok(g) => g,
-            Err(_) => {
-                summary.push(format!("{clip}: rav2d PANIC"));
-                continue;
-            }
+        let got = if let Ok(g) = got { g } else {
+            summary.push(format!("{clip}: rav2d PANIC"));
+            continue;
         };
         if reference.is_empty() {
             summary.push(format!("{clip}: dav2d no frames"));
@@ -1114,15 +1166,12 @@ fn intra_frame0_sweep() {
                     })
                     .sum::<usize>()
             });
-        let r = match r {
-            Some(r) => r,
-            None => {
-                summary.push(format!(
-                    "{clip}: no dav2d frame matches dims {}x{}",
-                    g.w, g.h
-                ));
-                continue;
-            }
+        let r = if let Some(r) = r { r } else {
+            summary.push(format!(
+                "{clip}: no dav2d frame matches dims {}x{}",
+                g.w, g.h
+            ));
+            continue;
         };
         let mut diffs = [0usize; 3];
         let mut total = [0usize; 3];
@@ -1206,12 +1255,9 @@ fn bit_exact_filtered_sweep() {
                     })
                     .sum::<usize>()
             });
-        let r = match r {
-            Some(r) => r,
-            None => {
-                failures.push(format!("{clip}: no dav2d frame matches {}x{}", g.w, g.h));
-                continue;
-            }
+        let r = if let Some(r) = r { r } else {
+            failures.push(format!("{clip}: no dav2d frame matches {}x{}", g.w, g.h));
+            continue;
         };
         let (ssh, _) = ss(r.layout);
         let mut clip_fail = Vec::new();
@@ -1298,7 +1344,7 @@ fn filter_bisect() {
     }
 }
 
-/// Debug helper: decode one clip (env CLIP) with both decoders so RAV2D_TRACE
+/// Debug helper: decode one clip (env CLIP) with both decoders so `RAV2D_TRACE`
 /// emits matched LUMATX/CHROMATX traces to stderr.
 #[test]
 #[ignore = "debug trace harness"]
@@ -1559,7 +1605,7 @@ fn bit_exact_first_inter_frame() {
     for (pl, plane_name) in plane_names.iter().enumerate() {
         let rp = &r.planes[pl];
         let gp = &g.planes[pl];
-        assert_eq!(rp.len(), gp.len(), "plane {} size differs", plane_name);
+        assert_eq!(rp.len(), gp.len(), "plane {plane_name} size differs");
         let diff = rp.iter().zip(gp.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
             let first = rp.iter().zip(gp.iter()).position(|(a, b)| a != b).unwrap();
@@ -1682,9 +1728,9 @@ fn bit_exact_full_clip_bus64() {
 ///
 /// All six coding-order frames are bit-exact: the keyframe (poc0), the first
 /// inter frame (poc4 — single-ref MC, warp-affine, OBMC/interintra,
-/// segmentation), and the three frame_mode=2 whole-frame TIP frames (poc2/1/3).
+/// segmentation), and the three `frame_mode=2` whole-frame TIP frames (poc2/1/3).
 /// The TIP frames carry no entropy data; each superblock is reconstructed from a
-/// synthesized skip_txfm TIP block (`tip_frame_recon_sb`, decode.c:4381) driven
+/// synthesized `skip_txfm` TIP block (`tip_frame_recon_sb`, decode.c:4381) driven
 /// by the projected temporal-MV grid, which is reprojected per superblock row.
 #[test]
 fn bit_exact_full_clip_seg1() {
@@ -2203,7 +2249,7 @@ fn avmenc_failures(path: &PathBuf) -> Vec<String> {
 }
 
 /// Every avmenc vector not listed as pending matches avmdec's md5 and is
-/// bit-exact against dav2d on every coding-order frame (except AVMENC_AVMDEC_ONLY).
+/// bit-exact against dav2d on every coding-order frame (except `AVMENC_AVMDEC_ONLY`).
 #[test]
 fn avmenc_vectors_bit_exact() {
     let vectors = avmenc_vectors();
@@ -2276,7 +2322,7 @@ fn full_clip_report() {
 /// The dedicated `bit_exact_full_clip_*` gates above pin individual multi-frame
 /// inter clips; this sweep guarantees the whole corpus stays bit-exact end to
 /// end (intra + inter: single-ref/compound MC, warp, OBMC/interintra, TIP,
-/// opfl_pred, delta-q, segmentation, lossless, palette, multi-superblock-row).
+/// `opfl_pred`, delta-q, segmentation, lossless, palette, multi-superblock-row).
 /// Every shipped clip must be full-clip bit-exact across every coding-order frame.
 #[test]
 fn bit_exact_full_clip_sweep() {
@@ -2322,14 +2368,14 @@ fn bit_exact_full_clip_sweep() {
 /// off on both decoders. Reuses the `full_clip_failures` best-match harness,
 /// whose plane extraction is layout-aware (I400 → Y only, no chroma).
 ///
-/// This caught a real reconstruction bug: IntraBC luma/chroma residual incorrectly
+/// This caught a real reconstruction bug: `IntraBC` luma/chroma residual incorrectly
 /// applied the inter-DDT transform mask. dav2d gates that mask on `!b->intra`, but
-/// an IntraBC block has `b->intra == 1`, so it must NOT take the DDT branch. The
-/// 4:2:0 corpus happened to mask the bug (its IntraBC blocks paired with CfL/cctx
+/// an `IntraBC` block has `b->intra == 1`, so it must NOT take the DDT branch. The
+/// 4:2:0 corpus happened to mask the bug (its `IntraBC` blocks paired with CfL/cctx
 /// that overwrote the affected transform type); the monochrome vector exposes it.
 ///
 /// The 4:2:0 vector (`cov-420-128x128.obu`) is gated here too. Its inter frames
-/// used to diverge, which cost two blocks of frame 2: an IntraBC block leaves no
+/// used to diverge, which cost two blocks of frame 2: an `IntraBC` block leaves no
 /// temporal motion, so its footprint in the temporal MV grid has to be marked
 /// invalid, and rav2d was leaving it at the buffer's zero fill — which reads
 /// back as a valid candidate pointing at reference 0. A later frame then picked
@@ -2424,7 +2470,7 @@ fn coverage_decode_no_panic() {
 /// * `cov-multitile-416x240.obu` — the keyframe entropy stream desyncs at luma tx
 ///   bx=64 by=4 (an out-of-range eob, `INT_MIN`) under single-pass decode. dav2d
 ///   hits the identical desync at the identical block/MSAC state; its 2-pass task
-///   decoder merely swallows the error (the PASS_ENTROPY return is ignored in
+///   decoder merely swallows the error (the `PASS_ENTROPY` return is ignored in
 ///   `decode.c`), so dav2d emits a partial keyframe whose pixels are not even
 ///   stable across its own thread configs (MT vs `--threads 1` MD5s differ). The
 ///   vector is therefore not bit-exact-matchable; it remains for the no-panic
@@ -2456,9 +2502,9 @@ fn full_clip_filtered_failures(path: &PathBuf) -> Vec<String> {
     full_clip_mask_failures(path, DAV2D_INLOOPFILTER_ALL)
 }
 
-/// `full_clip_filtered_failures` for any DAV2D_INLOOPFILTER_* mask. rav2d gets
-/// the same mask through RAV2D_FILT_OVERRIDE, since the public
-/// InloopFilterType only exposes single filters and All.
+/// `full_clip_filtered_failures` for any `DAV2D_INLOOPFILTER`_* mask. rav2d gets
+/// the same mask through `RAV2D_FILT_OVERRIDE`, since the public
+/// `InloopFilterType` only exposes single filters and All.
 fn full_clip_mask_failures(path: &PathBuf, bits: u32) -> Vec<String> {
     let reference = dav2d_decode_filters_invisible(path, bits);
     let got = if bits == DAV2D_INLOOPFILTER_ALL {
@@ -2832,7 +2878,7 @@ fn bit_exact_hbd_filtered_sweep() {
 /// Film-grain application at 10-bit: decode the avm-encoded grain vector with
 /// grain synthesis ON in both decoders (plus full in-loop filters) and require
 /// byte-identical output. End-to-end gate for the HBD grain kernels
-/// (generate_grain, scaling LUT sized 1<<bitdepth, fgy/fguv at depth).
+/// (`generate_grain`, scaling LUT sized 1<<bitdepth, fgy/fguv at depth).
 #[test]
 fn bit_exact_hbd_grain_applied() {
     let clip = "hbd-10bit-128x128-grain.obu";

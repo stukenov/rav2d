@@ -10,7 +10,7 @@ pub struct GetBits<'a> {
 
 impl<'a> GetBits<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        assert!(!data.is_empty());
+        assert_ne!(data, []);
         Self {
             state: 0,
             bits_left: 0,
@@ -218,7 +218,7 @@ impl<'a> GetBits<'a> {
             return def;
         }
         let res = self.get_uniform(max - 1);
-        res + if res >= def { 1 } else { 0 }
+        res + u32::from(res >= def)
     }
 
     #[inline]

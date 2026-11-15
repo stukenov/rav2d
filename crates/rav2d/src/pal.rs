@@ -1,6 +1,6 @@
 pub fn pal_idx_finish(dst: &mut [u8], src: &[u8], bw: usize, bh: usize, w: usize, h: usize) {
-    debug_assert!((4..=64).contains(&bw) && (bw & (bw - 1)) == 0);
-    debug_assert!((4..=64).contains(&bh) && (bh & (bh - 1)) == 0);
+    debug_assert!((4..=64).contains(&bw) && bw.is_power_of_two());
+    debug_assert!((4..=64).contains(&bh) && bh.is_power_of_two());
     debug_assert!(w >= 4 && w <= bw && (w & 3) == 0);
     debug_assert!(h >= 4 && h <= bh && (h & 3) == 0);
 

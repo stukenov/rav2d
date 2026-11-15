@@ -318,11 +318,11 @@ pub fn decode_frame_init(
 
     let num_sb256 = (sb256w * sb256h) as usize;
     lf.mask.resize_with(num_sb256, Default::default);
-    for m in lf.mask.iter_mut() {
+    for m in &mut lf.mask {
         *m = Default::default();
     }
     lf.lr_mask.resize_with(num_sb256, Default::default);
-    for m in lf.lr_mask.iter_mut() {
+    for m in &mut lf.lr_mask {
         *m = Default::default();
     }
 
@@ -480,7 +480,7 @@ pub fn decode_frame_init_cdf(
     let mut tile_row = 0i32;
     let mut tile_col = 0i32;
 
-    for tg in tile_groups.iter() {
+    for tg in tile_groups {
         let mut data_off = 0usize;
         let mut remaining = tg.data.len();
 
@@ -724,7 +724,7 @@ pub fn get_prev_frame_segid(
 }
 
 /// Spatial-prediction of the current-frame segment id (`get_cur_frame_segid`,
-/// env.h:313). Returns the predicted seg_id and writes the neighbour context
+/// env.h:313). Returns the predicted `seg_id` and writes the neighbour context
 /// class into `seg_ctx`.
 pub fn get_cur_frame_segid(
     by: i32,
@@ -871,7 +871,7 @@ pub struct PartitionConstants {
 }
 
 const I: i8 = -1; // BS_INVALID shorthand
-use BlockSize::*;
+use BlockSize::{Bs256x256, Bs256x128, Bs128x128, Bs128x256, Bs128x64, Bs64x64, Bs64x128, Bs64x32, Bs64x16, Bs64x8, Bs32x32, Bs32x64, Bs16x64, Bs8x64, Bs64x4, Bs32x16, Bs16x32, Bs8x32, Bs32x8, Bs16x16, Bs8x16, Bs4x64, Bs32x4, Bs4x32, Bs16x8, Bs4x16, Bs8x8, Bs4x8, Bs16x4, Bs8x4, Bs4x4};
 
 pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
     let mut t = [PartitionConstants {
@@ -1076,7 +1076,7 @@ pub static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] = [[8, 12, 4, 10, 6], [8, 12, 4, 2
 // indexed by inter_mode - CompInterPredMode::NearMvNewMv
 pub static AMVD_MODE_CONTEXT: [u8; 10] = {
     let mut t = [0u8; 10];
-    use crate::levels::CompInterPredMode::*;
+    use crate::levels::CompInterPredMode::{NearMvNewMv, NewMvNearMv, OpflNearMvNewMv, OpflNewMvNearMv, JointNewMv, OpflJointNewMv, NewMvNewMv, OpflNewMvNewMv};
     let base = NearMvNewMv as usize;
     t[NearMvNewMv as usize - base] = 0;
     t[NewMvNearMv as usize - base] = 1;
@@ -1105,7 +1105,7 @@ pub fn decode_4way(msac: &mut MsacContext, r: i32, cdf: &mut [u16], n_bits: i32)
     debug_assert!(n_bits >= 4);
     let bin = msac.decode_symbol_adapt(cdf, 3) as i32;
     let rem =
-        msac.decode_bools_bypass((n_bits + bin + if bin == 0 { 1 } else { 0 } - 4) as u32) as i32;
+        msac.decode_bools_bypass((n_bits + bin + i32::from(bin == 0) - 4) as u32) as i32;
     let v = (if bin != 0 { 1 << (n_bits + bin - 4) } else { 0 }) + rem;
     let n = 1 << n_bits;
     if r * 2 <= n {
@@ -1678,7 +1678,7 @@ pub fn read_restoration_info(
     let is_uv = (p != 0) as usize;
 
     if frame_type == RestorationType::Switchable {
-        debug_assert!(p == 0);
+        debug_assert_eq!(p, 0);
         if msac.decode_bool_adapt(cdf_m.rst_switchable(0)) != 0 {
             lr.restoration_type = RestorationType::None as u8;
         } else {
@@ -1856,13 +1856,7 @@ pub fn derive_warpmv(
             let r2_idx = ra_off + (bx >> 1) as usize;
             init_odd = bx & 1;
             have_topleft = true;
-            let mut off = if BLOCK_DIMENSIONS[rt.ra[r2_idx].bs as usize][0] as i32
-                <= rt.ra[r2_idx].ox4 as i32 + init_odd
-            {
-                1
-            } else {
-                0
-            };
+            let mut off = i32::from(BLOCK_DIMENSIONS[rt.ra[r2_idx].bs as usize][0] as i32 <= rt.ra[r2_idx].ox4 as i32 + init_odd);
             let tr_ext = (bx + bw4) & (sb_step - 1) != 0
                 && (rt.ra[ra_off + ((bx + bw4) >> 1) as usize].ox4 != 0 || init_odd != 0);
             let tr_ext_i = tr_ext as i32;
@@ -1990,7 +1984,7 @@ pub fn extend_warpmv(
     let py = ((sy as i64) << 16) + mv0c.y as i64 * (1 << 13);
 
     if x_off >= 0 {
-        debug_assert!(y_off == -1);
+        debug_assert_eq!(y_off, -1);
         let ay = by * 4 - 1;
         let sh = 1 + b_dim[3] as i32;
         let apx = m[2] as i64 * sx as i64 + m[3] as i64 * ay as i64 + m[0] as i64;
@@ -2086,7 +2080,7 @@ pub struct SbFrameInfo {
     pub max_drl_bits: u8,
     /// Frame-header BAWP enable (inter block-adaptive weighted prediction).
     pub bawp: bool,
-    /// Sequence-header BAWP capability; the IntraBC `morph_pred` gate reads
+    /// Sequence-header BAWP capability; the `IntraBC` `morph_pred` gate reads
     /// this, NOT the per-frame flag (dav2d decode.c:2386 uses `seq_hdr->bawp`
     /// — the frame flag is inter-only syntax and stays 0 on key frames).
     pub seq_bawp: bool,
@@ -2308,7 +2302,7 @@ pub struct ReconScratch {
     /// Chroma coefficient / metadata storage used to split the chroma decode of
     /// a >64px block into a coef-read phase (with the first luma 64x64) and a
     /// recon phase (with the last), mirroring the `cbs_stage` mechanism in
-    /// `dav2d_recon_b`. `cf_uv` holds U then V coefficients (n_tu*16 each).
+    /// `dav2d_recon_b`. `cf_uv` holds U then V coefficients (`n_tu`*16 each).
     pub chroma_cf: Vec<i32>,
     pub chroma_txtp: [[u16; 2]; 256],
     pub chroma_eob: [[i16; 2]; 256],
@@ -2316,7 +2310,7 @@ pub struct ReconScratch {
     /// Per-4x4 luma transform type map (full txtp incl. secondary-tx bits),
     /// indexed `(by & 15) * 16 + (bx & 15)`. Written by the luma residual walk
     /// and read back to seed the inter chroma transform type (dav2d `txtp_map`,
-    /// recon_tmpl.c:2502 / 3540).
+    /// `recon_tmpl.c:2502` / 3540).
     pub txtp_map: [u16; 256],
     /// TIP per-8x8 refined-MV grid (`t->rmv`): a 16x16 grid (one entry per 8x8
     /// unit within a 128x128 superblock) of `[2 versions][2 refs]` MVs. Written
@@ -2328,7 +2322,7 @@ pub struct ReconScratch {
     /// indexed by `bx & 63` (above) / `by & 63` (left). Written by the palette
     /// recon (`copy_pal_block_y`) and read by `read_pal_plane` to build the
     /// per-block palette colour cache. Never explicitly reset — gating is via the
-    /// `pal_sz` block context, mirroring dav2d (recon_tmpl.c al_pal handling).
+    /// `pal_sz` block context, mirroring dav2d (`recon_tmpl.c` `al_pal` handling).
     pub al_pal: [[[u16; 8]; 64]; 2],
     /// Current palette block's colour list (`t->scratch.pal`, 8 entries). Filled
     /// by `read_pal_plane` during parse and consumed by the palette recon fill.
@@ -2364,10 +2358,10 @@ impl Default for ReconScratch {
 }
 
 /// Mutable reconstruction borrows bundled so only one new param threads through
-/// decode_sb's recursion (Rust auto-reborrows &mut ReconCtx at each call).
+/// `decode_sb`'s recursion (Rust auto-reborrows &mut `ReconCtx` at each call).
 /// Where a tx block's coefficients (and recon inputs) come from, the Rust
 /// analogue of dav2d's frame-thread pass split (decode.c `t->frame_thread.pass`,
-/// recon_tmpl.c `dav2d_read_coef_blocks`):
+/// `recon_tmpl.c` `dav2d_read_coef_blocks`):
 /// - `ParseRecon`: fused single-pass decode (parse symbols and reconstruct).
 /// - `ParseStage`: entropy pass — parse symbols, stage cf/cbi (and blocks) into
 ///   `FrameThread` storage, skip reconstruction.
@@ -2412,14 +2406,14 @@ pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
     /// Inter-intra / wedge / segmentation prediction masks (`dav2d_masks`),
     /// built once per frame; consumed by the compound + interintra recon.
     pub masks: &'f crate::wedge::Masks,
-    /// Per-superblock recon scratch (is_coded grid). Reset by the caller at each
+    /// Per-superblock recon scratch (`is_coded` grid). Reset by the caller at each
     /// superblock boundary, mirroring the C `memset(t->is_coded, ...)`.
     pub scratch: &'a mut ReconScratch,
     /// Temporary edge buffer for `prepare_intra_edges` (`t->scratch.edge`,
     /// 257 entries wide; we use a generous fixed slab indexed from the middle).
     pub edge: &'a mut [BD::Pixel],
     /// Current-frame segment id map (`f->cur_segmap`), `b4_stride * bh` entries.
-    /// Written by decode_b over the block footprint when segmentation is enabled.
+    /// Written by `decode_b` over the block footprint when segmentation is enabled.
     pub cur_segmap: &'a mut [u8],
     /// Previous-frame segment map (`f->prev_segmap`), present only when the frame
     /// has a primary reference; `None` for frame-0 / no-primary-ref keyframes.
@@ -2439,7 +2433,7 @@ pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
     /// Currently active dequant tables (`ts->dq`): either the frame-wide
     /// `recon.frame.dq` or `dqmem` when a per-SB delta-q shifts the qindex.
     pub dq_active: [[[u32; 2]; 3]; crate::headers::MAX_SEGMENTS],
-    /// Set when a parsed seg_id is out of range (`seg_id >= 16`), mirroring the
+    /// Set when a parsed `seg_id` is out of range (`seg_id >= 16`), mirroring the
     /// C `return -1` that aborts the frame.
     pub seg_id_err: bool,
     /// Loop-filter mask array (`f->lf.mask` / per-SB `Av2Filter`) — the gdf,
@@ -2454,13 +2448,13 @@ pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
     /// Previous-frame CCSO maps (`f->prev_ccsomap`); `None` per plane if absent.
     pub prev_ccsomap: [Option<&'a [u8]>; 3],
     /// Per-tile reference-MV state (`t->rt`): spatial `r` grid + above-row `ra` +
-    /// MV/warp banks. Maintained via splat for every block so IntraBC block
+    /// MV/warp banks. Maintained via splat for every block so `IntraBC` block
     /// vectors can be predicted from neighbours (decode.c `recon_b`).
     pub rt: &'a mut crate::refmvs::Tile,
     /// Frame-level reference-MV state (`f->rf`): iw4/ih4/sbsz + header refs.
     pub rf: &'a crate::refmvs::Frame,
     /// Current-frame temporal MV grid (`f->mvs` == `rf.rp`), written by the inter
-    /// splat so later frames can reference these MVs. Empty when ref_frame_mvs is
+    /// splat so later frames can reference these MVs. Empty when `ref_frame_mvs` is
     /// disabled. Held separately from `rf` (which is shared immutably) so the
     /// per-block temporal save can mutate it.
     pub cur_mvs: &'a mut [crate::refmvs::TemporalBlock],
@@ -2470,9 +2464,9 @@ pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
     /// Per-reference scaling parameters (`f->svc[i]`); scale==0 means unscaled.
     pub svc: &'a [[ScalableMotionParams; 2]; 7],
     /// Inter-chroma `u_has_cf` flag (`t->u_has_cf`): set by the U plane's coef
-    /// decode, consumed by the V plane's context (decode_coefs). Per chroma block.
+    /// decode, consumed by the V plane's context (`decode_coefs`). Per chroma block.
     pub scratch_u_has_cf: i32,
-    /// Sequence/frame headers needed by `refmvs_find` for IntraBC candidates.
+    /// Sequence/frame headers needed by `refmvs_find` for `IntraBC` candidates.
     pub seq_hdr: &'a crate::headers::SequenceHeader,
     pub frm_hdr: &'a crate::headers::FrameHeader,
     /// Per-block derived warp motion parameters (`t->warpmv[0..2]`), computed in
@@ -2488,7 +2482,7 @@ pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
     /// Per-plane block-adaptive weighted prediction state (`t->pb.bawp[plane]` =
     /// alpha/beta). The luma plane derives alpha/beta from neighbour templates;
     /// chroma reuses the luma alpha. Sub-blocks of a >64px partition reuse the
-    /// alpha/beta of the partition's first block (recon_tmpl.c `bawp`).
+    /// alpha/beta of the partition's first block (`recon_tmpl.c` `bawp`).
     pub bawp_ab: [(i32, i32); 3],
 }
 
@@ -2498,7 +2492,7 @@ pub struct ReconCtx<'a, 'f, BD: crate::pixel::BitDepth> {
 /// for the single-pass, single-thread case. Reads per-superblock restoration
 /// info and CDEF index reset, then drives `decode_sb` across the row.
 ///
-/// NOTE: the inter/IntraBC `refmvs` reset/save hooks (PASS_MVRES) are not yet
+/// NOTE: the inter/IntraBC `refmvs` reset/save hooks (`PASS_MVRES`) are not yet
 /// wired here — that lands with inter-frame support (M3). Intra/key frames take
 /// none of those paths.
 #[allow(clippy::too_many_arguments)]
@@ -2597,7 +2591,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
         let lf_idx = ((bx >> 6) + sb256y * sb256w) as usize;
 
         // Reset is_coded for this superblock (luma + chroma rows).
-        for row in recon_scratch.is_coded.iter_mut() {
+        for row in &mut recon_scratch.is_coded {
             row.fill(0);
         }
 
@@ -2937,7 +2931,7 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
 
 /// Run the single-threaded tile/superblock-row decode loop over a frame.
 ///
-/// Port of `dav2d_decode_frame_main` (decode.c:5130) for the n_tc == 1 case.
+/// Port of `dav2d_decode_frame_main` (decode.c:5130) for the `n_tc` == 1 case.
 /// Tiles are decoded sequentially (entropy/recon are tile-independent); the
 /// per-superblock-row post-filter interleaving that the C version performs is
 /// handled separately by the filter pass (M2).
@@ -3041,9 +3035,9 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     // `*_stride_px` below is the per-sample stride (byte stride / bytes-per-sample).
     let y_stride_bytes: usize = cur_pic.stride[0].unsigned_abs();
     let uv_stride_bytes: usize = cur_pic.stride[1].unsigned_abs();
-    let y_ptr = cur_pic.data[0].map(|p| p.as_ptr());
-    let u_ptr = cur_pic.data[1].map(|p| p.as_ptr());
-    let v_ptr = cur_pic.data[2].map(|p| p.as_ptr());
+    let y_ptr = cur_pic.data[0].map(std::ptr::NonNull::as_ptr);
+    let u_ptr = cur_pic.data[1].map(std::ptr::NonNull::as_ptr);
+    let v_ptr = cur_pic.data[2].map(std::ptr::NonNull::as_ptr);
 
     // bitdepth in bits from bitdepth_max (255 -> 8, 1023 -> 10, 4095 -> 12).
     let bitdepth_v: u32 = (crate::intops::ulog2((bitdepth_max_v + 1) as u32)) as u32;
@@ -3128,10 +3122,10 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     let _ = &mvs;
     if refmvs_active && seq_hdr.ref_frame_mvs {
         let needed = (fc_sb256h as usize) * 32 * ((b4_stride_v >> 1) as usize);
-        if rf.rp.len() != needed {
-            rf.rp = vec![refmvs::TemporalBlock::default(); needed];
-        } else {
+        if rf.rp.len() == needed {
             rf.rp.fill(refmvs::TemporalBlock::default());
+        } else {
+            rf.rp = vec![refmvs::TemporalBlock::default(); needed];
         }
     } else {
         rf.rp.clear();
@@ -3779,9 +3773,9 @@ impl FilterFrameParams {
 }
 
 /// Deferred per-superblock-row filter pass. Port of `dav2d_filter_sbrow`
-/// (recon_tmpl.c:4028) for the single-thread (`n_tc == 1`) path, in the exact
-/// dav2d order: deblock cols -> deblock rows -> copy_db -> CDEF(+CCSO) -> LR.
-/// Each stage is gated on `inloop` (DAV2D_INLOOPFILTER_* bits) plus the relevant
+/// (`recon_tmpl.c:4028`) for the single-thread (`n_tc == 1`) path, in the exact
+/// dav2d order: deblock cols -> deblock rows -> `copy_db` -> CDEF(+CCSO) -> LR.
+/// Each stage is gated on `inloop` (`DAV2D_INLOOPFILTER`_* bits) plus the relevant
 /// frame-header enable.
 #[allow(clippy::too_many_arguments)]
 fn filter_sbrow<BD: crate::pixel::BitDepth + crate::internal::LfPixelBufs>(
@@ -4160,7 +4154,7 @@ fn filter_sbrow<BD: crate::pixel::BitDepth + crate::internal::LfPixelBufs>(
 /// slice the CDEF brow can index by `sb256x`.
 fn collect_cdef_idx(mask: &[crate::lf_mask::Av2Filter], row: usize, sb256w: i32) -> Vec<[i8; 16]> {
     (0..sb256w as usize)
-        .map(|i| mask.get(row + i).map(|m| m.cdef_idx).unwrap_or([-1; 16]))
+        .map(|i| mask.get(row + i).map_or([-1; 16], |m| m.cdef_idx))
         .collect()
 }
 
@@ -4172,15 +4166,14 @@ fn collect_noskip(
     (0..sb256w as usize)
         .map(|i| {
             mask.get(row + i)
-                .map(|m| m.noskip_mask)
-                .unwrap_or([[0; 4]; 32])
+                .map_or([[0; 4]; 32], |m| m.noskip_mask)
         })
         .collect()
 }
 
 fn collect_ccso(mask: &[crate::lf_mask::Av2Filter], row: usize, sb256w: i32) -> Vec<[[u8; 16]; 3]> {
     (0..sb256w as usize)
-        .map(|i| mask.get(row + i).map(|m| m.ccso).unwrap_or([[0; 16]; 3]))
+        .map(|i| mask.get(row + i).map_or([[0; 16]; 3], |m| m.ccso))
         .collect()
 }
 
@@ -4192,8 +4185,7 @@ fn collect_ll_y(
     (0..sb256w as usize)
         .map(|i| {
             mask.get(row + i)
-                .map(|m| m.lossless_mask_y)
-                .unwrap_or([[0; 4]; 64])
+                .map_or([[0; 4]; 64], |m| m.lossless_mask_y)
         })
         .collect()
 }
@@ -4206,8 +4198,7 @@ fn collect_ll_uv(
     (0..sb256w as usize)
         .map(|i| {
             mask.get(row + i)
-                .map(|m| m.lossless_mask_uv)
-                .unwrap_or([[0; 4]; 64])
+                .map_or([[0; 4]; 64], |m| m.lossless_mask_uv)
         })
         .collect()
 }
@@ -4233,7 +4224,7 @@ fn build_ccso_plane_cfg(
 
 /// Orchestrate a single-threaded frame decode: init -> CDF init -> main loop.
 ///
-/// Port of `dav2d_decode_frame` (decode.c:5223) for the n_tc == 1 path. The
+/// Port of `dav2d_decode_frame` (decode.c:5223) for the `n_tc` == 1 path. The
 /// post-main CDF output merge (used as the entropy reference for later frames)
 /// and the explicit frame-exit unref cleanup are handled by Rust ownership /
 /// the caller; the inter-frame CDF-reference selection lands with M3.
@@ -4269,7 +4260,9 @@ pub fn decode_frame(
         n_passes,
     );
 
-    if frame_hdr.tip.frame_mode != 2 {
+    if frame_hdr.tip.frame_mode == 2 {
+        decode_tip_frame_init(&mut fc.ts, &frame_hdr, fc.sb_shift, fc.bw, fc.bh, n_tc);
+    } else {
         decode_frame_init_cdf(
             &mut fc.ts,
             &fc.tile,
@@ -4283,16 +4276,14 @@ pub fn decode_frame(
             n_passes,
             &mut fc.frame_thread.tile_start_off,
         )
-        .inspect_err(|_| {
+        .inspect_err(|()| {
             if env_flag!("RAV2D_TRACE_ERR") {
                 eprintln!("TRACE_ERR: decode_frame_init_cdf failed");
             }
         })?;
-    } else {
-        decode_tip_frame_init(&mut fc.ts, &frame_hdr, fc.sb_shift, fc.bw, fc.bh, n_tc);
     }
 
-    decode_frame_main(fc, n_passes).inspect_err(|_| {
+    decode_frame_main(fc, n_passes).inspect_err(|()| {
         if env_flag!("RAV2D_TRACE_ERR") {
             eprintln!("TRACE_ERR: decode_frame_main failed");
         }
@@ -4336,7 +4327,7 @@ pub fn decode_frame(
 /// data, then run the single-threaded decode.
 ///
 /// Port of the frame-setup portion of `dav2d_submit_frame` (decode.c:5282) for
-/// the n_fc == 1 path, covering frame geometry derivation (decode.c:5517-5530)
+/// the `n_fc` == 1 path, covering frame geometry derivation (decode.c:5517-5530)
 /// and dispatch to `decode_frame`. Picture allocation, reference-frame setup and
 /// output queueing are added with reconstruction (M1) and inter support (M3);
 /// this currently exercises the entropy/parse pass end-to-end.
@@ -4457,7 +4448,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
             let p = rpic.unwrap();
             fc.refp[i].pic = Some(p.clone());
             fc.refp[i].frame_hdr = rp.frame_hdr.clone();
-            ref_coded_width[i] = p.frame_hdr.as_ref().map(|h| h.width).unwrap_or(p.p.w);
+            ref_coded_width[i] = p.frame_hdr.as_ref().map_or(p.p.w, |h| h.width);
             if frame_hdr.width != p.p.w || frame_hdr.height != p.p.h {
                 let scale_fac = |ref_sz: i32, this_sz: i32| -> i32 {
                     (((ref_sz << 14) + (this_sz >> 1)) / this_sz) as i32
@@ -4543,8 +4534,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
                 let rpoc = fc.refp[i]
                     .frame_hdr
                     .as_ref()
-                    .map(|h| h.frame_offset as i32)
-                    .unwrap_or(0);
+                    .map_or(0, |h| h.frame_offset as i32);
                 fc.refpoc[i] = rpoc as u8;
                 let delta = crate::env::get_poc_diff(nbits, rpoc, poc);
                 fc.refdist[i] = delta as i8;
@@ -4574,7 +4564,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
             for i in 0..7 {
                 let refidx = frame_hdr.refidx[i] as usize;
                 let ref_w = ((ref_coded_width[i] + 7) >> 3) << 1;
-                let ref_h = ((fc.refp[i].pic.as_ref().map(|p| p.p.h).unwrap_or(0) + 7) >> 3) << 1;
+                let ref_h = ((fc.refp[i].pic.as_ref().map_or(0, |p| p.p.h) + 7) >> 3) << 1;
                 if c.refs[refidx].refmvs.is_some() && ref_w == bw && ref_h == bh {
                     fc.ref_mvs[i] = c.refs[refidx].refmvs.clone();
                 } else {
@@ -4584,8 +4574,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
                 fc.refcnt[i] = fc.refp[i]
                     .frame_hdr
                     .as_ref()
-                    .map(|h| h.n_ref_frames)
-                    .unwrap_or(0);
+                    .map_or(0, |h| h.n_ref_frames);
             }
         }
     }
@@ -4596,7 +4585,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
     {
         let pri = frame_hdr.primary_ref_frame as usize;
         let ref_w = ((ref_coded_width[pri] + 7) >> 3) << 1;
-        let ref_h = ((fc.refp[pri].pic.as_ref().map(|p| p.p.h).unwrap_or(0) + 7) >> 3) << 1;
+        let ref_h = ((fc.refp[pri].pic.as_ref().map_or(0, |p| p.p.h) + 7) >> 3) << 1;
         let bw = ((frame_hdr.width + 7) >> 3) << 1;
         let bh = ((frame_hdr.height + 7) >> 3) << 1;
         if ref_w == bw && ref_h == bh {
@@ -4660,15 +4649,15 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
         } else {
             in_cdf_ref.map(std::sync::Arc::new)
         };
-    let cur_segmap_arc: Option<Vec<u8>> = if !fc.cur_segmap.is_empty() {
+    let cur_segmap_arc: Option<Vec<u8>> = if fc.cur_segmap.is_empty() {
+        None
+    } else {
         Some(fc.cur_segmap.clone())
-    } else {
-        None
     };
-    let cur_ccsomap_arc: Option<Vec<u8>> = if !fc.cur_ccsomap.is_empty() {
-        Some(fc.cur_ccsomap.clone())
-    } else {
+    let cur_ccsomap_arc: Option<Vec<u8>> = if fc.cur_ccsomap.is_empty() {
         None
+    } else {
+        Some(fc.cur_ccsomap.clone())
     };
     let refresh = frame_hdr.refresh_frame_flags;
     for i in 0..crate::headers::NUM_REF_FRAMES {
@@ -4756,8 +4745,7 @@ fn ref_slot_poc(c: &crate::internal::DecoderContext, n: usize) -> Option<u8> {
     Some(
         pic.frame_hdr
             .as_ref()
-            .map(|h| h.frame_offset)
-            .unwrap_or(hdr.frame_offset),
+            .map_or(hdr.frame_offset, |h| h.frame_offset),
     )
 }
 
@@ -4907,7 +4895,7 @@ pub(crate) fn clone_picture_mt(
     for pl in 0..n_planes {
         let (sp, dp) = (src.data[pl], dst.data[pl]);
         if let (Some(sp), Some(dp)) = (sp, dp) {
-            let stride_idx = if pl == 0 { 0 } else { 1 };
+            let stride_idx = usize::from(pl != 0);
             let s_stride = src.stride[stride_idx];
             let d_stride = dst.stride[stride_idx];
             let (pw, ph) = if pl == 0 {
@@ -4950,7 +4938,7 @@ pub(crate) fn picture_has_grain(pic: &crate::picture::Picture) -> bool {
 }
 
 /// Produce a display copy of `src` with film grain synthesised into it, mirroring
-/// dav2d's `dav2d_apply_grain` (lib.c) + `dav2d_apply_grain_8bpc` (fg_apply): the
+/// dav2d's `dav2d_apply_grain` (lib.c) + `dav2d_apply_grain_8bpc` (`fg_apply)`: the
 /// reconstruction/reference copy stays ungrained (grain is display-only and must
 /// not feed inter prediction), so grain is written into a fresh copy.
 ///
@@ -4981,8 +4969,7 @@ pub(crate) fn apply_grain_to_picture_mt(
     let seed = src
         .frame_hdr
         .as_ref()
-        .map(|h| h.film_grain.seed)
-        .unwrap_or(0);
+        .map_or(0, |h| h.film_grain.seed);
 
     let ss_ver = src.p.layout == crate::headers::PixelLayout::I420;
     let ss_hor = matches!(
@@ -5142,7 +5129,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
 ) -> Result<Av2Block, ()> {
     let _ = &mut *recon;
     let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
-    debug_assert!(bs != BlockSize::Invalid);
+    debug_assert_ne!(bs, BlockSize::Invalid);
     let bs_idx = bs as u8 as usize;
 
     let b_dim = &BLOCK_DIMENSIONS[bs_idx];
@@ -5226,7 +5213,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     }
     let trace_blk = std::env::var("RAV2D_BLK")
         .ok()
-        .map(|s| {
+        .is_some_and(|s| {
             if s == "all" {
                 return true;
             }
@@ -5240,8 +5227,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             let ty = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
             let tx = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
             ty == by && tx == bx
-        })
-        .unwrap_or(false);
+        });
     if trace_blk {
         eprintln!(
             "  CK decode_b[y={} x={} bs={}] rng={}",
@@ -5281,11 +5267,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             let off = (by4 + bh4 as usize).saturating_sub(1);
             sm[0] = l.skip_mode[off];
             st[0] = l.skip_txfm[off];
-            intra_vals[0] = if l.intra[off] != 0 && l.intrabc[off] == 0 {
-                1
-            } else {
-                0
-            };
+            intra_vals[0] = u8::from(l.intra[off] != 0 && l.intrabc[off] == 0);
             ibc_vals[0] = l.intrabc[off];
             r0[0] = l.r#ref[0][off];
             r1[0] = l.r#ref[1][off];
@@ -5298,11 +5280,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             let off = (bx4 + bw4 as usize).saturating_sub(1);
             sm[idx] = a.skip_mode[off];
             st[idx] = a.skip_txfm[off];
-            intra_vals[idx] = if a.intra[off] != 0 && a.intrabc[off] == 0 {
-                1
-            } else {
-                0
-            };
+            intra_vals[idx] = u8::from(a.intra[off] != 0 && a.intrabc[off] == 0);
             ibc_vals[idx] = a.intrabc[off];
             r0[idx] = a.r#ref[0][off];
             r1[idx] = a.r#ref[1][off];
@@ -5314,11 +5292,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         if idx < 2 && have_left {
             sm[idx] = l.skip_mode[by4];
             st[idx] = l.skip_txfm[by4];
-            intra_vals[idx] = if l.intra[by4] != 0 && l.intrabc[by4] == 0 {
-                1
-            } else {
-                0
-            };
+            intra_vals[idx] = u8::from(l.intra[by4] != 0 && l.intrabc[by4] == 0);
             ibc_vals[idx] = l.intrabc[by4];
             r0[idx] = l.r#ref[0][by4];
             r1[idx] = l.r#ref[1][by4];
@@ -5330,11 +5304,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         if idx < 2 {
             sm[idx] = a.skip_mode[bx4];
             st[idx] = a.skip_txfm[bx4];
-            intra_vals[idx] = if a.intra[bx4] != 0 && a.intrabc[bx4] == 0 {
-                1
-            } else {
-                0
-            };
+            intra_vals[idx] = u8::from(a.intra[bx4] != 0 && a.intrabc[bx4] == 0);
             ibc_vals[idx] = a.intrabc[bx4];
             r0[idx] = a.r#ref[0][bx4];
             r1[idx] = a.r#ref[1][bx4];
@@ -5772,14 +5742,14 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 } else {
                     recon.lf_mask[recon.lf_idx - recon.sb256w as usize].cdef_idx[idx + 12] as i32
                 };
-                let ctx = if (left_cdef_idx | top_cdef_idx) != -1 {
+                let ctx = if (left_cdef_idx | top_cdef_idx) == -1 {
+                    // C: !(left & top) * 2  (logical-not, so 0 -> 1, nonzero -> 0)
+                    ((left_cdef_idx & top_cdef_idx) == 0) as i32 * 2
+                } else {
                     // both edges available
                     let mut c = (left_cdef_idx == 0) as i32 + (top_cdef_idx == 0) as i32;
                     c += (c == 2) as i32;
                     c
-                } else {
-                    // C: !(left & top) * 2  (logical-not, so 0 -> 1, nonzero -> 0)
-                    ((left_cdef_idx & top_cdef_idx) == 0) as i32 * 2
                 };
                 if msac.decode_bool_adapt(cdf_m.cdef_idx0(ctx as usize)) != 0 {
                     v = 0;
@@ -6017,7 +5987,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                             }
                         }
                         if dir_idx >= ptr {
-                            for &fmidx in DEFAULT_MODE_LIST_Y.iter() {
+                            for &fmidx in &DEFAULT_MODE_LIST_Y {
                                 let bit = 1u64 << fmidx;
                                 if mask & bit == 0 {
                                     custom_list[ptr] = fmidx;
@@ -6122,10 +6092,10 @@ fn decode_b<BD: crate::pixel::BitDepth>(
 
         // For the chroma-only SDP tree (no luma), read the luma block's intra
         // direction mode from the per-SB map (decode.c:2170-2172).
-        let mut midx = if !has_luma {
-            recon.scratch.luma_intra_dir_mode_map[((cby & 15) * 16 + (cbx & 15)) as usize]
-        } else {
+        let mut midx = if has_luma {
             luma_midx
+        } else {
+            recon.scratch.luma_intra_dir_mode_map[((cby & 15) * 16 + (cbx & 15)) as usize]
         };
 
         // DPCM for chroma — gated on THIS segment's lossless flag
@@ -6227,7 +6197,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 }
                 if uv_mode_idx > 12 {
                     if env_flag!("RAV2D_SUBMIT_ERR") {
-                        eprintln!("uv_mode_idx>12 bx={} by={}", bx, by);
+                        eprintln!("uv_mode_idx>12 bx={bx} by={by}");
                     }
                     return Err(());
                 }
@@ -6327,8 +6297,8 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             && imin(bw4, bh4) >= 2
             && bw4 * bh4 >= 8
         {
-            let nb_dip_0 = if nb_boff[0] != -1 { nb_dip[0] } else { 0 };
-            let nb_dip_1 = if nb_boff[1] != -1 { nb_dip[1] } else { 0 };
+            let nb_dip_0 = if nb_boff[0] == -1 { 0 } else { nb_dip[0] };
+            let nb_dip_1 = if nb_boff[1] == -1 { 0 } else { nb_dip[1] };
             let ctx = nb_dip_0 as usize + nb_dip_1 as usize;
             let dip_flag = msac.decode_bool_adapt(cdf_m.dip(ctx)) != 0;
             if dip_flag {
@@ -6576,8 +6546,8 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             b.data.intra.morph_pred = 0;
         }
         if !fi.is_inter_or_switch && fi.seq_bawp && fi.allow_screen_content_tools {
-            let nb_mp_0 = if nb_boff[0] != -1 { nb_morph[0] } else { 0 };
-            let nb_mp_1 = if nb_boff[1] != -1 { nb_morph[1] } else { 0 };
+            let nb_mp_0 = if nb_boff[0] == -1 { 0 } else { nb_morph[0] };
+            let nb_mp_1 = if nb_boff[1] == -1 { 0 } else { nb_morph[1] };
             let ctx = nb_mp_0 as usize + nb_mp_1 as usize;
             unsafe {
                 b.data.intra.morph_pred = msac.decode_bool_adapt(cdf_m.morph_pred(ctx)) as u8;
@@ -6834,7 +6804,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 let mut cnt_rem = (n_ctx as i32) * 2 - cnt[0] as i32 - cnt[8] as i32;
                 let mut refs = [-1i8; 2];
                 let mut dir = 0u8;
-                let mut maybe_same_ref = if same_refs > 0 { 1i32 } else { 0 };
+                let mut maybe_same_ref = i32::from(same_refs > 0);
                 let mut i = 0i32;
                 while i < n_refs + n - 2 + maybe_same_ref {
                     let cnt_cur = cnt[i as usize + 1] as i32;
@@ -6860,7 +6830,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                         dir = fi.refdir[i as usize];
                     }
                     if maybe_same_ref != 0 {
-                        maybe_same_ref = if bit == 0 && i + 1 < same_refs { 1 } else { 0 };
+                        maybe_same_ref = i32::from(bit == 0 && i + 1 < same_refs);
                         if bit != 0 {
                             i -= 1;
                             cnt_rem += cnt_cur;
@@ -6927,7 +6897,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                     inter_mode = CompInterPredMode::NearMvNearMv as u8
                         + msac.decode_symbol_adapt(cdf_m.comp_mode(comp_ctx), 4) as u8;
                 }
-            };
+            }
 
             // --- OPFL refinement ---
             // `final_inter_mode` is dav2d's b->inter_mode, the mode the block
@@ -7507,8 +7477,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                         let ctx = (cnt_cur - cnt_rem + 1).clamp(0, 2) as usize;
                         if trace_blk {
                             eprintln!(
-                                "  CK sref i={} n_ctx={} cnt={:?} cnt_cur={} cnt_rem={} ctx={} nx0={:?} nx1={:?}",
-                                i, n_ctx, cnt, cnt_cur, cnt_rem, ctx, nx_ref0, nx_ref1
+                                "  CK sref i={i} n_ctx={n_ctx} cnt={cnt:?} cnt_cur={cnt_cur} cnt_rem={cnt_rem} ctx={ctx} nx0={nx_ref0:?} nx1={nx_ref1:?}"
                             );
                         }
                         if msac.decode_bool_adapt(cdf_m.single_ref(ctx, i as usize)) != 0 {
@@ -7601,7 +7570,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                     inter_mode = InterPredMode::NearMv as u8
                         + msac.decode_symbol_adapt(cdf_m.inter_mode(sngl_ctx), 2) as u8;
                 }
-            };
+            }
             unsafe {
                 b.data.inter.inter_mode = inter_mode;
             }
@@ -9047,7 +9016,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                         recon.seq_hdr,
                         recon.frm_hdr,
                     );
-                    for c in mvstack.iter_mut() {
+                    for c in &mut mvstack {
                         c.mv[1] = c.mv[0];
                         c.weight = c.weight.wrapping_mul(0x101);
                     }
@@ -9300,7 +9269,7 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     Ok(b)
 }
 
-/// Intra reconstruction entry point mirroring `dav2d_recon_b` (recon_tmpl.c:3068).
+/// Intra reconstruction entry point mirroring `dav2d_recon_b` (`recon_tmpl.c:3068`).
 ///
 /// Blocks larger than 64px in either dimension (`imax(bw4,bh4) > 16`) are not
 /// reconstructed as a single unit: they are split into 64x64 (or 128x128 for
@@ -9432,10 +9401,10 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
                         sub_cbx,
                         sub_cby,
                         lbs2,
-                        if read_cbs != BlockSize::Invalid {
-                            read_cbs
-                        } else {
+                        if read_cbs == BlockSize::Invalid {
                             recon_cbs
+                        } else {
+                            read_cbs
                         },
                         lbs2 != BlockSize::Invalid,
                         read_cbs != BlockSize::Invalid || recon_cbs != BlockSize::Invalid,
@@ -9469,10 +9438,10 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
                         (false, false) => None,
                     };
                     if let Some(ph) = phase {
-                        let ccbs = if read_cbs != BlockSize::Invalid {
-                            read_cbs
-                        } else {
+                        let ccbs = if read_cbs == BlockSize::Invalid {
                             recon_cbs
+                        } else {
+                            read_cbs
                         };
                         let sdp_active = lbs2 == BlockSize::Invalid;
                         recon_b_intra_chroma_phase(
@@ -9576,7 +9545,7 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
     Ok(())
 }
 
-/// Block-adaptive weighted prediction (`bawp`, recon_tmpl.c:2690). After the
+/// Block-adaptive weighted prediction (`bawp`, `recon_tmpl.c:2690`). After the
 /// translational MC prediction is written to `dst`, BAWP rescales it by a
 /// per-block linear model `dst = clip((alpha*dst + beta) >> 8)`. The model
 /// `(alpha, beta)` is derived from the reconstructed neighbour template (rows
@@ -9585,7 +9554,7 @@ fn recon_b_intra<BD: crate::pixel::BitDepth>(
 /// `alpha`. `plane` is 0 for luma, 1 for U, 2 for V. `bawp_idx` is the parsed
 /// per-block index (luma); chroma always passes 1.
 ///
-/// Neighbour availability follows the current tile (recon_tmpl.c `bawp`), and
+/// Neighbour availability follows the current tile (`recon_tmpl.c` `bawp`), and
 /// the single-thread, full-frame-alias decode used by the conformance harness
 /// means
 /// the top template row resolves to `dst[-stride]` in both the in-SB and the
@@ -9946,9 +9915,9 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
         // SAFETY: BPC==8 => BD::Pixel == u8; reinterpret slices to call the
         // byte-identical NEON 8bpc kernels.
         let dst8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
         let src8: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+            unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
         if is_bilin {
             crate::mc_neon::put_bilin_8bpc(
                 dst8,
@@ -10012,7 +9981,7 @@ enum ScaledDst<'a, P> {
 }
 
 /// Scaled-reference motion compensation for one plane. Port of the
-/// `refp != &f->cur` branch of dav2d's `mc()` (recon_tmpl.c): computes the
+/// `refp != &f->cur` branch of dav2d's `mc()` (`recon_tmpl.c)`: computes the
 /// scaled source window, emulates the edge into a scratch buffer when it
 /// overhangs the reference, then runs the fractional-step kernel the block's
 /// filter selects (`mc_scaled` / `mct_scaled`, 8-tap or bilinear).
@@ -10125,7 +10094,7 @@ fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// Translational MC into an intermediate i16 `tmp` buffer (recon_tmpl.c `mc`
+/// Translational MC into an intermediate i16 `tmp` buffer (`recon_tmpl.c` `mc`
 /// with `dst == NULL`). Mirrors `inter_mc_plane_8bpc` but uses the `prep`
 /// kernels (no final shift to pixels) so the result can be blended by the
 /// compound `avg`/`w_avg`/`mask`/`w_mask` kernels. `tmp` is laid out at stride
@@ -10247,7 +10216,7 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     if BD::BPC == 8 {
         // SAFETY: BPC==8 => BD::Pixel == u8; the prep kernels write i16 `tmp`.
         let src8: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+            unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
         if is_bilin {
             crate::mc_neon::prep_bilin_8bpc(
                 tmp,
@@ -10306,7 +10275,7 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
 ///
 /// Reconstruction fills whole 8x8 luma blocks, so a decoded frame holds samples
 /// down to its 8-aligned height, past the visible `p.h`. dav2d reads that
-/// overhang from references (it clips to `f->bh * 4`, recon_tmpl.c), so a view
+/// overhang from references (it clips to `f->bh * 4`, `recon_tmpl.c`), so a view
 /// cut at `p.h` panics where C reads decoded data. The allocation covers it:
 /// the decoder writes these rows itself, into planes padded to 128 rows (see
 /// `DefaultPicAllocator::alloc_picture`).
@@ -10318,7 +10287,7 @@ fn ref_plane_rows(pic: &crate::picture::Picture, pl: usize) -> usize {
 /// The area a warp may read from `ref_pic`, in samples of plane `pl`.
 ///
 /// dav2d clips warp reads to the current frame (`f->bw * 4`, `f->bh * 4`) and
-/// has no scaled warp ("no scaled support", recon_tmpl.c). AV2 allows warping
+/// has no scaled warp ("no scaled support", `recon_tmpl.c`). AV2 allows warping
 /// from a reference of another size, and dav2d then reads past the reference
 /// buffer. For such a reference clip to what it actually holds instead; for an
 /// unscaled one the extent is the current frame's, so output stays bit-exact.
@@ -10338,7 +10307,7 @@ fn warp_ref_extent(
     (imin(frame_w, ref_w), imin(frame_h, ref_h))
 }
 
-/// Warp-affine motion compensation for a block plane (recon_tmpl.c
+/// Warp-affine motion compensation for a block plane (`recon_tmpl.c`
 /// `warp_affine`, affine path). Predicts the block in 8x8 sub-tiles using the
 /// derived warp matrix `wmp`. Only the affine sub-path is implemented (block is
 /// >= 8px and `wmp.affine`); callers gate on those conditions, falling back to
@@ -10432,12 +10401,12 @@ fn warp_affine_plane_8bpc<BD: crate::pixel::BitDepth>(
                 // SAFETY: BPC==8 => BD::Pixel == u8.
                 let dst8: &mut [u8] = unsafe {
                     std::slice::from_raw_parts_mut(
-                        dst[dst_sub..].as_mut_ptr() as *mut u8,
+                        dst[dst_sub..].as_mut_ptr().cast::<u8>(),
                         dst.len() - dst_sub,
                     )
                 };
                 let src8: &[u8] =
-                    unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+                    unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
                 crate::mc_neon::warp_affine_8x8_8bpc(
                     dst8, dst_stride, src8, src_stride, src_off, &abcd, mx, my,
                 );
@@ -10460,7 +10429,7 @@ fn warp_affine_plane_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// Non-affine / small-block warp MC (dav2d `ext_warp`, recon_tmpl.c:1720). Used
+/// Non-affine / small-block warp MC (dav2d `ext_warp`, `recon_tmpl.c:1720`). Used
 /// for warp blocks where the 8x8 affine kernel does not apply: non-affine warp
 /// types, or after subsampling a block becomes < 8 in either dimension (e.g.
 /// chroma of an 8x8 luma block in 4:2:0). Walks `sw`x`sh` windows, then 4x4
@@ -10576,12 +10545,12 @@ fn ext_warp_plane_8bpc<BD: crate::pixel::BitDepth>(
                         // SAFETY: BPC==8 => BD::Pixel == u8.
                         let dst8: &mut [u8] = unsafe {
                             std::slice::from_raw_parts_mut(
-                                dst[dst_sub..].as_mut_ptr() as *mut u8,
+                                dst[dst_sub..].as_mut_ptr().cast::<u8>(),
                                 dst.len() - dst_sub,
                             )
                         };
                         let src8: &[u8] = unsafe {
-                            std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len())
+                            std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len())
                         };
                         crate::mc_neon::put_8tap_8bpc(
                             dst8, dst_stride, src8, src_off, src_stride, 4, 4, mx, my, -1,
@@ -10712,7 +10681,7 @@ fn warp_affine_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
             if BD::BPC == 8 {
                 // SAFETY: BPC==8 => BD::Pixel == u8.
                 let src8: &[u8] =
-                    unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+                    unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
                 crate::mc_neon::warp_affine_8x8t_8bpc(
                     &mut tmp[dst_sub..],
                     tmp_stride,
@@ -10856,7 +10825,7 @@ fn ext_warp_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
                     if BD::BPC == 8 {
                         // SAFETY: BPC==8 => BD::Pixel == u8.
                         let src8: &[u8] = unsafe {
-                            std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len())
+                            std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len())
                         };
                         crate::mc_neon::prep_8tap_8bpc(
                             &mut tmp[dst_sub..],
@@ -10895,7 +10864,7 @@ fn ext_warp_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// Emulated-edge fetch for inter MC (recon_tmpl.c emu_edge): clamp source reads
+/// Emulated-edge fetch for inter MC (`recon_tmpl.c` `emu_edge)`: clamp source reads
 /// to the plane bounds. Identical semantics to mc.rs's private `emu_edge`.
 #[allow(clippy::too_many_arguments)]
 fn inter_emu_edge_8bpc<BD: crate::pixel::BitDepth>(
@@ -11211,8 +11180,7 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
     let _ = IntraPredMode::DcPred;
     if env_flag!("RAV2D_CFDUMP") && by == 12 && bx == 0 && pl == 0 {
         let mut s = format!(
-            "DCFDUMP by={} bx={} tx={} txtp={} eob={}\n",
-            by, bx, tx, txtp, eob
+            "DCFDUMP by={by} bx={bx} tx={tx} txtp={txtp} eob={eob}\n"
         );
         for i in 0..64 {
             s.push_str(&format!(" {}", recon.cf[i]));
@@ -11225,11 +11193,11 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
 }
 
 /// Inter chroma residual for both planes with the cross-component transform
-/// (CCTX). Mirrors dav2d's chroma loop in `dav2d_recon_b` (recon_tmpl.c:3546-
+/// (CCTX). Mirrors dav2d's chroma loop in `dav2d_recon_b` (`recon_tmpl.c:3546`-
 /// 3925): decode all U then all V TU coefficients (the entropy order), apply
 /// CCTX to mix U/V per TU, then inverse-transform-add both planes. CCTX needs
 /// U and V coefficients together, so it cannot be done in the per-plane
-/// `inter_residual_tx_8bpc`. The chroma prediction is already in dst_u/dst_v.
+/// `inter_residual_tx_8bpc`. The chroma prediction is already in `dst_u/dst_v`.
 #[allow(clippy::too_many_arguments)]
 fn inter_chroma_residual_8bpc<BD: crate::pixel::BitDepth>(
     recon: &mut ReconCtx<BD>,
@@ -11757,11 +11725,11 @@ fn iiblend_plane_8bpc<BD: crate::pixel::BitDepth>(
         // SAFETY: BPC==8 => BD::Pixel == u8.
         let d8: &mut [u8] = unsafe {
             std::slice::from_raw_parts_mut(
-                dst_plane[dst_off..].as_mut_ptr() as *mut u8,
+                dst_plane[dst_off..].as_mut_ptr().cast::<u8>(),
                 dst_plane.len() - dst_off,
             )
         };
-        let t8: &[u8] = unsafe { std::slice::from_raw_parts(tmp.as_ptr() as *const u8, tmp.len()) };
+        let t8: &[u8] = unsafe { std::slice::from_raw_parts(tmp.as_ptr().cast::<u8>(), tmp.len()) };
         crate::mc_neon::blend_8bpc(d8, stride, t8, w, h, &mask);
     } else {
         crate::mc::blend(&mut dst_plane[dst_off..], stride, &tmp, w, h, &mask);
@@ -11773,9 +11741,9 @@ fn iiblend_plane_8bpc<BD: crate::pixel::BitDepth>(
 /// only (warp-compound / global-affine deferred). The spatial grid write is the
 /// same for AVG/SEG/WEDGE (only the temporal grid differs for WEDGE, handled via
 /// the per-2x2 wedge tmvp mask).
-/// refmvs_warp_add for warp motion modes (decode.c:1319-1327): the block's
-/// warp matrix goes into the per-ref warp bank, where later WARP_DELTA /
-/// WARP_MV blocks find it as a base candidate. A compound block offers its
+/// `refmvs_warp_add` for warp motion modes (decode.c:1319-1327): the block's
+/// warp matrix goes into the per-ref warp bank, where later `WARP_DELTA` /
+/// `WARP_MV` blocks find it as a base candidate. A compound block offers its
 /// second matrix when the first was not taken.
 fn warp_bank_add_block<BD: crate::pixel::BitDepth>(recon: &mut ReconCtx<BD>, b: &Av2Block) {
     if unsafe { b.data.inter.motion_mode } <= MotionMode::InterIntra as u8 {
@@ -12071,12 +12039,12 @@ fn splat_tworef_mv<BD: crate::pixel::BitDepth>(
 /// Reconstruct a same-reference-pair COMPOUND inter block (8bpc). Predicts both
 /// references into intermediate i16 buffers and blends per `comp_type`
 /// (recon_tmpl.c:3180-3267 luma, :3686-3789 chroma):
-///  - AVG: plain `avg`, or implicit out-of-bounds `mask` (imp_msk_bld), or
-///    `w_avg` when CWP-weighted (cwp_idx != 8).
+///  - AVG: plain `avg`, or implicit out-of-bounds `mask` (`imp_msk_bld`), or
+///    `w_avg` when CWP-weighted (`cwp_idx` != 8).
 ///  - WEDGE: `mask` blend with the wedge mask (luma + subsampled for chroma).
 ///  - SEG: luma `w_mask` (derives a subsampled seg mask), chroma `mask` reusing
 ///    that seg mask.
-/// OPFL/refine-MV blocks (inter_mode >= OPFL_NEARMV_NEARMV, or refine_mv on an
+/// OPFL/refine-MV blocks (`inter_mode` >= `OPFL_NEARMV_NEARMV`, or `refine_mv` on an
 /// AVG block) fill `tmp[0]`/`tmp[1]` via `opfl_pred_luma` / `rmv_uvpred` instead
 /// of the plain two-reference MC loop; warp-compound / TIP / scaled refs are
 /// handled elsewhere. After blend, the parsed residual is added with the same
@@ -12748,7 +12716,7 @@ fn recon_b_inter_compound_unit<BD: crate::pixel::BitDepth>(
 }
 
 /// Rectangular bilinear prefetch into the OPFL `p[i]` scratch (the `mc(t, p[i],
-/// NULL, ...)` dst8 path with `DAV2D_FILTER_BILINEAR`, recon_tmpl.c:2224 / 2303).
+/// NULL, ...)` dst8 path with `DAV2D_FILTER_BILINEAR`, `recon_tmpl.c:2224` / 2303).
 /// Unlike the square TIP variant, this writes `dimw x dimh` luma pixels at 3-bit
 /// subpel precision with explicit edge limits.
 #[allow(clippy::too_many_arguments)]
@@ -12820,9 +12788,9 @@ fn prep_opfl_prefetch_rect_8bpc<BD: crate::pixel::BitDepth>(
     if BD::BPC == 8 {
         // SAFETY: BPC==8 => BD::Pixel == u8.
         let p8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(p.as_mut_ptr() as *mut u8, p.len()) };
+            unsafe { std::slice::from_raw_parts_mut(p.as_mut_ptr().cast::<u8>(), p.len()) };
         let src8: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+            unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
         crate::mc_neon::put_bilin_8bpc(
             p8,
             p_stride,
@@ -12848,7 +12816,7 @@ fn prep_opfl_prefetch_rect_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// Compound optical-flow prediction (`opfl_pred`, recon_tmpl.c:2178). Used for
+/// Compound optical-flow prediction (`opfl_pred`, `recon_tmpl.c:2178`). Used for
 /// two-reference (same-pair) blocks that either signal an OPFL inter mode
 /// (`inter_mode >= OPFL_NEARMV_NEARMV`) or request implicit MV refinement
 /// (`refine_mv && comp_type == COMP_INTER_AVG`). Fills the two compound
@@ -13336,7 +13304,7 @@ fn opfl_pred_luma<BD: crate::pixel::BitDepth>(
 /// Synthesize and reconstruct the single whole-superblock TIP block of a
 /// `frame_mode == 2` (whole-frame TIP) frame. Port of `tip_frame_recon_sb`
 /// (decode.c:4381-4434): such frames carry no entropy data, so each superblock
-/// is reconstructed from one synthesized skip_txfm TIP block whose motion comes
+/// is reconstructed from one synthesized `skip_txfm` TIP block whose motion comes
 /// from the projected temporal-MV grid (`rp_proj`). No bits are read.
 #[allow(clippy::too_many_arguments)]
 fn tip_frame_recon_sb<BD: crate::pixel::BitDepth>(
@@ -13476,9 +13444,9 @@ fn tip_frame_recon_sb<BD: crate::pixel::BitDepth>(
 /// `b->ref.ref[0] == TIP_FRAME`: the block has no coded references; instead each
 /// 8x8 sub-unit derives its motion from the projected temporal MV grid
 /// (`rp_proj`), scaled to the two TIP reference frames, optionally refined with
-/// optical flow (OPFL). Mirrors `tip_pred` (recon_tmpl.c:2018) for luma +
-/// `rmv_uvpred` (recon_tmpl.c:2377) for chroma, then blends per `comp_type`
-/// (TIP is `COMP_INTER_NONE` → `COMP_INTER_AVG`: cwp_idx==8 → mask or average).
+/// optical flow (OPFL). Mirrors `tip_pred` (`recon_tmpl.c:2018`) for luma +
+/// `rmv_uvpred` (`recon_tmpl.c:2377`) for chroma, then blends per `comp_type`
+/// (TIP is `COMP_INTER_NONE` → `COMP_INTER_AVG`: `cwp_idx==8` → mask or average).
 /// Residual decode is identical to compound (`inter_luma_tx_walk` /
 /// `inter_chroma_residual_8bpc`).
 #[allow(clippy::too_many_arguments)]
@@ -13592,7 +13560,7 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
         let _len = crate::mc_neon::compound_tmp_len(yw, yh);
         let mut tmp = [vec![0i16; _len], vec![0i16; _len]];
         if bacp {
-            for m in seg_mask.iter_mut() {
+            for m in &mut seg_mask {
                 *m = 0x20;
             }
         }
@@ -14114,7 +14082,7 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
     Ok(())
 }
 
-/// TIP/OPFL chroma prediction (`rmv_uvpred`, recon_tmpl.c:2377). Reads the
+/// TIP/OPFL chroma prediction (`rmv_uvpred`, `recon_tmpl.c:2377`). Reads the
 /// per-8x8 refined-MV grid `t->rmv` (`recon.scratch.rmv`) stored during the luma
 /// `tip_pred`, and motion-compensates the chroma plane into `tmp[0]`/`tmp[1]`
 /// (i16 prep, stride `bw4*4>>ss_hor`) via `mc_opfl`. Returns BACP for plane 0.
@@ -14266,7 +14234,7 @@ fn rmv_uvpred<BD: crate::pixel::BitDepth>(
     bacp && have_bacp
 }
 
-/// Bilinear prefetch into the OPFL `p[i]` scratch (recon_tmpl.c:2077, a `mc`
+/// Bilinear prefetch into the OPFL `p[i]` scratch (`recon_tmpl.c:2077`, a `mc`
 /// with `dst16==NULL`? no — dst16 path). dav2d uses `mc(t, p[i], NULL, ...)`
 /// (the `dst8` path) for the prefetch, writing 8bpc pixels with 3-bit subpel,
 /// but the OPFL DSPs read p[i] as 8bpc. We replicate the `mc` 8bpc dst path
@@ -14340,9 +14308,9 @@ fn prep_opfl_prefetch_8bpc<BD: crate::pixel::BitDepth>(
     if BD::BPC == 8 {
         // SAFETY: BPC==8 => BD::Pixel == u8.
         let p8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(p.as_mut_ptr() as *mut u8, p.len()) };
+            unsafe { std::slice::from_raw_parts_mut(p.as_mut_ptr().cast::<u8>(), p.len()) };
         let src8: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+            unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
         crate::mc_neon::put_bilin_8bpc(
             p8,
             p_stride,
@@ -14368,7 +14336,7 @@ fn prep_opfl_prefetch_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// Write the per-8x8 temporal MV (update_temporal, recon_tmpl.c:1908) at the
+/// Write the per-8x8 temporal MV (`update_temporal`, `recon_tmpl.c:1908`) at the
 /// absolute 8x8 position `(by_abs, bx_abs) = (t->by+y, t->bx+x)` into the frame
 /// temporal MV grid `f->rf.rp` (`recon.cur_mvs`).
 #[allow(clippy::too_many_arguments)]
@@ -14417,7 +14385,7 @@ fn update_temporal_grid<BD: crate::pixel::BitDepth>(
 }
 
 /// `inter_mc_plane_prep_8bpc` writing at an explicit offset into `tmp`
-/// (recon_tmpl.c non-opfl `mc` with full bounds, dst16 path). Used by the
+/// (`recon_tmpl.c` non-opfl `mc` with full bounds, dst16 path). Used by the
 /// non-OPFL TIP per-8x8 prediction.
 #[allow(clippy::too_many_arguments)]
 fn inter_mc_plane_prep_at_8bpc<BD: crate::pixel::BitDepth>(
@@ -14481,7 +14449,7 @@ fn inter_mc_plane_prep_at_8bpc<BD: crate::pixel::BitDepth>(
     );
 }
 
-/// `apply_sign(x, s)` from dav2d (recon_tmpl.c): returns `s < 0 ? -x : x`,
+/// `apply_sign(x, s)` from dav2d (`recon_tmpl.c)`: returns `s < 0 ? -x : x`,
 /// truncated to i8 (the difference weights live in `union aliasi16 d.i8[2]`).
 #[inline]
 fn apply_sign_i8(x: i32, s: i32) -> i8 {
@@ -14489,7 +14457,7 @@ fn apply_sign_i8(x: i32, s: i32) -> i8 {
 }
 
 /// Bounds-aware prep-MC for the OPFL bilinear prefetch (`mc(..., left, right,
-/// top, bottom)` with `dst16`, recon_tmpl.c:1549 unscaled branch). Like
+/// top, bottom)` with `dst16`, `recon_tmpl.c:1549` unscaled branch). Like
 /// `inter_mc_plane_prep_8bpc` but with explicit edge limits (the OPFL reference
 /// area cannot exceed the original MV's bounding box; the remaining pixels are
 /// emulated). 3-bit subpel precision (same as `mc`). Writes into `tmp`
@@ -14583,7 +14551,7 @@ fn mc_prep_bounds_8bpc<BD: crate::pixel::BitDepth>(
     if BD::BPC == 8 {
         // SAFETY: BPC==8 => BD::Pixel == u8.
         let src8: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+            unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
         if is_bilin {
             crate::mc_neon::prep_bilin_8bpc(
                 tmp,
@@ -14638,7 +14606,7 @@ fn mc_prep_bounds_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// OPFL motion compensation (`mc_opfl`, recon_tmpl.c:1675). Like `mc` but with
+/// OPFL motion compensation (`mc_opfl`, `recon_tmpl.c:1675`). Like `mc` but with
 /// 4-bit subpel MV precision and explicit edge limits; output is i16 (prep).
 /// Unscaled refs only (this clip). Writes `bw4*4 x bh4*4` (after plane
 /// subsampling) into `dst16` at `dst_off`, stride `dst_stride`.
@@ -14718,7 +14686,7 @@ fn mc_opfl_8bpc<BD: crate::pixel::BitDepth>(
     if BD::BPC == 8 {
         // SAFETY: BPC==8 => BD::Pixel == u8.
         let src8: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len()) };
+            unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), src.len()) };
         if is_bilin {
             crate::mc_neon::prep_bilin_8bpc(
                 &mut dst16[dst_off..],
@@ -14775,7 +14743,7 @@ fn mc_opfl_8bpc<BD: crate::pixel::BitDepth>(
 
 /// Reconstruct a single-reference inter block (8bpc): motion-compensate luma +
 /// chroma from the reference picture (translational or warp-affine, dispatched
-/// on the block's motion_mode / derived warp params), then add the parsed
+/// on the block's `motion_mode` / derived warp params), then add the parsed
 /// residual transforms. Compound (ref pair), interintra blend, TIP and scaled
 /// references are deferred.
 #[allow(clippy::too_many_arguments)]
@@ -14839,7 +14807,7 @@ fn recon_b_inter<BD: crate::pixel::BitDepth>(
         if imax(bw4_0, bh4_0) > 16 {
             // The >64px split drives the per-sub-block chroma read/recon stage
             // itself, so it is only ever entered at the `Both` top level.
-            debug_assert!(chroma_stage == ChromaPhase::Both);
+            debug_assert_eq!(chroma_stage, ChromaPhase::Both);
             return recon_b_inter_split(
                 recon, msac, cdf_m, a, l, b, bx, by, cbx, cby, lbs, cbs, has_luma, has_chroma, fi,
                 bs0, bw4_0, bh4_0,
@@ -15614,7 +15582,7 @@ fn inter_luma_tx_walk<BD: crate::pixel::BitDepth>(
     Ok(())
 }
 
-/// Reconstruct the luma plane of an intra (non-IntraBC) block at the decode_b
+/// Reconstruct the luma plane of an intra (non-IntraBC) block at the `decode_b`
 /// leaf, for the 8bpc path.
 ///
 /// Port of the luma `switch (b->tx_part)` walk in `dav2d_recon_b`
@@ -15685,7 +15653,7 @@ fn recon_b_intra_luma_geom<BD: crate::pixel::BitDepth>(
             // SAFETY: BPC==8 => BD::Pixel == u8.
             let d8: &mut [u8] = unsafe {
                 std::slice::from_raw_parts_mut(
-                    recon.dst_y[dst_off..].as_mut_ptr() as *mut u8,
+                    recon.dst_y[dst_off..].as_mut_ptr().cast::<u8>(),
                     recon.dst_y.len() - dst_off,
                 )
             };
@@ -16158,7 +16126,7 @@ fn recon_b_intra_luma_geom<BD: crate::pixel::BitDepth>(
 /// 8bpc. Port of the chroma section of `dav2d_recon_b` (recon_tmpl.c:3482-3942).
 ///
 /// AV2 decodes ALL chroma coefficients (both planes, all transform units) first,
-/// then runs prediction + inverse transform in a second pass; CfL prediction is
+/// then runs prediction + inverse transform in a second pass; `CfL` prediction is
 /// applied once for the whole block between the two passes. We mirror that order.
 #[allow(clippy::too_many_arguments)]
 /// Which part of the chroma decode to perform. For blocks split into 64x64
@@ -16740,7 +16708,7 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
 }
 
 /// Chroma-from-luma prediction for an intra block (recon_tmpl.c:2910-3062 `cfl`).
-/// Handles CFL_EXPLICIT / CFL_IMPLICIT (cfl_type < 2) and CFL_MHCCP (cfl_type==2).
+/// Handles `CFL_EXPLICIT` / `CFL_IMPLICIT` (`cfl_type` < 2) and `CFL_MHCCP` (`cfl_type==2`).
 #[allow(clippy::too_many_arguments)]
 fn cfl_predict_8bpc<BD: crate::pixel::BitDepth>(
     recon: &mut ReconCtx<BD>,
@@ -17483,7 +17451,7 @@ fn recon_b_luma_tx<BD: crate::pixel::BitDepth>(
 }
 
 /// Dispatch the resolved intra predictor `m` into `dst` (mirrors the C
-/// `dsp->ipred.intra_pred[m]` table; recon_tmpl.c:2596-2606 / ipred_tmpl.c).
+/// `dsp->ipred.intra_pred[m]` table; recon_tmpl.c:2596-2606 / `ipred_tmpl.c`).
 #[allow(clippy::too_many_arguments)]
 fn dispatch_ipred<BD: crate::pixel::BitDepth>(
     bd: BD,
@@ -17503,9 +17471,9 @@ fn dispatch_ipred<BD: crate::pixel::BitDepth>(
     if BD::BPC == 8 {
         // SAFETY: BPC==8 => BD::Pixel == u8; call the byte-identical NEON path.
         let dst8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
         let edge8: &[u8] =
-            unsafe { std::slice::from_raw_parts(edge.as_ptr() as *const u8, edge.len()) };
+            unsafe { std::slice::from_raw_parts(edge.as_ptr().cast::<u8>(), edge.len()) };
         dispatch_ipred_8bpc(
             m,
             dst8,
@@ -17523,7 +17491,7 @@ fn dispatch_ipred<BD: crate::pixel::BitDepth>(
         return;
     }
     use crate::ipred;
-    use crate::levels::*;
+    use crate::levels::{DC_128_PRED, TOP_DC_PRED, LEFT_DC_PRED, Z1_PRED, Z2_PRED, Z3_PRED, DIP_PRED};
     let d = &mut dst[dst_off..];
     match m {
         0 /* DcPred */ => ipred::ipred_dc(bd, d, stride, edge, edge_o, w, h, angle),
@@ -17537,11 +17505,11 @@ fn dispatch_ipred<BD: crate::pixel::BitDepth>(
         10 /* SmoothVPred */ => ipred::ipred_smooth_v(bd, d, stride, edge, edge_o, w, h),
         11 /* SmoothHPred */ => ipred::ipred_smooth_h(bd, d, stride, edge, edge_o, w, h),
         _ if m == Z1_PRED => {
-            ipred::ipred_z1(bd, d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights)
+            ipred::ipred_z1(bd, d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights);
         }
         _ if m == Z2_PRED => ipred::ipred_z2(bd, d, stride, edge, edge_o, w, h, angle, max_w, max_h),
         _ if m == Z3_PRED => {
-            ipred::ipred_z3(bd, d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights)
+            ipred::ipred_z3(bd, d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights);
         }
         _ if m == DIP_PRED => ipred::ipred_dip(bd, d, stride, edge, edge_o, w, h, angle),
         _ => ipred::ipred_dc_128(bd, d, stride, w, h),
@@ -17563,8 +17531,8 @@ fn dispatch_ipred_8bpc(
     max_h: i32,
     ibp_weights: &[[[u8; 16]; 16]; 7],
 ) {
-    use crate::ipred::*;
-    use crate::levels::*;
+    use crate::ipred::{ipred_dc_8bpc, ipred_dc_128_8bpc, ipred_dc_top_8bpc, ipred_dc_left_8bpc, ipred_paeth_8bpc, ipred_smooth_8bpc, ipred_z1_8bpc, ipred_z2_8bpc, ipred_z3_8bpc, ipred_dip_8bpc};
+    use crate::levels::{DC_128_PRED, TOP_DC_PRED, LEFT_DC_PRED, Z1_PRED, Z2_PRED, Z3_PRED, DIP_PRED};
     let d = &mut dst[dst_off..];
     match m {
         0 /* DcPred */ => ipred_dc_8bpc(d, stride, edge, edge_o, w, h, angle),
@@ -17578,11 +17546,11 @@ fn dispatch_ipred_8bpc(
         10 /* SmoothVPred */ => crate::ipred_neon::ipred_smooth_v(d, stride, edge, edge_o, w, h),
         11 /* SmoothHPred */ => crate::ipred_neon::ipred_smooth_h(d, stride, edge, edge_o, w, h),
         _ if m == Z1_PRED => {
-            ipred_z1_8bpc(d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights)
+            ipred_z1_8bpc(d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights);
         }
         _ if m == Z2_PRED => ipred_z2_8bpc(d, stride, edge, edge_o, w, h, angle, max_w, max_h),
         _ if m == Z3_PRED => {
-            ipred_z3_8bpc(d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights)
+            ipred_z3_8bpc(d, stride, edge, edge_o, w, h, angle, max_w, max_h, ibp_weights);
         }
         _ if m == DIP_PRED => ipred_dip_8bpc(d, stride, edge, edge_o, w, h, angle),
         _ => ipred_dc_128_8bpc(d, stride, w, h),
@@ -17603,7 +17571,7 @@ fn mc_avg<BD: crate::pixel::BitDepth>(
 ) {
     if BD::BPC == 8 {
         let d8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
         crate::mc_neon::avg_8bpc(d8, dst_stride, tmp1, tmp2, w, h);
     } else {
         crate::mc::avg(bd, dst, dst_stride, tmp1, tmp2, w, h);
@@ -17624,7 +17592,7 @@ fn mc_w_avg<BD: crate::pixel::BitDepth>(
 ) {
     if BD::BPC == 8 {
         let d8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
         crate::mc_neon::w_avg_8bpc(d8, dst_stride, tmp1, tmp2, w, h, weight);
     } else {
         crate::mc::w_avg(bd, dst, dst_stride, tmp1, tmp2, w, h, weight);
@@ -17645,7 +17613,7 @@ fn mc_mask<BD: crate::pixel::BitDepth>(
 ) {
     if BD::BPC == 8 {
         let d8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
         crate::mc_neon::mask_8bpc(d8, dst_stride, tmp1, tmp2, w, h, m);
     } else {
         crate::mc::mask_fn(bd, dst, dst_stride, tmp1, tmp2, w, h, m);
@@ -17670,7 +17638,7 @@ fn mc_w_mask<BD: crate::pixel::BitDepth>(
 ) {
     if BD::BPC == 8 {
         let d8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
         crate::mc_neon::w_mask_8bpc(
             d8,
             dst_stride,
@@ -17713,8 +17681,8 @@ fn mc_blend<BD: crate::pixel::BitDepth>(
 ) {
     if BD::BPC == 8 {
         let d8: &mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len()) };
-        let t8: &[u8] = unsafe { std::slice::from_raw_parts(tmp.as_ptr() as *const u8, tmp.len()) };
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
+        let t8: &[u8] = unsafe { std::slice::from_raw_parts(tmp.as_ptr().cast::<u8>(), tmp.len()) };
         crate::mc_neon::blend_8bpc(d8, dst_stride, t8, w, h, m);
     } else {
         crate::mc::blend(dst, dst_stride, tmp, w, h, m);
@@ -17848,21 +17816,19 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
         } else if !have_h_split || !have_v_split {
             if bw4 == bh4 {
                 dir = have_v_split as i32;
-                bp = if !have_v_split {
-                    BlockPartition::H
-                } else {
+                bp = if have_v_split {
                     BlockPartition::V
+                } else {
+                    BlockPartition::H
                 };
             } else if bw4 > bh4 {
                 if !have_h_split || fi.bh <= *by + qh4 {
                     dir = 1;
                     bp = BlockPartition::V;
                 }
-            } else {
-                if !have_v_split || fi.bw <= *bx + qw4 {
-                    dir = 0;
-                    bp = BlockPartition::H;
-                }
+            } else if !have_v_split || fi.bw <= *bx + qw4 {
+                dir = 0;
+                bp = BlockPartition::H;
             }
         }
 
@@ -18006,10 +17972,10 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                                     };
                                     if has_hv4ab {
                                         assert!(pcc.part[ddir][2] != -1);
-                                        let is_4way = if !has_hv3 {
-                                            1u32
-                                        } else {
+                                        let is_4way = if has_hv3 {
                                             msac.decode_bool_adapt(cdf_m.part_4way(pl, ctx6))
+                                        } else {
+                                            1u32
                                         };
                                         if is_4way != 0 {
                                             let is_a_or_b = msac.decode_bool_bypass();
@@ -18079,7 +18045,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
         let val = part_r[*part_r_idx];
         *part_r_idx += 1;
         if val & 0x80 != 0 {
-            assert!(*intra_region == 0);
+            assert_eq!(*intra_region, 0);
             *intra_region = 1;
             cbs = BlockSize::Invalid;
         }
@@ -18118,16 +18084,16 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
             if pass & (Pass::Entropy as u8) != 0 {
                 let bx4 = (*bx & 63) as usize;
                 let by4 = (*by & 63) as usize;
-                if (cbs as i8 | lbs as i8) != BlockSize::Invalid as i8 {
+                if (cbs as i8 | lbs as i8) == BlockSize::Invalid as i8 {
+                    memset_pow2(&mut a.partition[pl], bx4, !(b_dim[0] - 1), b_dim[2]);
+                    memset_pow2(&mut l.partition[pl], by4, !(b_dim[1] - 1), b_dim[3]);
+                } else {
                     // C: case_set(b_dim[2 + i]) writes 1<<b_dim[2+i] bytes (pow2 length),
                     // for both partition[0] and partition[1].
                     memset_pow2(&mut a.partition[0], bx4, !(b_dim[0] - 1), b_dim[2]);
                     memset_pow2(&mut a.partition[1], bx4, !(b_dim[0] - 1), b_dim[2]);
                     memset_pow2(&mut l.partition[0], by4, !(b_dim[1] - 1), b_dim[3]);
                     memset_pow2(&mut l.partition[1], by4, !(b_dim[1] - 1), b_dim[3]);
-                } else {
-                    memset_pow2(&mut a.partition[pl], bx4, !(b_dim[0] - 1), b_dim[2]);
-                    memset_pow2(&mut l.partition[pl], by4, !(b_dim[1] - 1), b_dim[3]);
                 }
             }
         }
@@ -18950,7 +18916,7 @@ mod tests {
     /// Build a throwaway `ReconCtx` (and its backing scratch) bound to the given
     /// idents in the caller's scope. The recon leaf is a no-op under
     /// `Pass::Entropy`, so contents are never read; this just satisfies the
-    /// threaded parameter for decode_sb / decode_b unit tests.
+    /// threaded parameter for `decode_sb` / `decode_b` unit tests.
     macro_rules! make_dummy_recon {
         ($rf:ident, $recon:ident) => {
             let mut __ty = vec![0u8; 64 * 64];
@@ -19482,14 +19448,14 @@ mod tests {
             assert!((2..=8).contains(&pal_sz), "pal_sz={pal_sz}");
             // entries are non-decreasing and strictly increasing until the 255 cap
             for w in pal[..pal_sz as usize].windows(2) {
-                if w[0] != 255 {
+                if w[0] == 255 {
+                    assert_eq!(w[1], 255);
+                } else {
                     assert!(
                         w[1] > w[0],
                         "not strictly increasing: {:?}",
                         &pal[..pal_sz as usize]
                     );
-                } else {
-                    assert_eq!(w[1], 255);
                 }
             }
         }
@@ -21509,12 +21475,11 @@ mod tests {
         let uv_mode = unsafe { b.data.intra.uv_mode };
         let uv_angle = unsafe { b.data.intra.uv_angle };
         // UV mode should be valid (0-13)
-        assert!(uv_mode <= CFL_PRED, "uv_mode {} out of range", uv_mode);
+        assert!(uv_mode <= CFL_PRED, "uv_mode {uv_mode} out of range");
         // UV angle in [-3, 3]
         assert!(
             (-3..=3).contains(&uv_angle),
-            "uv_angle {} out of range",
-            uv_angle
+            "uv_angle {uv_angle} out of range"
         );
     }
 
@@ -21848,8 +21813,7 @@ mod tests {
                 // inter_mode should be NEARMV(13), GLOBALMV(14), or NEWMV(15)
                 assert!(
                     (13..=17).contains(&inter_mode),
-                    "inter_mode {} out of range",
-                    inter_mode
+                    "inter_mode {inter_mode} out of range"
                 );
             }
             // Context writeback: intra=0 in both a and l

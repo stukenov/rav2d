@@ -119,7 +119,7 @@ impl TaskList {
 
     pub fn push_back(&mut self, task: Task) {
         let mut boxed = Box::new(task);
-        let raw = &mut *boxed as *mut Task;
+        let raw = &raw mut *boxed;
         if self.tail.is_null() {
             self.head = Some(boxed);
         } else {

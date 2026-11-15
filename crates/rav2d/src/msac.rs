@@ -216,7 +216,7 @@ impl<'a> MsacContext<'a> {
 
         let r = self.rng as u64;
         let mut dif = self.dif;
-        debug_assert!(r & 1 == 0);
+        debug_assert_eq!(r & 1, 0);
         debug_assert!((dif >> 48) < r);
         let mut vw = r << 47;
         let mut ret: u32 = 0;
@@ -247,7 +247,7 @@ impl<'a> MsacContext<'a> {
 
         let r = self.rng as u64;
         let mut dif = self.dif;
-        debug_assert!(r & 1 == 0);
+        debug_assert_eq!(r & 1, 0);
         debug_assert!((dif >> 48) < r);
         let mut vw = r << 47;
         let mut ret: u32 = 0;
@@ -275,7 +275,7 @@ impl<'a> MsacContext<'a> {
         let p = ((f >> 7) << 4) + 8;
         let mut v = (((r >> 8) * p) >> 7) << 3;
         let vw = (v as u64) << 48;
-        let ret = if dif >= vw { 1 } else { 0 };
+        let ret = i32::from(dif >= vw);
         let new_dif = dif - ret as u64 * vw;
         if ret != 0 {
             v = r - v;
@@ -314,14 +314,14 @@ impl<'a> MsacContext<'a> {
             let count = (pc & 0xFF) as u8;
             debug_assert!(count <= 32);
             let rate = MSAC_RATE[(pc >> 8) as usize][(count >> 4) as usize]
-                + if n_symbols > 2 { 1 } else { 0 };
+                + u8::from(n_symbols > 2);
             for i in 0..val as usize {
                 cdf[i] += (32768 - cdf[i]) >> rate;
             }
             for i in val as usize..n_symbols {
                 cdf[i] -= cdf[i] >> rate;
             }
-            cdf[n_symbols] = pc + if count < 32 { 1 } else { 0 };
+            cdf[n_symbols] = pc + u16::from(count < 32);
         }
 
         val
@@ -339,7 +339,7 @@ impl<'a> MsacContext<'a> {
             } else {
                 cdf[0] -= cdf[0] >> rate;
             }
-            cdf[1] = pc + if count < 32 { 1 } else { 0 };
+            cdf[1] = pc + u16::from(count < 32);
         }
 
         bit

@@ -2,6 +2,10 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(clippy::all)]
+// The crate is entirely bindgen-generated; the C header comments copied
+// verbatim into doc comments trip many pedantic lints (doc_markdown etc.).
+// Allow the pedantic group wholesale instead of hand-editing generated code.
+#![allow(clippy::pedantic)]
 // bindgen copies C header comments verbatim, so array notation like `arr[0]`
 // becomes a bogus intra-doc link in the generated bindings. These are not real
 // Rust doc links; silence them so `cargo doc` (and docs.rs) build cleanly.

@@ -1,3 +1,60 @@
+// clippy pedantic exception policy for rav2d (audit `-D clippy::pedantic`).
+// rav2d is a faithful port of dav2d (C): the mechanical findings (~350 sites)
+// were already fixed; the groups below are intentional port-of-dav2d idioms
+// and remaining MaybeIncorrect-suggestion stragglers (Phase-2 candidates).
+// Source attributes are used instead of cargo [lints] tables because cargo
+// injects the latter as CLI --allow flags that a later `-D` would override.
+
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::ptr_cast_constness)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::many_single_char_names)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::struct_field_names)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::fn_params_excessive_bools)]
+#![allow(clippy::inline_always)]
+#![allow(clippy::trivially_copy_pass_by_ref)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::stable_sort_primitive)]
+#![allow(clippy::comparison_chain)]
+#![allow(clippy::unreadable_literal)]
+#![allow(clippy::decimal_bitwise_operands)]
+#![allow(clippy::verbose_bit_mask)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::no_effect_underscore_binding)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::assigning_clones)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::match_wildcard_for_single_variants)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::collapsible_else_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::unnecessary_box_returns)]
+#![allow(clippy::large_stack_arrays)]
+#![allow(clippy::format_push_string)]
+#![allow(clippy::default_trait_access)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::same_functions_in_if_condition)]
+#![allow(clippy::manual_slice_fill)]
+#![allow(clippy::manual_is_variant_and)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::assert_is_empty)]
+#![allow(clippy::manual_assert)]
+#![allow(clippy::explicit_iter_loop)]
+#![allow(clippy::overly_complex_bool_expr)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::format_collect)]
+
 //! Deterministic robustness ("fuzz") harness: a memory-safe decoder must never
 //! panic or crash on malformed input — it must return a graceful error. This
 //! feeds the decoder (1) pure pseudo-random bytes and (2) bit/byte-mutated and
@@ -140,7 +197,7 @@ fn decode_catch_with(bytes: Vec<u8>, s: &Settings) -> Result<(), String> {
     }));
     res.map_err(|e| {
         e.downcast_ref::<&str>()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| e.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic>".to_string())
     })
@@ -196,14 +253,14 @@ fn fuzz_mutated_streams_no_panic() {
             match rng.below(4) {
                 // single/multi byte flips
                 0 => {
-                    for _ in 0..1 + rng.below(8) {
+                    for _ in 0..=rng.below(8) {
                         let i = rng.below(b.len());
                         b[i] ^= 1 << rng.below(8);
                     }
                 }
                 // random byte overwrites
                 1 => {
-                    for _ in 0..1 + rng.below(16) {
+                    for _ in 0..=rng.below(16) {
                         let i = rng.below(b.len());
                         b[i] = rng.byte();
                     }

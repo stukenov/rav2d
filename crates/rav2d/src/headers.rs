@@ -423,7 +423,7 @@ pub struct SequenceHeader {
     pub num_same_ref_comp: u8,
 
     pub tip: bool,
-    /// enable_tip as coded: 0 off, 1 TIP as reference and output, 2 TIP as
+    /// `enable_tip` as coded: 0 off, 1 TIP as reference and output, 2 TIP as
     /// output only. `tip` is `tip_mode != 0`.
     pub tip_mode: u8,
     pub tip_hole_fill: bool,

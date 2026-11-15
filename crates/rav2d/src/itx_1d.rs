@@ -472,7 +472,7 @@ pub fn cctx(u: &mut [i32], v: &mut [i32], angle: &[i16; 3], sz: usize, bitdepth:
     let max = (1 << (bitdepth + 7)) - 1;
     let sina = angle[0] as i32;
     let cosa = angle[1] as i32;
-    debug_assert!(angle[2] == -angle[0]);
+    debug_assert_eq!(angle[2], -angle[0]);
     crate::simd::cctx_row(u, v, sina, cosa, sz, min, max);
 }
 
