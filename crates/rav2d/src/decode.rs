@@ -14322,16 +14322,16 @@ fn rmv_uvpred<BD: crate::pixel::BitDepth>(
     // avm `make_inter_pred_of_nxn`: chroma is split into sub-blocks of the
     // luma OPFL sub-block size, subsampled, at least 4. An 8x8 block has 4x4
     // luma sub-blocks, so 4:4:4 chroma takes four 4x4 sub-blocks and 4:2:2
-    // two, each with the next `mv_refined` entry. With 4:2:0 the 4x4 chroma
-    // is a single sub-block and the path below covers it.
+    // two (one above the other), each with its co-located luma sub-block's
+    // MV. With 4:2:0 the 4x4 chroma is a single sub-block and the path below
+    // covers it.
     if !tip && b.bs == BlockSize::Bs8x8 as u8 as i8 && !(ss_hor != 0 && ss_ver != 0) {
         let cw4 = 2 >> ss_hor;
         let ch4 = 2 >> ss_ver;
-        let mut n = 0usize;
         for sy in 0..ch4 {
             for sx in 0..cw4 {
-                let mv = recon.scratch.rmv_sub8x8[n];
-                n += 1;
+                // The co-located luma 4x4 sub-block's MV.
+                let mv = recon.scratch.rmv_sub8x8[(sy * 2 + sx) as usize];
                 for i in 0..2 {
                     // avm pads a 4-wide sub-block for the 4-tap filter
                     // (FOUR_TAPS_REF_*_BORDER: 1 before, 2 after).
@@ -17175,6 +17175,21 @@ fn cfl_predict_8bpc<BD: crate::pixel::BitDepth>(
             cth,
             edge_flags | dir as i32,
         );
+    } else if ss_ver == 0 {
+        crate::ipred::cfl_gen_y_422(
+            &mut luma,
+            luma_top_stride,
+            ysrc,
+            ysrc_off,
+            ytop_sb_edge,
+            ystride,
+            (refw - subleft) as usize,
+            refh as usize,
+            ctw,
+            cth,
+            edge_flags | dir as i32,
+            filter_type,
+        );
     } else {
         cfl_gen_y_420(
             &mut luma,
@@ -18168,8 +18183,33 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
 
                     if bp == BlockPartition::Invalid {
                         let aspect_isn8 = (aspect != 8) as i32;
+                        // avm `check_is_chroma_size_valid` on the chroma tree:
+                        // a split whose half has no chroma block size at the
+                        // real subsampling is not allowed (4:2:2 16x64 VERT
+                        // would give 4x64), which can leave one direction.
+                        // With 4:2:0 the 4:2:0 measure above already covers it.
+                        // Any tree that carries chroma (the chroma tree or a
+                        // shared one); a chroma half under 4 samples merges
+                        // with its neighbour, so only full-size halves count.
+                        let real_ss_tree = cbs != BlockSize::Invalid
+                            && fi.has_chroma_layout
+                            && !(fi.ss_hor != 0 && fi.ss_ver != 0);
+                        let chroma_size_ok = |w: i32, h: i32| -> bool {
+                            let (cw, ch) = (w >> fi.ss_hor, h >> fi.ss_ver);
+                            cw < 4
+                                || ch < 4
+                                || (cw, ch) != (4, 64)
+                                    && (cw, ch) != (64, 4)
+                                    && BLOCK_DIMENSIONS
+                                        .iter()
+                                        .any(|d| d[0] as i32 * 4 == cw && d[1] as i32 * 4 == ch)
+                        };
+                        let v_ok = !real_ss_tree || chroma_size_ok(bw4 * 2, bh4 * 4);
+                        let h_ok = !real_ss_tree || chroma_size_ok(bw4 * 4, bh4 * 2);
                         if imin(bwh4ss[0], bwh4ss[1]) == 1 {
                             dir = (bwh4ss[0] > bwh4ss[1]) as i32;
+                        } else if v_ok != h_ok {
+                            dir = v_ok as i32;
                         } else if aspect_req_split || min_bwh4 * 8 < max_bwh4 * 2 + aspect_isn8 {
                             // The aspect limit leaves only one direction.
                             dir = (bw4 > bh4) as i32;
@@ -18200,7 +18240,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                             let bwh4ss2 = [bw4 >> fi.ss_hor, bh4 >> fi.ss_ver];
                             let ndir = (!dir) as usize & 1;
                             let ddir = dir as usize;
-                            let has_hv3 = fi.ext_partitions
+                            let mut has_hv3 = fi.ext_partitions
                                 && bwh4ss[ndir] >= 4
                                 && bwh4ss[ddir] >= 2
                                 && b_dim[ndir] as i32 * 8 >= b_dim[ddir] as i32 * 4 + aspect_isn8
@@ -18219,7 +18259,7 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                                             *by + qh4 * 3 < fi.bh
                                         }
                                     }));
-                            let has_hv4ab = bwh4ss[ndir] >= 8
+                            let mut has_hv4ab = bwh4ss[ndir] >= 8
                                 && fi.uneven_4way
                                 && b_dim[ndir] as i32 * 8 >= b_dim[ddir] as i32 * 8 + aspect_isn8
                                 && (cbs != lbs
@@ -18230,6 +18270,31 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
                                         *by + (qh4 >> 1) * 7 < fi.bh
                                     }));
 
+                            // avm `check_is_chroma_size_valid`: on the chroma
+                            // tree the first sub-block's chroma must be a block
+                            // size at the real subsampling. With 4:2:0 the rules
+                            // above already imply it; 4:2:2 and 4:4:4 need the
+                            // check (a 4:2:2 32x64 VERT_3 would give 4x64).
+                            if real_ss_tree {
+                                let chroma_ok = |div: i32| -> bool {
+                                    let (w, h) = if dir != 0 {
+                                        (bw4 * 4 / div, bh4 * 4)
+                                    } else {
+                                        (bw4 * 4, bh4 * 4 / div)
+                                    };
+                                    let (cw, ch) = (w >> fi.ss_hor, h >> fi.ss_ver);
+                                    // avm has no 4x64 or 64x4 (the table here does).
+                                    cw < 4
+                                        || ch < 4
+                                        || (cw, ch) != (4, 64)
+                                            && (cw, ch) != (64, 4)
+                                            && BLOCK_DIMENSIONS.iter().any(|d| {
+                                                d[0] as i32 * 4 == cw && d[1] as i32 * 4 == ch
+                                            })
+                                };
+                                has_hv3 &= chroma_ok(4);
+                                has_hv4ab &= chroma_ok(8);
+                            }
                             if has_hv3 || has_hv4ab {
                                 assert!(pcc.part[ddir][1] != -1);
                                 let ctx5 = get_partition2_ctx(a, l, b_dim, pl, dir, by4, bx4);

@@ -2127,10 +2127,6 @@ const AVMENC_PENDING: &[(&str, &str)] = &[
         "avmenc-i400.obu",
         "dav2d differs from avmdec too; md5 convention for 4:0:0 unchecked",
     ),
-    (
-        "avmenc-i422.obu",
-        "dav2d differs from avmdec too; md5 convention for 4:2:2 unchecked",
-    ),
     ("avmenc-resize.obu", "dav2d hangs on it; scaled references"),
     (
         "avmenc-tilesnolf.obu",
@@ -2151,6 +2147,7 @@ const AVMENC_AVMDEC_ONLY: &[(&str, &str)] = &[
     // dav2d stops 4:4:4 at the sequence header (profile 4) and never had the
     // 4:4:4 MHCCP, thin-compound and chroma-tree rules.
     ("avmenc-i444.obu", "dav2d does not decode 4:4:4"),
+    ("avmenc-i422.obu", "dav2d does not decode 4:2:2"),
     (
         "avmenc-tilecols.obu",
         "dav2d cannot decode multi-tile streams",

@@ -1950,6 +1950,114 @@ pub fn cfl_gen_y_444<P: Pixel>(
     }
 }
 
+/// MHCCP luma for 4:2:2, in the layout of [`cfl_gen_y_420`]: one luma row
+/// per chroma row, two luma columns per chroma column, as avm's
+/// `mhccp_implicit_fetch_neighbor_luma` builds it. avm predicts MHCCP from
+/// that same buffer, block rows included, so the left tap clamps only at the
+/// start of the reference area, never at the block's first column (as CfL's
+/// `cfl_adaptive_luma_subsampling_422` does).
+#[allow(clippy::too_many_arguments)]
+pub fn cfl_gen_y_422<P: Pixel>(
+    dst: &mut [P],
+    dst_top_stride: usize,
+    src: &[P],
+    src_off: usize,
+    top_sb_edge: Option<(&[P], usize)>,
+    src_stride: usize,
+    refw: usize,
+    refh: usize,
+    tw: usize,
+    th: usize,
+    flags: i32,
+    filter_type: i32,
+) {
+    let has_t = flags & CFL_HAS_TOP != 0;
+    let has_l = flags & CFL_HAS_LEFT != 0;
+    let dir = flags & CFL_DIR_ALL;
+    let n_left: usize = if has_l {
+        1 + (dir == CFL_DIR_LEFT) as usize
+    } else {
+        0
+    };
+    let n_top: usize = if has_t {
+        1 + (dir == CFL_DIR_TOP) as usize
+    } else {
+        0
+    };
+    let dst_left_base = n_top * dst_top_stride + 64 * 64;
+    let ss = n_left << 1;
+
+    // One output sample from luma row `buf[row..]` at chroma column `x`
+    // (relative to the reference start, `n_left` columns left of the block).
+    // `l` is the left tap's column, already clamped by the caller.
+    let sample = |buf: &[P], row: usize, c: usize, l: usize| -> P {
+        let s = |i: usize| -> i32 { buf[row.wrapping_add(i)].into() };
+        match filter_type {
+            CFL_FLT_TYPE_VSTRIP => P::from_i32((s(l) + 2 * s(c) + s(c + 1)) >> 2),
+            CFL_FLT_TYPE_GAUSS => P::from_i32(s(c)),
+            _ => P::from_i32((s(c) + s(c + 1)) >> 1),
+        }
+    };
+    // Neighbour left tap: odd n_left starts a column inside avm's area, so
+    // only the even case clamps at 0 (as in cfl_gen_y_420).
+    let nb_left = |c: usize| -> usize {
+        if n_left & 1 != 0 || c > 0 {
+            c.wrapping_sub(1)
+        } else {
+            0
+        }
+    };
+
+    let mut dst_p = 0usize;
+    let mut dst_lp = dst_left_base;
+    if has_t {
+        for y in 0..n_top {
+            let (buf, row) = match top_sb_edge {
+                Some((tsb, tsb_off)) => (tsb, tsb_off - ss),
+                None => (src, src_off - ss - (n_top - y) * src_stride),
+            };
+            for x in 0..refw {
+                let c = x * 2;
+                let l = nb_left(c);
+                // With an odd `n_left` the area starts one sample right of
+                // avm's, so `l` may wrap to -1: the sample before it exists.
+                let v = sample(buf, row, c, l);
+                if x < n_left {
+                    dst[dst_lp + x] = v;
+                } else {
+                    dst[dst_p + x - n_left] = v;
+                }
+            }
+            dst_lp += n_left;
+            dst_p += dst_top_stride;
+        }
+    }
+
+    let mut sp = src_off - ss;
+    for _y in 0..th {
+        for x in 0..n_left {
+            let c = x * 2;
+            dst[dst_lp + x] = sample(src, sp, c, nb_left(c));
+        }
+        for x in 0..tw {
+            let c = ss + x * 2;
+            dst[dst_p + x] = sample(src, sp, c, nb_left(c));
+        }
+        sp += src_stride;
+        dst_lp += n_left;
+        dst_p += tw;
+    }
+
+    for _y in 0..refh.saturating_sub(th) {
+        for x in 0..n_left {
+            let c = x * 2;
+            dst[dst_lp + x] = sample(src, sp, c, nb_left(c));
+        }
+        sp += src_stride;
+        dst_lp += n_left;
+    }
+}
+
 pub const CFL_MHCCP_MAX_EDGE_SAMPLES: usize = 386;
 pub const CFL_MHCCP_MAX_LUMA_SIZE: usize = 4736;
 
