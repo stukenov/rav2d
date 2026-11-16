@@ -3162,11 +3162,8 @@ pub fn decode_frame_main(fc: &mut crate::internal::FrameContext, n_passes: i32) 
     };
     let mut cf = vec![0i32; 64 * 64];
 
-    let c_root_bs = if seq_hdr.layout == crate::headers::PixelLayout::I400 {
-        BlockSize::Invalid
-    } else {
-        root_bs
-    };
+    // 4:0:0 keeps a chroma size through the partition walk, see decode_b.
+    let c_root_bs = root_bs;
     let cols = frame_hdr.tiling.t.cols as i32;
     let rows = frame_hdr.tiling.t.rows as i32;
     let keyframe = frame_hdr.is_key_or_intra();
@@ -5219,6 +5216,16 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     lbs: BlockSize,
     cbs: BlockSize,
 ) -> Result<Av2Block, ()> {
+    // avm groups blocks whose chroma would be under 4 samples with 4:2:0
+    // subsampling for 4:0:0 as well, so the partition walk carries a 4:2:0
+    // chroma size for monochrome too. Only the grouping (`lbs != cbs`) is
+    // used from it; there is no chroma to code.
+    let shares_chroma = lbs != cbs;
+    let cbs = if fi.has_chroma_layout {
+        cbs
+    } else {
+        BlockSize::Invalid
+    };
     let _ = &mut *recon;
     let bs = if lbs == BlockSize::Invalid { cbs } else { lbs };
     debug_assert!(bs != BlockSize::Invalid);
@@ -5533,7 +5540,9 @@ fn decode_b<BD: crate::pixel::BitDepth>(
     if b.skip_mode != 0 {
         b.is_intra = 0;
     } else if fi.is_inter_or_switch && intra_region == 0 {
-        if fi.has_chroma_layout && lbs != cbs {
+        // avm `read_is_inter_block`: a block whose chroma is shared with its
+        // neighbours (`offset_started`) is inter, monochrome included.
+        if shares_chroma {
             b.is_intra = 0;
         } else {
             // get_intra_ctx (env.h:72): sum of intra(&!intrabc) over the
@@ -6759,9 +6768,10 @@ fn decode_b<BD: crate::pixel::BitDepth>(
         // TIP decision
         let is_tip =
             // avm `is_tip_allowed_bsize`: both sides at least 8 and the block
-            // is its own chroma reference. With 4:2:0 a 4xN block never is,
-            // so `imax` used to be enough; with 4:4:4 it is not.
-            if b.skip_mode == 0 && fi.tip_frame_mode != 0 && cbs == lbs && imin(bw4, bh4) >= 2 {
+            // is its own chroma reference (4:0:0 included, see decode_b). With
+            // 4:2:0 a 4xN block never is, so `imax` used to be enough; with
+            // 4:4:4 it is not.
+            if b.skip_mode == 0 && fi.tip_frame_mode != 0 && !shares_chroma && imin(bw4, bh4) >= 2 {
                 let ctx = (if n_ctx >= 1 {
                     (nx_ref0[0] == TIP_FRAME as i8) as usize
                 } else {

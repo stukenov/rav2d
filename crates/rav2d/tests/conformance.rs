@@ -2123,10 +2123,6 @@ fn avmenc_vectors() -> Vec<PathBuf> {
 /// vector leaves this list in the commit that makes it pass.
 const AVMENC_PENDING: &[(&str, &str)] = &[
     // dav2d does not match avmdec on these either, so it cannot guide the port.
-    (
-        "avmenc-i400.obu",
-        "dav2d differs from avmdec too; md5 convention for 4:0:0 unchecked",
-    ),
     ("avmenc-resize.obu", "dav2d hangs on it; scaled references"),
     (
         "avmenc-tilesnolf.obu",
@@ -2149,6 +2145,10 @@ const AVMENC_AVMDEC_ONLY: &[(&str, &str)] = &[
     ("avmenc-i444.obu", "dav2d does not decode 4:4:4"),
     ("avmenc-i422.obu", "dav2d does not decode 4:2:2"),
     (
+        "avmenc-i400.obu",
+        "dav2d drops the 4:2:0 chroma grouping for 4:0:0; avm keeps it",
+    ),
+    (
         "avmenc-tilecols.obu",
         "dav2d cannot decode multi-tile streams",
     ),
@@ -2166,7 +2166,8 @@ fn avmenc_pending(path: &std::path::Path) -> Option<&'static str> {
         .map(|(_, why)| *why)
 }
 
-fn avmenc_failures(path: &PathBuf) -> Vec<String> {
+/// rav2d's displayed frames against avmdec's md5 in `<clip>.md5`.
+fn avmdec_md5_failures(path: &PathBuf) -> Vec<String> {
     let mut failures = Vec::new();
     let expected = std::fs::read_to_string(format!("{}.md5", path.display()))
         .map(|s| s.trim().to_string())
@@ -2185,6 +2186,11 @@ fn avmenc_failures(path: &PathBuf) -> Vec<String> {
             frames.len()
         ));
     }
+    failures
+}
+
+fn avmenc_failures(path: &PathBuf) -> Vec<String> {
+    let mut failures = avmdec_md5_failures(path);
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if AVMENC_AVMDEC_ONLY.iter().any(|(n, _)| *n == name) {
         return failures;
@@ -2313,10 +2319,10 @@ fn bit_exact_full_clip_sweep() {
 /// Coverage gate for a decode path the shipped corpus never exercises. The whole
 /// conformance corpus is 4:2:0; monochrome (4:0:0) reconstruction was previously
 /// unverified end to end. `cov-monochrome-128x128.obu` (luma-only, no chroma
-/// planes, generated with the avm encoder, dav2d as reference) closes that gap:
-/// EVERY coding-order frame must reconstruct bit-exact vs dav2d, in-loop filters
-/// off on both decoders. Reuses the `full_clip_failures` best-match harness,
-/// whose plane extraction is layout-aware (I400 → Y only, no chroma).
+/// planes, generated with the avm encoder) closes that gap. It was first
+/// checked against dav2d frame by frame, but dav2d drops avm's 4:2:0 chroma
+/// grouping for 4:0:0, so its displayed frames are now checked
+/// against avmdec's md5 (`cov-monochrome-128x128.obu.md5`) instead.
 ///
 /// This caught a real reconstruction bug: IntraBC luma/chroma residual incorrectly
 /// applied the inter-DDT transform mask. dav2d gates that mask on `!b->intra`, but
@@ -2345,7 +2351,14 @@ fn bit_exact_coverage_sweep() {
             eprintln!("skip: {path:?} not found");
             continue;
         }
-        let failures = full_clip_failures(&path);
+        // dav2d drops avm's 4:2:0 chroma grouping for 4:0:0 (which forces
+        // some 4xN blocks inter and keeps them out of TIP), so the
+        // monochrome clip is checked against avmdec only.
+        let failures = if clip.starts_with("cov-monochrome") {
+            avmdec_md5_failures(&path)
+        } else {
+            full_clip_failures(&path)
+        };
         if !failures.is_empty() {
             panic!(
                 "{what} coverage clip not bit-exact:\n  {}",
