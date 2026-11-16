@@ -7787,15 +7787,20 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 // has_cs_ext (decode.c:3062-3076): the warp_extend/warp_causal
                 // signal is only read when a spatial neighbour references the same
                 // frame. Without this gate WARPNEWMV blocks read extra symbols and
-                // desync the parse. The is_sb_boundary top path uses the a_sb_cache
-                // in dav2d; rav2d's `a` already carries the above-SB context, so it
-                // is used directly here (exact for non-boundary; SB-boundary refmv
-                // edge handling is a follow-up).
+                // desync the parse. On the first row of a superblock the row
+                // above comes from the a_sb_cache snapshot, as in dav2d: blocks
+                // already decoded in this superblock have overwritten `a`.
                 let is_sb_boundary = (by & (fi.sb_step - 1)) == 0;
                 let match_ref_l =
                     |off: usize| -> bool { l.r#ref[0][off] == ref0 || l.r#ref[1][off] == ref0 };
-                let match_ref_a =
-                    |off: usize| -> bool { a.r#ref[0][off] == ref0 || a.r#ref[1][off] == ref0 };
+                let sb_cache = &recon.a_sb_cache;
+                let match_ref_a = |off: usize| -> bool {
+                    if is_sb_boundary {
+                        sb_cache.r#ref[0][off] == ref0 || sb_cache.r#ref[1][off] == ref0
+                    } else {
+                        a.r#ref[0][off] == ref0 || a.r#ref[1][off] == ref0
+                    }
+                };
                 let has_cs_ext = if inter_mode == InterPredMode::WarpNewMv as u8 {
                     let left_match = have_left
                         && (match_ref_l(by4)
