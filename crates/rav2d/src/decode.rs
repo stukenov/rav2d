@@ -7104,14 +7104,22 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                     |off: usize, r: i8| -> bool { l.r#ref[0][off] == r || l.r#ref[1][off] == r };
                 let match_ref_a =
                     |off: usize, r: i8| -> bool { a.r#ref[0][off] == r || a.r#ref[1][off] == r };
+                // At the top superblock edge avm reads the row above from the
+                // line buffer at 8x8 resolution (`get_row_smvp_states`), which
+                // is the snapshot taken before this superblock: blocks already
+                // decoded in it have overwritten `a`.
+                let sb_cache = &recon.a_sb_cache;
+                let match_ref_sb = |off: usize, r: i8| -> bool {
+                    sb_cache.r#ref[0][off] == r || sb_cache.r#ref[1][off] == r
+                };
                 let match_refs = |r: i8| -> bool {
                     let left = match_ref_l(by4, r)
                         || (by + bh4 <= fi.tile_row_end && match_ref_l(by4 + bh4 as usize - 1, r));
                     let top = if is_sb_boundary {
                         let o0 = bx4 & !1;
-                        match_ref_a(o0, r)
+                        match_ref_sb(o0, r)
                             || (((bx + bw4 - 2) & !1) < fi.tile_col_end
-                                && match_ref_a((bx4 + bw4 as usize - 2) & !1, r))
+                                && match_ref_sb((bx4 + bw4 as usize - 2) & !1, r))
                     } else {
                         match_ref_a(bx4, r)
                             || (bx + bw4 <= fi.tile_col_end
@@ -11699,7 +11707,10 @@ fn iiblend_plane_8bpc<BD: crate::pixel::BitDepth>(
         if by > fi.tile_row_start {
             let mut wv = imin(bw4, fi.tile_col_end - bx - bw4);
             if (by & (sbsz - 1)) == 0 {
-                n_tr = 0; // top sb boundary: simplified (no a_sb_cache)
+                // Top superblock boundary: the row above is complete, so the
+                // top-right is there up to the tile edge (recon_tmpl.c
+                // `n_tr = w`). Forcing 0 here changed SMOOTH interintra.
+                n_tr = wv.max(0);
             } else {
                 let end = imin(((bx + sbsz) & !(sbsz - 1)) + 0, fi.tile_col_end);
                 wv = imin(wv, end - bx - bw4);
