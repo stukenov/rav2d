@@ -1508,13 +1508,20 @@ pub fn parse_frame_hdr(
                             }
                             pd.num_classes_idx = rpd.num_classes_idx;
                             pd.num_classes = rpd.num_classes;
-                        } else {
+                        } else if p == 0 {
+                            // avm reads the class count only where more than
+                            // one class is allowed (`max_num_classes`), and
+                            // chroma allows one. dav2d reads it for every
+                            // plane, which shifts the rest of the header.
                             let val = gb.get_bits(3) as u8;
                             pd.num_classes_idx = val;
                             pd.num_classes = 1
                                 + val
                                 + imax(val as i32 - 3, 0) as u8
                                 + imax(val as i32 - 5, 0) as u8 * 2;
+                        } else {
+                            pd.num_classes_idx = 0;
+                            pd.num_classes = 1;
                         }
                     } else {
                         pd.num_classes_idx = 0;

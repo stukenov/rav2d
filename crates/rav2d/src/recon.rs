@@ -828,7 +828,13 @@ pub fn decode_coefs(
                 *txtp = TXTP_FROM_UVMODE[p.uv_mode] as u16;
             }
             let t = *txtp as u8;
-            if (t_dim.w >= 8 && t & 0x02 != 0)
+            // An IntraBC chroma block inherits the luma type from `txtp_map`.
+            // A lossless luma block records WHT there, but avm stores it as
+            // DCT_DCT and picks WHT from the lossless flag alone, so a chroma
+            // block outside a lossless segment must read it as DCT_DCT. Only a
+            // corrupt stream gets here, but WHT on a larger transform panics.
+            if t == txtp::WHT_WHT
+                || (t_dim.w >= 8 && t & 0x02 != 0)
                 || (t_dim.h >= 8 && t & 0x40 != 0)
                 || (p.tx == 2 /* TX_16X16 */
                     && ((t & 0x47 == 0x41) || (t & 0xe2 == 0x22)))
