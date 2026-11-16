@@ -375,8 +375,8 @@ fn bit_exact_avm_reference_md5() {
         let mut hasher = Md5::new();
         let frames = rav2d_decode_display(&clip);
         for f in &frames {
-            for pl in 0..3 {
-                hasher.update(&f.planes[pl]);
+            for plane in &f.planes {
+                hasher.update(plane);
             }
         }
         let got = hasher.finish();
@@ -2178,8 +2178,8 @@ fn avmenc_failures(path: &PathBuf) -> Vec<String> {
     let mut hasher = Md5::new();
     let frames = rav2d_decode_display(path);
     for f in &frames {
-        for pl in 0..3 {
-            hasher.update(&f.planes[pl]);
+        for plane in &f.planes {
+            hasher.update(plane);
         }
     }
     let got = hasher.finish();

@@ -360,10 +360,7 @@ impl Decoder {
     }
 
     fn output_picture_ready(&self) -> bool {
-        if self.dpb_out == self.dpb_in {
-            return false;
-        }
-        true
+        self.dpb_out != self.dpb_in
     }
 
     fn gen_picture(&mut self) -> Result<(), Rav2dError> {
