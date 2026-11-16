@@ -2330,6 +2330,10 @@ pub struct ReconScratch {
     /// chroma-scaled MV) and read back by the chroma `rmv_uvpred`. Indexed
     /// `((by & 31) >> 1) * 16 + ((bx & 31) >> 1)`.
     pub rmv: [[[crate::levels::Mv; 2]; 2]; 256],
+    /// The four 4x4 OPFL MVs of an 8x8 block, chroma-scaled, in avm's
+    /// `mv_refined` order. 4:2:0 chroma uses only the first (it is in `rmv`);
+    /// 4:4:4 and 4:2:2 chroma, at least 8 tall, use more.
+    pub rmv_sub8x8: [[crate::levels::Mv; 2]; 4],
     /// Above/left palette-colour cache (`t->al_pal`): `[a/l][bx4|by4][8 colours]`,
     /// indexed by `bx & 63` (above) / `by & 63` (left). Written by the palette
     /// recon (`copy_pal_block_y`) and read by `read_pal_plane` to build the
@@ -2361,6 +2365,7 @@ impl Default for ReconScratch {
             chroma_u_has_cf: 0,
             txtp_map: [0u16; 256],
             rmv: [[[crate::levels::Mv::default(); 2]; 2]; 256],
+            rmv_sub8x8: [[crate::levels::Mv::default(); 2]; 4],
             al_pal: [[[0u16; 8]; 64]; 2],
             pal: [0u16; 8],
             pal_idx_y: Box::new([0u8; 64 * 64]),
@@ -13415,6 +13420,9 @@ fn opfl_pred_luma<BD: crate::pixel::BitDepth>(
                     if store_rmv {
                         recon.scratch.rmv[rmv_idx][0] = mv;
                     }
+                    if bs == 1 {
+                        recon.scratch.rmv_sub8x8[(byi * 2 + bxi) as usize] = mv;
+                    }
                     bxi += bs;
                     xx += 1;
                 }
@@ -14311,6 +14319,56 @@ fn rmv_uvpred<BD: crate::pixel::BitDepth>(
     let h4 = imin(bh4, fi.bh - cby);
     let w4 = imin(bw4, fi.bw - cbx);
 
+    // avm `make_inter_pred_of_nxn`: chroma is split into sub-blocks of the
+    // luma OPFL sub-block size, subsampled, at least 4. An 8x8 block has 4x4
+    // luma sub-blocks, so 4:4:4 chroma takes four 4x4 sub-blocks and 4:2:2
+    // two, each with the next `mv_refined` entry. With 4:2:0 the 4x4 chroma
+    // is a single sub-block and the path below covers it.
+    if !tip && b.bs == BlockSize::Bs8x8 as u8 as i8 && !(ss_hor != 0 && ss_ver != 0) {
+        let cw4 = 2 >> ss_hor;
+        let ch4 = 2 >> ss_ver;
+        let mut n = 0usize;
+        for sy in 0..ch4 {
+            for sx in 0..cw4 {
+                let mv = recon.scratch.rmv_sub8x8[n];
+                n += 1;
+                for i in 0..2 {
+                    // avm pads a 4-wide sub-block for the 4-tap filter
+                    // (FOUR_TAPS_REF_*_BORDER: 1 before, 2 after).
+                    let top = (cby * 4 >> ss_ver) + sy * 4 + (b_mv[i].y >> (3 + ss_ver));
+                    let left = (cbx * 4 >> ss_hor) + sx * 4 + (b_mv[i].x >> (3 + ss_hor));
+                    let hv = 2;
+                    let hh = 2;
+                    let bottom = iclip(top + 4 + hv, 1, h);
+                    let right = iclip(left + 4 + hh, 1, w);
+                    let top = iclip(top + 1 - hv, 0, h - 1);
+                    let left = iclip(left + 1 - hh, 0, w - 1);
+                    let off = (sy * 4) as usize * stride + (sx * 4) as usize;
+                    mc_opfl_8bpc(
+                        bd,
+                        &mut tmp[i],
+                        off,
+                        stride,
+                        1,
+                        1,
+                        (cbx >> ss_hor) + sx,
+                        (cby >> ss_ver) + sy,
+                        1 + plane,
+                        unsafe { mv[i].c.x },
+                        unsafe { mv[i].c.y },
+                        refp[i],
+                        filter,
+                        left,
+                        right,
+                        top,
+                        bottom,
+                    );
+                }
+            }
+        }
+        return false;
+    }
+
     let mut uvoff = 0usize;
     let mut y = 0i32;
     while y < h4 {
@@ -14329,8 +14387,16 @@ fn rmv_uvpred<BD: crate::pixel::BitDepth>(
                 } else {
                     (b_mv[i].y, b_mv[i].x)
                 };
-                top[i] = ((cby + y) * 4 >> ss_ver) + (mvy >> 4);
-                left[i] = ((cbx + x) * 4 >> ss_hor) + (mvx >> 4);
+                // The TIP MV is already scaled to 1/16 of this plane; the block
+                // MV is in 1/8 luma samples, so its whole-sample part drops
+                // one more bit per subsampled direction.
+                let (sh_y, sh_x) = if tip {
+                    (4, 4)
+                } else {
+                    (3 + ss_ver, 3 + ss_hor)
+                };
+                top[i] = ((cby + y) * 4 >> ss_ver) + (mvy >> sh_y);
+                left[i] = ((cbx + x) * 4 >> ss_hor) + (mvx >> sh_x);
                 bottom[i] = iclip(top[i] + (4 * rh4 >> ss_ver) + hvtaps, 1, h);
                 right[i] = iclip(left[i] + (4 * rw4 >> ss_hor) + hhtaps, 1, w);
                 top[i] = iclip(top[i] + 1 - hvtaps, 0, h - 1);
