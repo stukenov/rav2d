@@ -269,8 +269,12 @@ mod tests {
             super::ipred_v(&mut b, stride, &tl, o, w, h, 0);
             assert_eq!(a, b, "ipred_v {w}x{h}");
 
-            for p in &mut a { *p = 0; }
-            for p in &mut b { *p = 0; }
+            for p in &mut a {
+                *p = 0;
+            }
+            for p in &mut b {
+                *p = 0;
+            }
             crate::ipred::ipred_h_8bpc(&mut a, stride, &tl, o, w, h, 0);
             super::ipred_h(&mut b, stride, &tl, o, w, h, 0);
             assert_eq!(a, b, "ipred_h {w}x{h}");
@@ -290,8 +294,12 @@ mod tests {
             super::ipred_smooth_v(&mut b, stride, &tl, o, w, h);
             assert_eq!(a, b, "ipred_smooth_v {w}x{h}");
 
-            for p in &mut a { *p = 0; }
-            for p in &mut b { *p = 0; }
+            for p in &mut a {
+                *p = 0;
+            }
+            for p in &mut b {
+                *p = 0;
+            }
             crate::ipred::ipred_smooth_h_8bpc(&mut a, stride, &tl, o, w, h);
             super::ipred_smooth_h(&mut b, stride, &tl, o, w, h);
             assert_eq!(a, b, "ipred_smooth_h {w}x{h}");

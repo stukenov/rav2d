@@ -3,7 +3,13 @@ use std::sync::Arc;
 use crate::env::get_poc_diff;
 use crate::error::Rav2dError;
 use crate::getbits::GetBits;
-use crate::headers::{PixelLayout, SegmentationDataSet, TileInfo, MAX_TILE_COLS, MAX_TILE_ROWS, FrameHeader, SequenceHeader, AdaptiveBoolean, FilmGrainData, ObuType, FrameType, PRIMARY_REF_NONE, FilterMode, MAX_SEGMENTS, RestorationType, TxfmMode, WarpedMotionType, ContentLightLevel, MasteringDisplay, ContentInterpretation, ScanType, ColorDescription, ColorPrimaries, TransferCharacteristics, MatrixCoefficients, ChromaSamplePosition, AspectRatio};
+use crate::headers::{
+    AdaptiveBoolean, AspectRatio, ChromaSamplePosition, ColorDescription, ColorPrimaries,
+    ContentInterpretation, ContentLightLevel, FilmGrainData, FilterMode, FrameHeader, FrameType,
+    MAX_SEGMENTS, MAX_TILE_COLS, MAX_TILE_ROWS, MasteringDisplay, MatrixCoefficients, ObuType,
+    PRIMARY_REF_NONE, PixelLayout, RestorationType, ScanType, SegmentationDataSet, SequenceHeader,
+    TileInfo, TransferCharacteristics, TxfmMode, WarpedMotionType,
+};
 use crate::internal::{DecoderContext, RefState, TileGroup};
 use crate::intops::{iclip, iclip_u8, imax, imin, ulog2};
 use crate::warpmv::resolve_divisor_32;
@@ -1546,8 +1552,7 @@ pub fn parse_frame_hdr(
                     continue;
                 }
                 let n_feat = 16 + 2 * (p != 0) as usize;
-                let n_ref_filters = if seqhdr.rst_disable_mask[usize::from(p != 0)] & 1 != 0
-                {
+                let n_ref_filters = if seqhdr.rst_disable_mask[usize::from(p != 0)] & 1 != 0 {
                     16
                 } else {
                     48 - hdr.restoration.p[p].ns.num_classes as usize
@@ -3892,7 +3897,8 @@ mod tests {
         let mut failures = Vec::new();
         for entry in entries.unwrap().flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            #[allow(clippy::case_sensitive_file_extension_comparisons)] // corpus files are exactly `.obu`
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
+            // corpus files are exactly `.obu`
             if !name.ends_with(".obu") {
                 continue;
             }

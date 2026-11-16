@@ -261,7 +261,9 @@ fn print_table(title: &str, rav_filters: rav2d::InloopFilterType, dav_filters: u
     );
     for name in CLIPS {
         let path = media(name);
-        let bytes = if let Ok(b) = std::fs::read(&path) { b } else {
+        let bytes = if let Ok(b) = std::fs::read(&path) {
+            b
+        } else {
             eprintln!("{name:<46} (missing)");
             continue;
         };

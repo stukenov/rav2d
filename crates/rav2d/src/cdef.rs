@@ -905,8 +905,7 @@ pub fn cdef_brow<BD: BitDepth>(
                     let y1 = yl.map_or(0, |m| m[(yr + 1).min(63)][sb64x_idx]);
                     let uvr = ((2 * by_idx) >> ss_ver).min(63);
                     let u0 = ul.map_or(0, |m| m[uvr][sb64x_idx]);
-                    let u1 = ul
-                        .map_or(0, |m| m[(uvr + (1 - ss_ver)).min(63)][sb64x_idx]);
+                    let u1 = ul.map_or(0, |m| m[(uvr + (1 - ss_ver)).min(63)][sb64x_idx]);
                     (y0, y1, u0, u1)
                 } else {
                     (0, 0, 0, 0)

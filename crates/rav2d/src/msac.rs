@@ -313,8 +313,8 @@ impl<'a> MsacContext<'a> {
             let pc = cdf[n_symbols];
             let count = (pc & 0xFF) as u8;
             debug_assert!(count <= 32);
-            let rate = MSAC_RATE[(pc >> 8) as usize][(count >> 4) as usize]
-                + u8::from(n_symbols > 2);
+            let rate =
+                MSAC_RATE[(pc >> 8) as usize][(count >> 4) as usize] + u8::from(n_symbols > 2);
             for i in 0..val as usize {
                 cdf[i] += (32768 - cdf[i]) >> rate;
             }

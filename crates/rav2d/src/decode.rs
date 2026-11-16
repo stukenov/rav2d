@@ -871,7 +871,11 @@ pub struct PartitionConstants {
 }
 
 const I: i8 = -1; // BS_INVALID shorthand
-use BlockSize::{Bs256x256, Bs256x128, Bs128x128, Bs128x256, Bs128x64, Bs64x64, Bs64x128, Bs64x32, Bs64x16, Bs64x8, Bs32x32, Bs32x64, Bs16x64, Bs8x64, Bs64x4, Bs32x16, Bs16x32, Bs8x32, Bs32x8, Bs16x16, Bs8x16, Bs4x64, Bs32x4, Bs4x32, Bs16x8, Bs4x16, Bs8x8, Bs4x8, Bs16x4, Bs8x4, Bs4x4};
+use BlockSize::{
+    Bs4x4, Bs4x8, Bs4x16, Bs4x32, Bs4x64, Bs8x4, Bs8x8, Bs8x16, Bs8x32, Bs8x64, Bs16x4, Bs16x8,
+    Bs16x16, Bs16x32, Bs16x64, Bs32x4, Bs32x8, Bs32x16, Bs32x32, Bs32x64, Bs64x4, Bs64x8, Bs64x16,
+    Bs64x32, Bs64x64, Bs64x128, Bs128x64, Bs128x128, Bs128x256, Bs256x128, Bs256x256,
+};
 
 pub static PARTITION_SUBB: [PartitionConstants; N_BS_SIZES] = {
     let mut t = [PartitionConstants {
@@ -1076,7 +1080,10 @@ pub static CWP_WEIGHTING_FACTOR: [[i8; 5]; 2] = [[8, 12, 4, 10, 6], [8, 12, 4, 2
 // indexed by inter_mode - CompInterPredMode::NearMvNewMv
 pub static AMVD_MODE_CONTEXT: [u8; 10] = {
     let mut t = [0u8; 10];
-    use crate::levels::CompInterPredMode::{NearMvNewMv, NewMvNearMv, OpflNearMvNewMv, OpflNewMvNearMv, JointNewMv, OpflJointNewMv, NewMvNewMv, OpflNewMvNewMv};
+    use crate::levels::CompInterPredMode::{
+        JointNewMv, NearMvNewMv, NewMvNearMv, NewMvNewMv, OpflJointNewMv, OpflNearMvNewMv,
+        OpflNewMvNearMv, OpflNewMvNewMv,
+    };
     let base = NearMvNewMv as usize;
     t[NearMvNewMv as usize - base] = 0;
     t[NewMvNearMv as usize - base] = 1;
@@ -1104,8 +1111,7 @@ pub fn read_wedge_idx(msac: &mut MsacContext, cdf_m: &mut CdfModeContext) -> i8 
 pub fn decode_4way(msac: &mut MsacContext, r: i32, cdf: &mut [u16], n_bits: i32) -> i32 {
     debug_assert!(n_bits >= 4);
     let bin = msac.decode_symbol_adapt(cdf, 3) as i32;
-    let rem =
-        msac.decode_bools_bypass((n_bits + bin + i32::from(bin == 0) - 4) as u32) as i32;
+    let rem = msac.decode_bools_bypass((n_bits + bin + i32::from(bin == 0) - 4) as u32) as i32;
     let v = (if bin != 0 { 1 << (n_bits + bin - 4) } else { 0 }) + rem;
     let n = 1 << n_bits;
     if r * 2 <= n {
@@ -1856,7 +1862,10 @@ pub fn derive_warpmv(
             let r2_idx = ra_off + (bx >> 1) as usize;
             init_odd = bx & 1;
             have_topleft = true;
-            let mut off = i32::from(BLOCK_DIMENSIONS[rt.ra[r2_idx].bs as usize][0] as i32 <= rt.ra[r2_idx].ox4 as i32 + init_odd);
+            let mut off = i32::from(
+                BLOCK_DIMENSIONS[rt.ra[r2_idx].bs as usize][0] as i32
+                    <= rt.ra[r2_idx].ox4 as i32 + init_odd,
+            );
             let tr_ext = (bx + bw4) & (sb_step - 1) != 0
                 && (rt.ra[ra_off + ((bx + bw4) >> 1) as usize].ox4 != 0 || init_odd != 0);
             let tr_ext_i = tr_ext as i32;
@@ -4164,10 +4173,7 @@ fn collect_noskip(
     sb256w: i32,
 ) -> Vec<[[u16; 4]; 32]> {
     (0..sb256w as usize)
-        .map(|i| {
-            mask.get(row + i)
-                .map_or([[0; 4]; 32], |m| m.noskip_mask)
-        })
+        .map(|i| mask.get(row + i).map_or([[0; 4]; 32], |m| m.noskip_mask))
         .collect()
 }
 
@@ -4571,10 +4577,7 @@ pub fn submit_frame(c: &mut crate::internal::DecoderContext, n_tc: i32) -> Resul
                     fc.ref_mvs[i] = None;
                 }
                 fc.refrefpoc[i] = c.refs[refidx].refpoc;
-                fc.refcnt[i] = fc.refp[i]
-                    .frame_hdr
-                    .as_ref()
-                    .map_or(0, |h| h.n_ref_frames);
+                fc.refcnt[i] = fc.refp[i].frame_hdr.as_ref().map_or(0, |h| h.n_ref_frames);
             }
         }
     }
@@ -4966,10 +4969,7 @@ pub(crate) fn apply_grain_to_picture_mt(
         None => return clone_picture_mt(src, n_threads, allocator),
     };
     let dst = clone_picture_mt(src, n_threads, allocator);
-    let seed = src
-        .frame_hdr
-        .as_ref()
-        .map_or(0, |h| h.film_grain.seed);
+    let seed = src.frame_hdr.as_ref().map_or(0, |h| h.film_grain.seed);
 
     let ss_ver = src.p.layout == crate::headers::PixelLayout::I420;
     let ss_hor = matches!(
@@ -5211,23 +5211,21 @@ fn decode_b<BD: crate::pixel::BitDepth>(
             msac.dbg_rng()
         );
     }
-    let trace_blk = std::env::var("RAV2D_BLK")
-        .ok()
-        .is_some_and(|s| {
-            if s == "all" {
-                return true;
+    let trace_blk = std::env::var("RAV2D_BLK").ok().is_some_and(|s| {
+        if s == "all" {
+            return true;
+        }
+        // "p<poc>" traces all blocks of a given frame_offset.
+        if let Some(rest) = s.strip_prefix('p') {
+            if let Ok(p) = rest.parse::<u8>() {
+                return recon.frm_hdr.frame_offset == p;
             }
-            // "p<poc>" traces all blocks of a given frame_offset.
-            if let Some(rest) = s.strip_prefix('p') {
-                if let Ok(p) = rest.parse::<u8>() {
-                    return recon.frm_hdr.frame_offset == p;
-                }
-            }
-            let mut it = s.split(',');
-            let ty = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
-            let tx = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
-            ty == by && tx == bx
-        });
+        }
+        let mut it = s.split(',');
+        let ty = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
+        let tx = it.next().unwrap_or("").parse::<i32>().unwrap_or(-1);
+        ty == by && tx == bx
+    });
     if trace_blk {
         eprintln!(
             "  CK decode_b[y={} x={} bs={}] rng={}",
@@ -11179,9 +11177,7 @@ fn inter_residual_tx_8bpc<BD: crate::pixel::BitDepth>(
     }
     let _ = IntraPredMode::DcPred;
     if env_flag!("RAV2D_CFDUMP") && by == 12 && bx == 0 && pl == 0 {
-        let mut s = format!(
-            "DCFDUMP by={by} bx={bx} tx={tx} txtp={txtp} eob={eob}\n"
-        );
+        let mut s = format!("DCFDUMP by={by} bx={bx} tx={tx} txtp={txtp} eob={eob}\n");
         for i in 0..64 {
             s.push_str(&format!(" {}", recon.cf[i]));
         }
@@ -17491,7 +17487,9 @@ fn dispatch_ipred<BD: crate::pixel::BitDepth>(
         return;
     }
     use crate::ipred;
-    use crate::levels::{DC_128_PRED, TOP_DC_PRED, LEFT_DC_PRED, Z1_PRED, Z2_PRED, Z3_PRED, DIP_PRED};
+    use crate::levels::{
+        DC_128_PRED, DIP_PRED, LEFT_DC_PRED, TOP_DC_PRED, Z1_PRED, Z2_PRED, Z3_PRED,
+    };
     let d = &mut dst[dst_off..];
     match m {
         0 /* DcPred */ => ipred::ipred_dc(bd, d, stride, edge, edge_o, w, h, angle),
@@ -17531,8 +17529,13 @@ fn dispatch_ipred_8bpc(
     max_h: i32,
     ibp_weights: &[[[u8; 16]; 16]; 7],
 ) {
-    use crate::ipred::{ipred_dc_8bpc, ipred_dc_128_8bpc, ipred_dc_top_8bpc, ipred_dc_left_8bpc, ipred_paeth_8bpc, ipred_smooth_8bpc, ipred_z1_8bpc, ipred_z2_8bpc, ipred_z3_8bpc, ipred_dip_8bpc};
-    use crate::levels::{DC_128_PRED, TOP_DC_PRED, LEFT_DC_PRED, Z1_PRED, Z2_PRED, Z3_PRED, DIP_PRED};
+    use crate::ipred::{
+        ipred_dc_8bpc, ipred_dc_128_8bpc, ipred_dc_left_8bpc, ipred_dc_top_8bpc, ipred_dip_8bpc,
+        ipred_paeth_8bpc, ipred_smooth_8bpc, ipred_z1_8bpc, ipred_z2_8bpc, ipred_z3_8bpc,
+    };
+    use crate::levels::{
+        DC_128_PRED, DIP_PRED, LEFT_DC_PRED, TOP_DC_PRED, Z1_PRED, Z2_PRED, Z3_PRED,
+    };
     let d = &mut dst[dst_off..];
     match m {
         0 /* DcPred */ => ipred_dc_8bpc(d, stride, edge, edge_o, w, h, angle),

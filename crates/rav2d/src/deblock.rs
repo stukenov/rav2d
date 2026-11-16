@@ -993,7 +993,9 @@ fn deblock_h_sb64y(
             3
         } else if vmask[2] & (1 << y) != 0 {
             2
-        } else { usize::from(vmask[1] & (1 << y) != 0) };
+        } else {
+            usize::from(vmask[1] & (1 << y) != 0)
+        };
         let max_width_pos = MAX_WIDTH_Y[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos
@@ -1039,7 +1041,9 @@ fn deblock_v_sb64y(
             3
         } else if vmask[2] & (1 << x) != 0 {
             2
-        } else { usize::from(vmask[1] & (1 << x) != 0) };
+        } else {
+            usize::from(vmask[1] & (1 << x) != 0)
+        };
         let max_width_pos = MAX_WIDTH_Y[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos
@@ -1083,7 +1087,9 @@ fn deblock_h_sb64uv(
         }
         let level = if vmask[2] & (1 << y) != 0 {
             2
-        } else { usize::from(vmask[1] & (1 << y) != 0) };
+        } else {
+            usize::from(vmask[1] & (1 << y) != 0)
+        };
         let max_width_pos = MAX_WIDTH_UV[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos
@@ -1127,7 +1133,9 @@ fn deblock_v_sb64uv(
         }
         let level = if vmask[2] & (1 << x) != 0 {
             2
-        } else { usize::from(vmask[1] & (1 << x) != 0) };
+        } else {
+            usize::from(vmask[1] & (1 << x) != 0)
+        };
         let max_width_pos = MAX_WIDTH_UV[level] as i32;
         let max_width_neg = if tile_edge {
             max_width_pos

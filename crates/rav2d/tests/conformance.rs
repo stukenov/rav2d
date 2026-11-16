@@ -1002,11 +1002,7 @@ fn bit_exact_keyframe_allplanes() {
     for (pl, plane_name) in plane_names.iter().enumerate() {
         let r = &reference[0].planes[pl];
         let g = &got[0].planes[pl];
-        assert_eq!(
-            r.len(),
-            g.len(),
-            "frame 0 plane {plane_name} size differs"
-        );
+        assert_eq!(r.len(), g.len(), "frame 0 plane {plane_name} size differs");
         let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
             let first = r.iter().zip(g.iter()).position(|(a, b)| a != b).unwrap();
@@ -1070,11 +1066,7 @@ fn bit_exact_keyframe_filtered() {
     for (pl, plane_name) in plane_names.iter().enumerate() {
         let r = &reference[0].planes[pl];
         let g = &got[0].planes[pl];
-        assert_eq!(
-            r.len(),
-            g.len(),
-            "frame 0 plane {plane_name} size differs"
-        );
+        assert_eq!(r.len(), g.len(), "frame 0 plane {plane_name} size differs");
         let diff = r.iter().zip(g.iter()).filter(|(a, b)| a != b).count();
         if diff != 0 {
             let first = r.iter().zip(g.iter()).position(|(a, b)| a != b).unwrap();
@@ -1132,7 +1124,9 @@ fn intra_frame0_sweep() {
         // appears in dav2d's coding-order output and can be matched to rav2d's.
         let reference = dav2d_decode_invisible(&path);
         let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rav2d_decode(&path)));
-        let got = if let Ok(g) = got { g } else {
+        let got = if let Ok(g) = got {
+            g
+        } else {
             summary.push(format!("{clip}: rav2d PANIC"));
             continue;
         };
@@ -1166,7 +1160,9 @@ fn intra_frame0_sweep() {
                     })
                     .sum::<usize>()
             });
-        let r = if let Some(r) = r { r } else {
+        let r = if let Some(r) = r {
+            r
+        } else {
             summary.push(format!(
                 "{clip}: no dav2d frame matches dims {}x{}",
                 g.w, g.h
@@ -1255,7 +1251,9 @@ fn bit_exact_filtered_sweep() {
                     })
                     .sum::<usize>()
             });
-        let r = if let Some(r) = r { r } else {
+        let r = if let Some(r) = r {
+            r
+        } else {
             failures.push(format!("{clip}: no dav2d frame matches {}x{}", g.w, g.h));
             continue;
         };

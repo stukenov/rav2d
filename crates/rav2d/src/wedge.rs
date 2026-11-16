@@ -139,7 +139,11 @@ struct WedgeCodeType {
     y_offset: u8,
 }
 
-use WedgeDirection::{Wedge0, Wedge14, Wedge27, Wedge45, Wedge63, Wedge90, Wedge117, Wedge135, Wedge153, Wedge166, Wedge180, Wedge194, Wedge207, Wedge225, Wedge243, Wedge270, Wedge297, Wedge315, Wedge333, Wedge346};
+use WedgeDirection::{
+    Wedge0, Wedge14, Wedge27, Wedge45, Wedge63, Wedge90, Wedge117, Wedge135, Wedge153, Wedge166,
+    Wedge180, Wedge194, Wedge207, Wedge225, Wedge243, Wedge270, Wedge297, Wedge315, Wedge333,
+    Wedge346,
+};
 
 static WEDGE_CODEBOOK_16: [WedgeCodeType; 68] = [
     WedgeCodeType {
