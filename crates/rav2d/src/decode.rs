@@ -7389,7 +7389,12 @@ fn decode_b<BD: crate::pixel::BitDepth>(
                 && imin(bw4, bh4) >= 2
                 && bw4 * bh4 > 4
                 && final_inter_mode != CompInterPredMode::GlobalMvGlobalMv as u8
+                // avm `is_refinemv_allowed_reference`: the refs lie on both
+                // sides at the same distance. A distance of 0 on both (a frame
+                // predicted from a reference with its own order hint) passes
+                // `d0 == -d1` but is not two-sided.
                 && fi.refdist[ref0 as usize] == -fi.refdist[ref1 as usize]
+                && fi.refdist[ref0 as usize] != 0
                 && recon.svc[ref0 as usize][0].scale == 0
                 && recon.svc[ref1 as usize][0].scale == 0
                 && !opfl_switchable_excl
@@ -13612,8 +13617,11 @@ fn recon_b_inter_tip<BD: crate::pixel::BitDepth>(
     let tip_subpel = recon.frm_hdr.tip.subpel_filter;
     let mut opfl = recon.seq_hdr.tip_refine_mv
         && (frame_mode == 1 || tip_subpel == crate::headers::FilterMode::Sharp8Tap as u8);
-    let refine =
-        opfl && frame_mode == 1 && recon.seq_hdr.refine_mv && fi.refdist[r0] == -fi.refdist[r1];
+    let refine = opfl
+        && frame_mode == 1
+        && recon.seq_hdr.refine_mv
+        && fi.refdist[r0] == -fi.refdist[r1]
+        && fi.refdist[r0] != 0;
     let bw4_full = BLOCK_DIMENSIONS[bs as u8 as usize][0] as i32;
     let bh4_full = BLOCK_DIMENSIONS[bs as u8 as usize][1] as i32;
     let is_256 = bs == BlockSize::Bs256x256;
