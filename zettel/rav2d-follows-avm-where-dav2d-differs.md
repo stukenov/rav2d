@@ -19,4 +19,6 @@ header rules in dav2d HEAD are wrong against avm (the `unitsb` and
 
 `AVMENC_AVMDEC_ONLY` in the conformance tests lists vectors where rav2d is
 checked against avmdec only, because the dav2d comparison would demand the
-bug. See [[port-follows-dav2d-of-2-may]].
+bug. See [[port-follows-dav2d-of-2-may]]. Two more places where dav2d is
+wrong against avm sit outside the header: [[sdp-chroma-restoration-follows-the-luma-tree]]
+and [[chroma-restoration-units-can-be-32-wide]].

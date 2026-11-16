@@ -1261,7 +1261,13 @@ pub fn read_pal_indices(
     pal_sz: i32,
     sz: &[i32; 4],
 ) -> i32 {
-    let dir = (imax(sz[2], sz[3]) < 64) as u32 & msac.decode_bool_bypass();
+    // The direction bit is coded only below 64 in both dimensions; `&` on
+    // integers would read it regardless.
+    let dir = if imax(sz[2], sz[3]) < 64 {
+        msac.decode_bool_bypass()
+    } else {
+        0
+    };
     let strides: [isize; 2] = if dir != 0 {
         [1, sz[2] as isize]
     } else {
@@ -2651,87 +2657,101 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
         }
 
         // Per-plane loop-restoration unit info (symbol reads: entropy pass only).
+        // avm reads a plane's units at the root of the partition tree that
+        // covers the plane. In an intra frame with SDP the luma and chroma
+        // trees split at 64x64, so with 64x64 superblocks the chroma units are
+        // read after the whole luma tree, not with the luma units.
         let sbsz = sb_step * 4;
-        if !is_tip_frame && pass_bits & (Pass::Entropy as u8) != 0 {
-            for p in 0..3 {
-                let (ss_ver, ss_hor) = if p == 0 {
-                    (0, 0)
-                } else {
-                    (fi.ss_ver, fi.ss_hor)
-                };
-                let rtype_u8 = frame_hdr.restoration.p[p].restoration_type;
-                if rtype_u8 == RestorationType::None as u8 {
-                    continue;
-                }
-                // Restoration is active for this plane, so the LR mask is
-                // allocated for valid streams. Guard against an empty mask (a
-                // degenerate frame from a malformed header) before indexing it.
-                if lr_mask.is_empty() || lr_mask[0].lr[p].is_empty() {
-                    continue;
-                }
-                let tx = (4 * (bx - col_start)) >> ss_hor;
-                let ty = (4 * (by - row_start)) >> ss_ver;
-                let unit_sz_log2 = frame_hdr.restoration.unit_size[(p != 0) as usize] as i32;
-                let unit_sz = 1i32 << unit_sz_log2;
-                let mask = unit_sz - 1;
-                if (tx | ty) & mask != 0 {
-                    continue;
-                }
-                let tw = (col_end * 4) >> ss_hor;
-                let th = (row_end * 4) >> ss_ver;
-                let half_unit = unit_sz >> 1;
-                let fx = (4 * bx) >> ss_hor;
-                let fy = (by * 4) >> ss_ver;
-                if (ty != 0 && fy + half_unit > th) || (tx != 0 && fx + half_unit > tw) {
-                    continue;
-                }
+        let sdp_split_at_root = fi.sdp
+            && !fi.is_inter_or_switch
+            && root_bs == BlockSize::Bs64x64
+            && c_root_bs == BlockSize::Bs64x64;
+        macro_rules! read_lr_units {
+            ($planes:expr) => {
+                if !is_tip_frame && pass_bits & (Pass::Entropy as u8) != 0 {
+                    for p in $planes {
+                        let (ss_ver, ss_hor) = if p == 0 {
+                            (0, 0)
+                        } else {
+                            (fi.ss_ver, fi.ss_hor)
+                        };
+                        let rtype_u8 = frame_hdr.restoration.p[p].restoration_type;
+                        if rtype_u8 == RestorationType::None as u8 {
+                            continue;
+                        }
+                        // Restoration is active for this plane, so the LR mask is
+                        // allocated for valid streams. Guard against an empty mask (a
+                        // degenerate frame from a malformed header) before indexing it.
+                        if lr_mask.is_empty() || lr_mask[0].lr[p].is_empty() {
+                            continue;
+                        }
+                        let tx = (4 * (bx - col_start)) >> ss_hor;
+                        let ty = (4 * (by - row_start)) >> ss_ver;
+                        let unit_sz_log2 =
+                            frame_hdr.restoration.unit_size[(p != 0) as usize] as i32;
+                        let unit_sz = 1i32 << unit_sz_log2;
+                        let mask = unit_sz - 1;
+                        if (tx | ty) & mask != 0 {
+                            continue;
+                        }
+                        let tw = (col_end * 4) >> ss_hor;
+                        let th = (row_end * 4) >> ss_ver;
+                        let half_unit = unit_sz >> 1;
+                        let fx = (4 * bx) >> ss_hor;
+                        let fy = (by * 4) >> ss_ver;
+                        if (ty != 0 && fy + half_unit > th) || (tx != 0 && fx + half_unit > tw) {
+                            continue;
+                        }
 
-                let frame_type = match rtype_u8 {
-                    1 => RestorationType::PcWiener,
-                    2 => RestorationType::NsWiener,
-                    3 => RestorationType::Switchable,
-                    _ => RestorationType::None,
-                };
+                        let frame_type = match rtype_u8 {
+                            1 => RestorationType::PcWiener,
+                            2 => RestorationType::NsWiener,
+                            3 => RestorationType::Switchable,
+                            _ => RestorationType::None,
+                        };
 
-                let sbw = sbsz >> ss_hor;
-                let sbh = sbsz >> ss_ver;
-                let lruw = imax(1, imin(tw - fx + half_unit, sbw) >> unit_sz_log2);
-                let lruh = imax(1, imin(th - fy + half_unit, sbh) >> unit_sz_log2);
-                let vsh = unit_sz_log2 - 7 + ss_ver;
-                let hsh = unit_sz_log2 - 7 + ss_hor;
-                // dav2d asserts vsh >= 0 && hsh >= 0 here but notes (FIXME) that
-                // unit_sz_log2 can be 6, giving a negative shift. The shift is a
-                // no-op when the corresponding loop count is 1 (x/_y == 0). Guard
-                // against the negative-shift overflow a malformed unit size can
-                // trigger; non-negative shifts keep dav2d's exact indexing.
-                let shl = |v: i32, s: i32| if s >= 0 { v << s } else { v >> (-s) };
-                let mut sb_idx = (by >> 6) * sb256w + (bx >> 6);
-                let start_unit_idx = (((by & 0x30) >> 2) + ((bx & 0x30) >> 4)) as usize;
+                        let sbw = sbsz >> ss_hor;
+                        let sbh = sbsz >> ss_ver;
+                        let lruw = imax(1, imin(tw - fx + half_unit, sbw) >> unit_sz_log2);
+                        let lruh = imax(1, imin(th - fy + half_unit, sbh) >> unit_sz_log2);
+                        let vsh = unit_sz_log2 - 7 + ss_ver;
+                        let hsh = unit_sz_log2 - 7 + ss_hor;
+                        // dav2d asserts vsh >= 0 && hsh >= 0 here but notes (FIXME) that
+                        // unit_sz_log2 can be 6, giving a negative shift. The shift is a
+                        // no-op when the corresponding loop count is 1 (x/_y == 0). Guard
+                        // against the negative-shift overflow a malformed unit size can
+                        // trigger; non-negative shifts keep dav2d's exact indexing.
+                        let shl = |v: i32, s: i32| if s >= 0 { v << s } else { v >> (-s) };
+                        let mut sb_idx = (by >> 6) * sb256w + (bx >> 6);
+                        let start_unit_idx = (((by & 0x30) >> 2) + ((bx & 0x30) >> 4)) as usize;
 
-                for _y in 0..lruh {
-                    for x in 0..lruw {
-                        // For valid streams these indices are always in range;
-                        // clamp so a malformed unit-size/geometry can't index the
-                        // LR mask out of bounds (the entropy read still happens, so
-                        // MSAC stays in sync). No-op for valid input.
-                        let unit_idx = start_unit_idx.min(lr_mask[0].lr[p].len() - 1);
-                        let lr_slot =
-                            ((sb_idx + shl(x, hsh)).max(0) as usize).min(lr_mask.len() - 1);
-                        let ns_plane = &frame_hdr.restoration.p[p].ns;
-                        read_restoration_info(
-                            msac,
-                            &mut ts.cdf.m,
-                            &mut ts.ns_wiener_bank[p],
-                            &mut lr_mask[lr_slot].lr[p][unit_idx],
-                            p,
-                            frame_type,
-                            ns_plane,
-                        );
+                        for _y in 0..lruh {
+                            for x in 0..lruw {
+                                // For valid streams these indices are always in range;
+                                // clamp so a malformed unit-size/geometry can't index the
+                                // LR mask out of bounds (the entropy read still happens, so
+                                // MSAC stays in sync). No-op for valid input.
+                                let unit_idx = start_unit_idx.min(lr_mask[0].lr[p].len() - 1);
+                                let lr_slot =
+                                    ((sb_idx + shl(x, hsh)).max(0) as usize).min(lr_mask.len() - 1);
+                                let ns_plane = &frame_hdr.restoration.p[p].ns;
+                                read_restoration_info(
+                                    msac,
+                                    &mut ts.cdf.m,
+                                    &mut ts.ns_wiener_bank[p],
+                                    &mut lr_mask[lr_slot].lr[p][unit_idx],
+                                    p,
+                                    frame_type,
+                                    ns_plane,
+                                );
+                            }
+                            sb_idx += shl(sb256w, vsh);
+                        }
                     }
-                    sb_idx += shl(sb256w, vsh);
-                }
-            }
-        } // end if !is_tip_frame (loop-restoration info read)
+                } // end if !is_tip_frame (loop-restoration info read)
+            };
+        }
+        read_lr_units!(if sdp_split_at_root { 0..1 } else { 0..3 });
 
         let mut dir = 0i32;
         let mut sdp_cfl_disallowed = 0i32;
@@ -2840,6 +2860,60 @@ pub fn decode_tile_sbrow_entropy<BD: crate::pixel::BitDepth>(
                 root_bs,
                 c_root_bs,
                 fi,
+            )?;
+        } else if sdp_split_at_root {
+            // The split decode_sb would do itself, done here so the chroma
+            // restoration units can be read between the two trees.
+            decode_sb(
+                fi,
+                &mut bx_m,
+                &mut by_m,
+                &mut cbx,
+                &mut cby,
+                &mut intra_region,
+                &mut sdp_cfl_disallowed,
+                pass_bits,
+                &mut a_arr[a_idx],
+                l,
+                msac,
+                &mut ts.cdf.m,
+                &mut ts.cdf.mv,
+                &mut ts.cdf.dmv,
+                &mut recon,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                root_bs,
+                BlockSize::Invalid,
+                &mut dir,
+            )?;
+            read_lr_units!(1..3);
+            // `dir` carries the luma root's split direction into the chroma
+            // tree, which needs it to decide whether CfL is allowed.
+            decode_sb(
+                fi,
+                &mut bx_m,
+                &mut by_m,
+                &mut cbx,
+                &mut cby,
+                &mut intra_region,
+                &mut sdp_cfl_disallowed,
+                pass_bits,
+                &mut a_arr[a_idx],
+                l,
+                msac,
+                &mut ts.cdf.m,
+                &mut ts.cdf.mv,
+                &mut ts.cdf.dmv,
+                &mut recon,
+                part_w,
+                part_w_idx,
+                part_r,
+                part_r_idx,
+                BlockSize::Invalid,
+                c_root_bs,
+                &mut dir,
             )?;
         } else {
             decode_sb(
@@ -16665,7 +16739,11 @@ fn recon_b_intra_chroma_phase<BD: crate::pixel::BitDepth>(
             // CCTX cross-component transform (recon_tmpl.c:3882-3905).
             let cctx_enabled = recon.frame.seq_cctx
                 && (recon.frame.layout == crate::headers::PixelLayout::I420 || uv_t_dim.max < 8);
-            let cctx_type = if cctx_enabled && tu_eob[i][0] >= 1 {
+            // decode_coefs reads the CCTX type once U has `eob >= intra`, so
+            // an IntraBC block (not `is_intra` here) carries one even for a
+            // lone DC coefficient, and avm applies it (`skip_cctx` is 0 for
+            // IntraBC, which avm counts as inter).
+            let cctx_type = if cctx_enabled && tu_eob[i][0] >= is_intra as i16 {
                 (tu_txtp[i][0] >> 8) as i32
             } else {
                 0

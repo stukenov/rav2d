@@ -2298,7 +2298,11 @@ fn lr_sbrow_plane<P: Pixel>(
     let unit_size = 1 << unit_size_log2;
     let half_unit_size = unit_size >> 1;
 
-    let row_y = y + ((8 >> ss_ver) * (first_sby_in_tile_row != FirstSbInTileRow::None) as i32);
+    // `y` is the stripe start, 8 luma rows above the superblock row except
+    // on the first superblock row of a tile row (lr_apply_tmpl.c
+    // `y + 8 * !first_sby_in_tile_row`). The unit is picked from the
+    // superblock row, so add the offset back where it was taken off.
+    let row_y = y + ((8 >> ss_ver) * (first_sby_in_tile_row == FirstSbInTileRow::None) as i32);
     let shift_hor = 8 - ss_hor;
 
     let mut pre_lr_border = [[[P::default(); 6]; 264]; 2];
@@ -2324,9 +2328,19 @@ fn lr_sbrow_plane<P: Pixel>(
     let mut bit = 0usize;
     let mut x = 0i32;
     let mut cur_p_off = p_off;
+    // Each unit gets its own filter, so a column block may not span two
+    // units. 4:2:0 chroma units can be 32 wide (64 luma units); dav2d walks
+    // 64 columns at a time and would filter the second unit with the first
+    // one's coefficients. Without restoration on this plane (a GDF-only pass)
+    // the unit size is unset, and the walk stays at 64.
+    let step = if unit_size >= 32 {
+        imin(64, unit_size)
+    } else {
+        64
+    };
 
-    while x + 64 < w {
-        let next_x = x + 64;
+    while x + step < w {
+        let next_x = x + step;
         let mut next_iter_lru_start_x = next_x & !(unit_size - 1);
         if next_iter_lru_start_x != 0 && w - next_iter_lru_start_x < half_unit_size {
             next_iter_lru_start_x -= unit_size;
@@ -2335,7 +2349,7 @@ fn lr_sbrow_plane<P: Pixel>(
         let next_sb_idx = sb_idx + (next_iter_lru_start_x >> shift_hor);
 
         let n = if plane != 0 { 2 } else { 6 };
-        let border_src_off = cur_p_off + 64;
+        let border_src_off = cur_p_off + step as usize;
         if border_src_off + n <= p.len() {
             for row in 0..(row_h - y) as usize {
                 let src_row = border_src_off + row * abs_stride;
@@ -2360,7 +2374,7 @@ fn lr_sbrow_plane<P: Pixel>(
                 x,
                 y,
                 plane,
-                64,
+                step,
                 row_h,
                 lr_unit,
                 edges,
@@ -2372,7 +2386,7 @@ fn lr_sbrow_plane<P: Pixel>(
         lr_idx_0 = next_sb_idx as usize;
         lr_unit_0 = next_u_idx as usize;
         x = next_x;
-        cur_p_off += 64;
+        cur_p_off += step as usize;
         edges |= LR_HAVE_LEFT;
         bit ^= 1;
     }
