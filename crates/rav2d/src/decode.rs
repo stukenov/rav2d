@@ -6753,7 +6753,10 @@ fn decode_b<BD: crate::pixel::BitDepth>(
 
         // TIP decision
         let is_tip =
-            if b.skip_mode == 0 && fi.tip_frame_mode != 0 && cbs == lbs && imax(bw4, bh4) >= 2 {
+            // avm `is_tip_allowed_bsize`: both sides at least 8 and the block
+            // is its own chroma reference. With 4:2:0 a 4xN block never is,
+            // so `imax` used to be enough; with 4:4:4 it is not.
+            if b.skip_mode == 0 && fi.tip_frame_mode != 0 && cbs == lbs && imin(bw4, bh4) >= 2 {
                 let ctx = (if n_ctx >= 1 {
                     (nx_ref0[0] == TIP_FRAME as i8) as usize
                 } else {
@@ -12651,7 +12654,42 @@ fn recon_b_inter_compound_unit<BD: crate::pixel::BitDepth>(
             }
         }
 
-        for pl in (1..3usize).filter(|_| !sub8x8 && do_chroma_mc) {
+        // avm `build_inter_predictors_8x8_and_bigger`: the chroma of a thin
+        // compound block (4x16, 16x4: one side 4, the other at least 16) is
+        // predicted from the first reference alone. With 4:2:0 such a block's
+        // chroma is shared with its neighbours (the sub8x8 path), so this
+        // only shows with 4:4:4 and 4:2:2.
+        let thin_block = imin(luma_bw4, luma_bh4) == 1 && imax(luma_bw4, luma_bh4) >= 4;
+        if thin_block && !sub8x8 && do_chroma_mc {
+            for pl in 1..3usize {
+                let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
+                let dst: &mut [BD::Pixel] = if pl == 1 {
+                    &mut recon.dst_u[dst_off..]
+                } else {
+                    &mut recon.dst_v[dst_off..]
+                };
+                inter_mc_plane_8bpc(
+                    bd,
+                    dst,
+                    uv_stride,
+                    refp[0],
+                    pl,
+                    cbx,
+                    cby,
+                    cbw4,
+                    cbh4,
+                    mvs[0].x,
+                    mvs[0].y,
+                    filter,
+                    ss_hor,
+                    ss_ver,
+                    fi.bw,
+                    fi.bh,
+                    recon.svc[refs[0] as usize],
+                );
+            }
+        }
+        for pl in (1..3usize).filter(|_| !sub8x8 && !thin_block && do_chroma_mc) {
             let dst_off = 4 * ((cby >> ss_ver) as usize * uv_stride + (cbx >> ss_hor) as usize);
             let _len = crate::mc_neon::compound_tmp_len(cw, ch);
             let mut tmp = [vec![0i16; _len], vec![0i16; _len]];
@@ -16988,7 +17026,12 @@ fn cfl_predict_8bpc<BD: crate::pixel::BitDepth>(
                 imin((0x10000u64 | !bits).trailing_zeros() as i32, w)
             }
         };
-        refw += n_tr * 4;
+        // avm `mhccp_implicit_fetch_neighbor_luma` adds the top-right only
+        // when the block is wider than 4 luma samples; with 4:2:0 a chroma
+        // block always is, with 4:4:4 a 4-wide one is not.
+        if (ctw4 as i32 * 4) << ss_hor > 4 {
+            refw += n_tr * 4;
+        }
     }
     let mut subleft = 0;
     if has_left {
@@ -17014,7 +17057,10 @@ fn cfl_predict_8bpc<BD: crate::pixel::BitDepth>(
             }
             nb
         };
-        refh += n_bl * 4;
+        // Same rule for the bottom-left and the block height.
+        if (cth4 as i32 * 4) << ss_ver > 4 {
+            refh += n_bl * 4;
+        }
         refw += 2;
         subleft = (dir != CflMhDir::Left) as i32;
     }
@@ -17049,20 +17095,36 @@ fn cfl_predict_8bpc<BD: crate::pixel::BitDepth>(
     } else {
         None
     };
-    cfl_gen_y_420(
-        &mut luma,
-        luma_top_stride,
-        ysrc,
-        ysrc_off,
-        ytop_sb_edge,
-        ystride,
-        (refw - subleft) as usize,
-        refh as usize,
-        ctw,
-        cth,
-        edge_flags | dir as i32,
-        filter_type,
-    );
+    if ss_hor == 0 && ss_ver == 0 {
+        crate::ipred::cfl_gen_y_444(
+            &mut luma,
+            luma_top_stride,
+            ysrc,
+            ysrc_off,
+            ytop_sb_edge,
+            ystride,
+            (refw - subleft) as usize,
+            refh as usize,
+            ctw,
+            cth,
+            edge_flags | dir as i32,
+        );
+    } else {
+        cfl_gen_y_420(
+            &mut luma,
+            luma_top_stride,
+            ysrc,
+            ysrc_off,
+            ytop_sb_edge,
+            ystride,
+            (refw - subleft) as usize,
+            refh as usize,
+            ctw,
+            cth,
+            edge_flags | dir as i32,
+            filter_type,
+        );
+    }
     refh += has_top as i32;
 
     let mut mat = [[0i32; 3]; 3];
@@ -17939,8 +18001,15 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
     if pass & (Pass::Entropy as u8) != 0 {
         let bx4 = (*bx & 63) as usize;
         let by4 = (*by & 63) as usize;
-        let eff_ss_ver = fi.ss_ver & (lbs == BlockSize::Invalid) as i32;
-        let eff_ss_hor = fi.ss_hor & (lbs == BlockSize::Invalid) as i32;
+        // avm states every chroma-tree partition rule in luma block sizes,
+        // as 4:2:0 would give them: 8x8 is a leaf, 8x16 splits only
+        // horizontally, nothing at or below 16x16 takes an extended split
+        // (`av2_get_normative_forced_partition_type`,
+        // `rect_type_implied_by_bsize`, `is_ext_partition_allowed_at_bsize`),
+        // whatever the subsampling. So the chroma tree is measured as 4:2:0
+        // for 4:4:4 and 4:2:2 as well.
+        let eff_ss_ver = (lbs == BlockSize::Invalid) as i32;
+        let eff_ss_hor = (lbs == BlockSize::Invalid) as i32;
         let bwh4ss = [bw4 >> eff_ss_hor, bh4 >> eff_ss_ver];
         assert!(bwh4ss[0] >= 1 && bwh4ss[1] >= 1);
         let mut dir = -1i32;

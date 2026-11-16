@@ -395,10 +395,10 @@ pub fn parse_seq_hdr(gb: &mut GetBits, strict: bool) -> Result<SequenceHeader> {
     let mut hdr = SequenceHeader::default();
 
     hdr.id = gb.get_vlc() as u8;
+    // Every 5-bit value is a profile to avm (`MAX_PROFILES` is 32): 0-2
+    // are 4:2:0, 3 is 4:2:2 and 4 is 4:4:4. dav2d stopped at 2, which
+    // rejected every 4:2:2 and 4:4:4 stream at the sequence header.
     hdr.profile = gb.get_bits(5) as u8;
-    if hdr.profile > 2 {
-        return Err(Rav2dError::InvalidData);
-    }
     hdr.reduced_still_picture_header = gb.get_bit() != 0;
     hdr.level = gb.get_bits(5) as u8;
     if hdr.level >= 4 && !hdr.reduced_still_picture_header {

@@ -1884,6 +1884,72 @@ pub fn cfl_gen_y_420<P: Pixel>(
     }
 }
 
+/// MHCCP luma for 4:4:4: the same layout as [`cfl_gen_y_420`] (top rows at
+/// `dst`, left columns at `n_top * dst_top_stride + 64 * 64`, then the block
+/// rows), but every sample is the co-located luma sample, as avm's
+/// `mhccp_implicit_fetch_neighbor_luma` and `cfl_luma_subsampling_444` copy
+/// it. At the top superblock edge every top row is the row just above the
+/// block (`ref_h_c_off`), which is what `top_sb_edge` points at.
+#[allow(clippy::too_many_arguments)]
+pub fn cfl_gen_y_444<P: Pixel>(
+    dst: &mut [P],
+    dst_top_stride: usize,
+    src: &[P],
+    src_off: usize,
+    top_sb_edge: Option<(&[P], usize)>,
+    src_stride: usize,
+    refw: usize,
+    refh: usize,
+    tw: usize,
+    th: usize,
+    flags: i32,
+) {
+    let has_t = flags & CFL_HAS_TOP != 0;
+    let has_l = flags & CFL_HAS_LEFT != 0;
+    let dir = flags & CFL_DIR_ALL;
+    let n_left: usize = if has_l {
+        1 + (dir == CFL_DIR_LEFT) as usize
+    } else {
+        0
+    };
+    let n_top: usize = if has_t {
+        1 + (dir == CFL_DIR_TOP) as usize
+    } else {
+        0
+    };
+    let dst_left_base = n_top * dst_top_stride + 64 * 64;
+    let mut dst_p = 0usize;
+    let mut dst_lp = dst_left_base;
+
+    if has_t {
+        for y in 0..n_top {
+            let (buf, row) = match top_sb_edge {
+                Some((tsb, tsb_off)) => (tsb, tsb_off - n_left),
+                None => (src, src_off - n_left - (n_top - y) * src_stride),
+            };
+            dst[dst_lp..dst_lp + n_left].copy_from_slice(&buf[row..row + n_left]);
+            dst[dst_p..dst_p + refw - n_left].copy_from_slice(&buf[row + n_left..row + refw]);
+            dst_lp += n_left;
+            dst_p += dst_top_stride;
+        }
+    }
+
+    let mut sp = src_off - n_left;
+    for _y in 0..th {
+        dst[dst_lp..dst_lp + n_left].copy_from_slice(&src[sp..sp + n_left]);
+        dst[dst_p..dst_p + tw].copy_from_slice(&src[sp + n_left..sp + n_left + tw]);
+        sp += src_stride;
+        dst_lp += n_left;
+        dst_p += tw;
+    }
+
+    for _y in 0..refh.saturating_sub(th) {
+        dst[dst_lp..dst_lp + n_left].copy_from_slice(&src[sp..sp + n_left]);
+        sp += src_stride;
+        dst_lp += n_left;
+    }
+}
+
 pub const CFL_MHCCP_MAX_EDGE_SAMPLES: usize = 386;
 pub const CFL_MHCCP_MAX_LUMA_SIZE: usize = 4736;
 
