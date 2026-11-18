@@ -28,7 +28,7 @@
 //!     AV2 changed the symbol decoder to the `dav2d_msac_min_prob` form
 //!     (`v = (r*p>>10)<<3`); no `*symbol_adapt*_neon` symbol exists. Only the 4
 //!     bool/bypass primitives remain, and they read `MsacContext` by fixed byte
-//!     offset (BUF_POS=0, BUF_END=8, DIF=16, RNG=24, CNT=28, ALLOW_UPDATE_CDF=32)
+//!     offset (`BUF_POS=0`, `BUF_END=8`, DIF=16, RNG=24, CNT=28, `ALLOW_UPDATE_CDF=32`)
 //!     — rav2d's `MsacContext` holds a borrow-checked `&[u8]` (fat ptr+len) with
 //!     no raw `buf_end`, so the layout cannot be matched without a pervasive,
 //!     load-bearing `#[repr(C)]` rewrite for only the minority bool paths.
@@ -43,7 +43,7 @@
 //!     (the `lpf_*_sb_*` ABI takes a packed `vmask` + `l[4]` level grid + an
 //!     `Av2FilterLUT` with separate q/side thresholds), but rav2d's scalar
 //!     deblock uses a different decomposition (`deblock_sbrow_cols/rows` with
-//!     per-edge q_thr/side_thr LUTs, no `vmask` bitmask). Wiring would require
+//!     per-edge `q_thr/side_thr` LUTs, no `vmask` bitmask). Wiring would require
 //!     restructuring the most complex filter module to emit that exact mask/lut
 //!     layout — too high a bit-exact risk for the win.
 //!   * cdef (`arm/64/cdef.S`): dav2d splits CDEF into `cdef_padding{4,8}` (writes

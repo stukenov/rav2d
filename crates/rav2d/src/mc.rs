@@ -5,7 +5,7 @@ use crate::tables::{EXT_WARP_FILTER, MC_SUBPEL_FILTERS, MC_WARP_FILTER};
 pub const INTERMEDIATE_BITS_8BPC: i32 = 4;
 pub const PREP_BIAS_8BPC: i32 = 0;
 
-/// `get_intermediate_bits(bitdepth_max)` (mc_tmpl.c): 4 for 8bpc, `14 - bd` for
+/// `get_intermediate_bits(bitdepth_max)` (`mc_tmpl.c)`: 4 for 8bpc, `14 - bd` for
 /// HBD (10-bit -> 4, 12-bit -> 2).
 #[inline(always)]
 pub(crate) fn intermediate_bits<BD: BitDepth>(bd: BD) -> i32 {
@@ -16,7 +16,7 @@ pub(crate) fn intermediate_bits<BD: BitDepth>(bd: BD) -> i32 {
     }
 }
 
-/// `PREP_BIAS` (mc_tmpl.c): 0 for 8bpc, 8192 for HBD. The MC prep tmp buffer
+/// `PREP_BIAS` (`mc_tmpl.c)`: 0 for 8bpc, 8192 for HBD. The MC prep tmp buffer
 /// stays `int16_t` for both; the bias keeps HBD prepped values in i16 range.
 #[inline(always)]
 fn prep_bias<BD: BitDepth>(_bd: BD) -> i32 {
@@ -789,7 +789,7 @@ pub fn put_bilin<BD: BitDepth>(
     if mx != 0 {
         if my != 0 {
             let mut mid = vec![0i16; 64 * (h + 1)];
-            for y in 0..h + 1 {
+            for y in 0..=h {
                 for x in 0..w {
                     let si = y * src_stride + x;
                     let a: i32 = src[si].into();
@@ -860,7 +860,7 @@ pub fn prep_bilin<BD: BitDepth>(
     if mx != 0 {
         if my != 0 {
             let mut mid = vec![0i16; 64 * (h + 1)];
-            for y in 0..h + 1 {
+            for y in 0..=h {
                 for x in 0..w {
                     let si = y * src_stride + x;
                     let a: i32 = src[si].into();

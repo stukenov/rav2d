@@ -361,7 +361,7 @@ fn dc_gen<BD: BitDepth>(bd: BD, tl: &[BD::Pixel], o: usize, width: usize, height
     for i in 0..height {
         dc += tl[o - 1 - i].as_u16() as u32;
     }
-    if n_pel & (n_pel - 1) == 0 {
+    if n_pel.is_power_of_two() {
         return (dc + width as u32) >> ctz(n_pel as u32);
     }
     (fast_div32_dc(dc, n_pel as u32)).min(bd.bitdepth_max() as u32)
@@ -908,7 +908,7 @@ pub fn ipred_z1<BD: BitDepth>(
             str as usize,
         );
     } else {
-        filt[1..1 + sz].copy_from_slice(&tl[o..o + sz]);
+        filt[1..=sz].copy_from_slice(&tl[o..o + sz]);
     }
     filt[0] = filt[1];
     // C: `filt[sz + 2] = filt[sz + 1] = filt[sz]` (right-associative), so both
@@ -1102,7 +1102,7 @@ pub fn ipred_z3<BD: BitDepth>(
             str as usize,
         );
     } else {
-        filt[2..2 + sz].copy_from_slice(&tl[o + 1 - sz..o + 1]);
+        filt[2..2 + sz].copy_from_slice(&tl[(o + 1 - sz)..=o]);
     }
     filt[0] = filt[2];
     filt[1] = filt[2];
@@ -1269,7 +1269,7 @@ pub fn ipred_z2<BD: BitDepth>(
             str_t as usize,
         );
     } else {
-        filt[1..1 + sz_t].copy_from_slice(&tl[o..o + sz_t]);
+        filt[1..=sz_t].copy_from_slice(&tl[o..o + sz_t]);
     }
     filt[0] = filt[1];
     filt[sz_t + 1] = filt[sz_t];
@@ -1295,7 +1295,7 @@ pub fn ipred_z2<BD: BitDepth>(
             str_l as usize,
         );
     } else {
-        filt2[1..1 + sz_l].copy_from_slice(&tl[o - (height + mrl_idx)..o + 1]);
+        filt2[1..=sz_l].copy_from_slice(&tl[(o - (height + mrl_idx))..=o]);
     }
     filt2[1 + sz_l] = filt2[sz_l];
     filt2[0] = filt2[1];
@@ -1641,12 +1641,12 @@ fn cfl_filter<P: Pixel>(
 
 /// Generate downsampled luma for CFL prediction at 4:2:0 resolution.
 ///
-/// All src/top_sb_edge indexing uses a "pointer offset" model: `sp` tracks the
+/// All `src/top_sb_edge` indexing uses a "pointer offset" model: `sp` tracks the
 /// current source position as an offset into `src`. The caller must ensure `src`
 /// is large enough that `sp - n_left*2` never underflows.
 ///
-/// `src_off` is the initial offset into `src` (before subtracting n_left*2).
-/// `top_sb_off` is the initial offset into `top_sb_edge` (before subtracting n_left*2).
+/// `src_off` is the initial offset into `src` (before subtracting `n_left`*2).
+/// `top_sb_off` is the initial offset into `top_sb_edge` (before subtracting `n_left`*2).
 #[allow(clippy::too_many_arguments)]
 pub fn cfl_gen_y_420_8bpc(
     dst: &mut [u8],
@@ -2145,7 +2145,7 @@ pub fn cfl_gen_mat<BD: BitDepth>(
             mat[1][2] = mat[1][2].wrapping_add(v1 << mat2sh);
             n += 1;
         }
-        let start: usize = if !dir_l && !has_l { 1 } else { 0 };
+        let start: usize = usize::from(!dir_l && !has_l);
         let end = imax(
             start as i32,
             refw as i32 - n_left as i32 - 1 - (start == 0) as i32,
@@ -2274,7 +2274,7 @@ pub fn cfl_calc_alphas<BD: BitDepth>(
         } else {
             (c, c_off - stride - has_l as usize)
         };
-        let start: usize = if !has_l { 1 } else { 0 };
+        let start: usize = usize::from(!has_l);
         let end = imax(start as i32, refw as i32 - 1 - (start == 0) as i32) as usize;
         for i in start..end {
             let v: i32 = top[top_off + i].into();
@@ -2286,7 +2286,7 @@ pub fn cfl_calc_alphas<BD: BitDepth>(
     }
     if has_l {
         // C: `for (i = !has_t; i < refh - 1 - has_t; ...)` (ipred_tmpl.c).
-        let start = if has_t { 0 } else { 1 }; // = !has_t
+        let start = usize::from(!has_t); // = !has_t
         let end = if has_t { refh - 2 } else { refh - 1 };
         for i in start..end {
             let v: i32 = c[c_off + i * stride - 1].into();
@@ -2769,7 +2769,7 @@ pub fn cfl_pred<BD: BitDepth>(
     } else {
         let npx = (if has_t { w >> skiph as usize } else { 0 })
             + (if has_l { h >> skipv as usize } else { 0 });
-        if npx & (npx - 1) == 0 {
+        if npx.is_power_of_two() {
             dc[0] = (dc[0] + (npx as i32 >> 1)) >> ctz(npx as u32);
             dc[1] = (dc[1] + (npx as i32 >> 1)) >> ctz(npx as u32);
             dc[2] = (dc[2] + (npx as i32 >> 1)) >> ctz(npx as u32);
@@ -3743,7 +3743,7 @@ mod tests {
     /// A block that crosses the bottom of the frame (`hpad > 0`) derives its
     /// implicit alpha as if the rows below the frame repeated the last visible
     /// left neighbour. The port once read the block's own column there, which
-    /// is not predicted yet (1080p crowd_run, chroma off at the bottom edge).
+    /// is not predicted yet (1080p `crowd_run`, chroma off at the bottom edge).
     #[test]
     fn test_cfl_pred_implicit_pads_left_neighbour_below_frame() {
         const S: usize = 32;
@@ -3846,7 +3846,7 @@ mod tests {
         // 1023, never 255.
         let bd = BitDepth16::new(10);
         let mut tl = vec![1023u16; 256];
-        for v in tl.iter_mut() {
+        for v in &mut tl {
             *v = 1023;
         }
         let mut dst = [0u16; 64];

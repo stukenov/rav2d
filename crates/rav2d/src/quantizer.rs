@@ -1740,13 +1740,13 @@ fn transpose(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 ///
 /// The triangular data stores the lower triangle row by row:
 ///   row 0: 1 element, row 1: 2 elements, ..., row sz-1: sz elements.
-/// The upper triangle is filled by mirroring: dst[y][x] = src_triangle[x][...] for x > y.
+/// The upper triangle is filled by mirroring: dst[y][x] = `src_triangle`[x][...] for x > y.
 fn untriangle(src: &[u8], sz: usize) -> Vec<u8> {
     let mut dst = vec![0u8; sz * sz];
     let mut src_idx = 0;
     for y in 0..sz {
         // Copy the lower triangle portion (columns 0..=y)
-        dst[y * sz..y * sz + y + 1].copy_from_slice(&src[src_idx..src_idx + y + 1]);
+        dst[(y * sz)..=(y * sz + y)].copy_from_slice(&src[src_idx..=(src_idx + y)]);
         // Fill upper triangle: for x > y, walk down column x of the triangle
         let mut src_ptr = src_idx + y; // points to src[y] within current row
         for x in (y + 1)..sz {
@@ -1779,9 +1779,9 @@ pub struct QmTables {
 }
 
 impl QmTables {
-    /// Look up the quantizer matrix for a given (qm_level, plane, tx_size).
+    /// Look up the quantizer matrix for a given (`qm_level`, plane, `tx_size`).
     ///
-    /// Returns `None` when qm_level == 15 (no quantizer matrix).
+    /// Returns `None` when `qm_level` == 15 (no quantizer matrix).
     pub fn get(&self, qm_level: usize, plane: usize, tx_size: usize) -> Option<&[u8]> {
         if qm_level >= 15 {
             return None;
@@ -2055,9 +2055,7 @@ mod tests {
                 assert_eq!(
                     full[y * 32 + x],
                     full[x * 32 + y],
-                    "Asymmetry at ({}, {})",
-                    y,
-                    x
+                    "Asymmetry at ({y}, {x})"
                 );
             }
         }

@@ -43,7 +43,7 @@ pub fn inv_txfm_add<BD: BitDepth>(
     tx: usize,
 ) {
     if txtp & 0xFF == WHT_WHT {
-        assert!(tx == 0);
+        assert_eq!(tx, 0);
         let mut tmp = [0i32; 16];
         inv_wht_wht_4x4(&coeff[..16].try_into().unwrap(), &mut tmp);
         coeff[..16].fill(0);

@@ -83,9 +83,7 @@ pub fn get_cpu_flags() -> u32 {
 }
 
 pub fn num_logical_processors() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
 #[cfg(test)]

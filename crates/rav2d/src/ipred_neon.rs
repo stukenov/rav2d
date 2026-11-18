@@ -12,10 +12,10 @@
 //! AV2 (AVM) changes intra prediction substantially versus AV1, and dav2d's own
 //! AV2 fork **disables most of its NEON ipred kernels** in `ipred.h`
 //! (`#if ARCH_AARCH64 && 0`): DC, Paeth, full Smooth, the directional Z1/Z2/Z3
-//! fillers, CfL and filter-intra are all gated off there because the AV2 changes
+//! fillers, `CfL` and filter-intra are all gated off there because the AV2 changes
 //! made them no longer bit-exact. For 8bpc on aarch64 dav2d only keeps:
-//!   * `ipred_h` (HOR_PRED), `ipred_v` (VERT_PRED)
-//!   * `ipred_smooth_h` (SMOOTH_H_PRED), `ipred_smooth_v` (SMOOTH_V_PRED)
+//!   * `ipred_h` (`HOR_PRED`), `ipred_v` (`VERT_PRED`)
+//!   * `ipred_smooth_h` (`SMOOTH_H_PRED`), `ipred_smooth_v` (`SMOOTH_V_PRED`)
 //!   * `pal_pred`
 //!
 //! rav2d follows the same conservative set, minus `pal_pred`: AV2 packs **two
@@ -28,7 +28,7 @@
 
 use crate::levels::ANGLE_MULTI_MRL_FLAG;
 
-/// VERT_PRED: copy the top row down. NEON-handled unless the AV2 MRL-averaging
+/// `VERT_PRED`: copy the top row down. NEON-handled unless the AV2 MRL-averaging
 /// flag is set (no asm path), in which case it falls back to scalar.
 #[allow(clippy::too_many_arguments)]
 pub fn ipred_v(
@@ -47,7 +47,7 @@ pub fn ipred_v(
     }
 }
 
-/// HOR_PRED: replicate the left column across each row.
+/// `HOR_PRED`: replicate the left column across each row.
 #[allow(clippy::too_many_arguments)]
 pub fn ipred_h(
     dst: &mut [u8],
@@ -65,14 +65,14 @@ pub fn ipred_h(
     }
 }
 
-/// SMOOTH_V_PRED: vertical smooth interpolation between top row and bottom edge.
+/// `SMOOTH_V_PRED`: vertical smooth interpolation between top row and bottom edge.
 pub fn ipred_smooth_v(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usize, h: usize) {
     if !neon::ipred_simple(neon::Mode::SmoothV, dst, stride, tl, o, w, h, 0) {
         crate::ipred::ipred_smooth_v_8bpc(dst, stride, tl, o, w, h);
     }
 }
 
-/// SMOOTH_H_PRED: horizontal smooth interpolation between left column and right edge.
+/// `SMOOTH_H_PRED`: horizontal smooth interpolation between left column and right edge.
 pub fn ipred_smooth_h(dst: &mut [u8], stride: usize, tl: &[u8], o: usize, w: usize, h: usize) {
     if !neon::ipred_simple(neon::Mode::SmoothH, dst, stride, tl, o, w, h, 0) {
         crate::ipred::ipred_smooth_h_8bpc(dst, stride, tl, o, w, h);
@@ -269,8 +269,12 @@ mod tests {
             super::ipred_v(&mut b, stride, &tl, o, w, h, 0);
             assert_eq!(a, b, "ipred_v {w}x{h}");
 
-            a.iter_mut().for_each(|p| *p = 0);
-            b.iter_mut().for_each(|p| *p = 0);
+            for p in &mut a {
+                *p = 0;
+            }
+            for p in &mut b {
+                *p = 0;
+            }
             crate::ipred::ipred_h_8bpc(&mut a, stride, &tl, o, w, h, 0);
             super::ipred_h(&mut b, stride, &tl, o, w, h, 0);
             assert_eq!(a, b, "ipred_h {w}x{h}");
@@ -290,8 +294,12 @@ mod tests {
             super::ipred_smooth_v(&mut b, stride, &tl, o, w, h);
             assert_eq!(a, b, "ipred_smooth_v {w}x{h}");
 
-            a.iter_mut().for_each(|p| *p = 0);
-            b.iter_mut().for_each(|p| *p = 0);
+            for p in &mut a {
+                *p = 0;
+            }
+            for p in &mut b {
+                *p = 0;
+            }
             crate::ipred::ipred_smooth_h_8bpc(&mut a, stride, &tl, o, w, h);
             super::ipred_smooth_h(&mut b, stride, &tl, o, w, h);
             assert_eq!(a, b, "ipred_smooth_h {w}x{h}");

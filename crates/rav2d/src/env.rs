@@ -307,25 +307,25 @@ pub fn get_partition2_ctx(
 #[inline(always)]
 pub fn get_filter_ctx(nb: [&BlockContext; 2], boff: [i32; 2], r: RefPair) -> i32 {
     let (r_ref, comp) = unsafe { (r.r[0], (r.r[1] != -1) as i32) };
-    let flt0 = if boff[0] != -1 {
+    let flt0 = if boff[0] == -1 {
+        N_SWITCHABLE_FILTERS as i32
+    } else {
         let i = boff[0] as usize;
         if nb[0].r#ref[0][i] == r_ref || nb[0].r#ref[1][i] == r_ref {
             nb[0].filter[i] as i32
         } else {
             N_SWITCHABLE_FILTERS as i32
         }
-    } else {
-        N_SWITCHABLE_FILTERS as i32
     };
-    let flt1 = if boff[1] != -1 {
+    let flt1 = if boff[1] == -1 {
+        N_SWITCHABLE_FILTERS as i32
+    } else {
         let i = boff[1] as usize;
         if nb[1].r#ref[0][i] == r_ref || nb[1].r#ref[1][i] == r_ref {
             nb[1].filter[i] as i32
         } else {
             N_SWITCHABLE_FILTERS as i32
         }
-    } else {
-        N_SWITCHABLE_FILTERS as i32
     };
 
     if flt0 == flt1 || flt1 == N_SWITCHABLE_FILTERS as i32 {

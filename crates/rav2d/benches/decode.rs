@@ -1,3 +1,60 @@
+// clippy pedantic exception policy for rav2d (audit `-D clippy::pedantic`).
+// rav2d is a faithful port of dav2d (C): the mechanical findings (~350 sites)
+// were already fixed; the groups below are intentional port-of-dav2d idioms
+// and remaining MaybeIncorrect-suggestion stragglers (Phase-2 candidates).
+// Source attributes are used instead of cargo [lints] tables because cargo
+// injects the latter as CLI --allow flags that a later `-D` would override.
+
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::ptr_cast_constness)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::many_single_char_names)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::struct_field_names)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::fn_params_excessive_bools)]
+#![allow(clippy::inline_always)]
+#![allow(clippy::trivially_copy_pass_by_ref)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::stable_sort_primitive)]
+#![allow(clippy::comparison_chain)]
+#![allow(clippy::unreadable_literal)]
+#![allow(clippy::decimal_bitwise_operands)]
+#![allow(clippy::verbose_bit_mask)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::no_effect_underscore_binding)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::assigning_clones)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::match_wildcard_for_single_variants)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::collapsible_else_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::unnecessary_box_returns)]
+#![allow(clippy::large_stack_arrays)]
+#![allow(clippy::format_push_string)]
+#![allow(clippy::default_trait_access)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::same_functions_in_if_condition)]
+#![allow(clippy::manual_slice_fill)]
+#![allow(clippy::manual_is_variant_and)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::assert_is_empty)]
+#![allow(clippy::manual_assert)]
+#![allow(clippy::explicit_iter_loop)]
+#![allow(clippy::overly_complex_bool_expr)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::format_collect)]
+
 //! Decode throughput benchmark: rav2d (pure Rust) vs dav2d (C reference, via the
 //! `rav2d_sys` FFI bindings).
 //!
@@ -123,7 +180,7 @@ fn dav2d_run(bytes: &[u8], inloop_filters: u32) -> (u32, u64) {
     let mut samples = 0u64;
     unsafe {
         let mut settings: sys::Dav2dSettings = std::mem::zeroed();
-        sys::dav2d_default_settings(&mut settings);
+        sys::dav2d_default_settings(&raw mut settings);
         settings.n_threads = 1;
         settings.apply_grain = 0;
         settings.inloop_filters = inloop_filters;
@@ -132,12 +189,12 @@ fn dav2d_run(bytes: &[u8], inloop_filters: u32) -> (u32, u64) {
         settings.output_invisible_frames = 1;
 
         let mut ctx: *mut sys::Dav2dContext = std::ptr::null_mut();
-        if sys::dav2d_open(&mut ctx, &settings) != 0 {
+        if sys::dav2d_open(&raw mut ctx, &raw const settings) != 0 {
             return (0, 0);
         }
 
         let mut d: sys::Dav2dData = std::mem::zeroed();
-        let buf = sys::dav2d_data_create(&mut d, bytes.len());
+        let buf = sys::dav2d_data_create(&raw mut d, bytes.len());
         assert!(!buf.is_null(), "dav2d_data_create failed");
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
 
@@ -145,16 +202,16 @@ fn dav2d_run(bytes: &[u8], inloop_filters: u32) -> (u32, u64) {
         loop {
             loop {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                let pr = sys::dav2d_get_picture(ctx, &mut pic);
+                let pr = sys::dav2d_get_picture(ctx, &raw mut pic);
                 if pr == EAGAIN || pr < 0 {
                     break;
                 }
                 frames += 1;
                 samples += frame_samples(pic.p.w, pic.p.h, pic.p.layout as i32);
-                sys::dav2d_picture_unref(&mut pic);
+                sys::dav2d_picture_unref(&raw mut pic);
             }
             if d.sz > 0 {
-                let sr = sys::dav2d_send_data(ctx, &mut d);
+                let sr = sys::dav2d_send_data(ctx, &raw mut d);
                 if sr < 0 && sr != EAGAIN {
                     break;
                 }
@@ -163,16 +220,16 @@ fn dav2d_run(bytes: &[u8], inloop_filters: u32) -> (u32, u64) {
                 sys::dav2d_send_data(ctx, std::ptr::null_mut());
             } else {
                 let mut pic: sys::Dav2dPicture = std::mem::zeroed();
-                if sys::dav2d_get_picture(ctx, &mut pic) == 0 {
+                if sys::dav2d_get_picture(ctx, &raw mut pic) == 0 {
                     frames += 1;
                     samples += frame_samples(pic.p.w, pic.p.h, pic.p.layout as i32);
-                    sys::dav2d_picture_unref(&mut pic);
+                    sys::dav2d_picture_unref(&raw mut pic);
                 } else {
                     break;
                 }
             }
         }
-        sys::dav2d_close(&mut ctx);
+        sys::dav2d_close(&raw mut ctx);
     }
     (frames, samples)
 }
@@ -204,12 +261,11 @@ fn print_table(title: &str, rav_filters: rav2d::InloopFilterType, dav_filters: u
     );
     for name in CLIPS {
         let path = media(name);
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => {
-                eprintln!("{name:<46} (missing)");
-                continue;
-            }
+        let bytes = if let Ok(b) = std::fs::read(&path) {
+            b
+        } else {
+            eprintln!("{name:<46} (missing)");
+            continue;
         };
         let iters = 15;
         let (r_ms, r_frames, r_samples) =

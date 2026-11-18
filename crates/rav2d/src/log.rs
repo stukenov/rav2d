@@ -14,7 +14,7 @@ impl Logger {
     pub fn with_default() -> Self {
         Self {
             callback: Some(Box::new(|msg| {
-                eprint!("{}", msg);
+                eprint!("{msg}");
             })),
         }
     }

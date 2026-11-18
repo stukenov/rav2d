@@ -286,7 +286,7 @@ impl Picture {
     /// [`Picture::plane_stride_bytes`].
     #[inline]
     pub fn stride_px(&self, pl: usize) -> usize {
-        let s = self.stride[if pl == 0 { 0 } else { 1 }].unsigned_abs();
+        let s = self.stride[usize::from(pl != 0)].unsigned_abs();
         s / self.bytes_per_sample()
     }
 
@@ -295,7 +295,7 @@ impl Picture {
     /// Planes 1 and 2 share one stride.
     #[inline]
     pub fn plane_stride_bytes(&self, pl: usize) -> isize {
-        self.stride[if pl == 0 { 0 } else { 1 }]
+        self.stride[usize::from(pl != 0)]
     }
 
     /// Base pointer of plane `pl`, or `None` when the plane is absent (any
@@ -388,7 +388,7 @@ impl Picture {
         // SAFETY: `bytes` is `pw * 2` bytes of a live plane, just checked to be
         // `u16`-aligned; `u16` has no invalid bit patterns and the borrow is
         // tied to the same `&self`.
-        Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u16, bytes.len() / 2) })
+        Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), bytes.len() / 2) })
     }
 
     /// Every row of plane `pl` top to bottom, as raw sample bytes. Empty when

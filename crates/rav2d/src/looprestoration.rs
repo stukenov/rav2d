@@ -27,14 +27,14 @@ static MODE_OFFSETS: [i16; 4] = [-547, -21565, -573, -680];
 fn as_u8_slice<P: Pixel>(s: &[P]) -> &[u8] {
     debug_assert_eq!(P::BITDEPTH, 8);
     // SAFETY: caller guarantees P::BITDEPTH == 8 => P == u8.
-    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len()) }
+    unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), s.len()) }
 }
 
 #[inline]
 fn as_u8_slice_mut<P: Pixel>(s: &mut [P]) -> &mut [u8] {
     debug_assert_eq!(P::BITDEPTH, 8);
     // SAFETY: caller guarantees P::BITDEPTH == 8 => P == u8.
-    unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut u8, s.len()) }
+    unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr().cast::<u8>(), s.len()) }
 }
 
 pub fn get_qval_given_tskip(mut qstep: i32, tskip: i32, i: usize, bitdepth_min_8: i32) -> i32 {
@@ -50,7 +50,7 @@ pub fn get_qval_given_tskip(mut qstep: i32, tskip: i32, i: usize, bitdepth_min_8
 
 /// Backup a row with edge extension. `dst` and `src` are indexed with `o` as the
 /// origin (position 0 in C). Left edge fills dst[o-edge_len..o], right fills
-/// dst[o+w..o+w+edge_len].
+/// dst[`o+w..o+w+edge_len`].
 pub fn backup_row<P: Pixel>(
     dst: &mut [P],
     o: usize,
@@ -137,7 +137,7 @@ pub fn compute_gradient_row<P: Pixel>(
                 let dx = offs[d][1];
                 // SAFETY: P::BITDEPTH == 8 => P == u8.
                 let as_u8 = |s: &[P]| unsafe {
-                    std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len())
+                    std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), s.len())
                 };
                 let center_rows = [as_u8(rows[row_off - 1]), as_u8(rows[row_off])];
                 let a_rows = [
@@ -308,7 +308,7 @@ pub fn gdf_add<P: Pixel>(
                     // SAFETY: P::BITDEPTH == 8 => P == u8.
                     let row = unsafe {
                         std::slice::from_raw_parts_mut(
-                            p[y * stride + x0..].as_mut_ptr() as *mut u8,
+                            p[y * stride + x0..].as_mut_ptr().cast::<u8>(),
                             p.len() - (y * stride + x0),
                         )
                     };
@@ -2177,7 +2177,7 @@ fn lr_stripe<P: Pixel>(
                         // SAFETY: reinterpret the [i8;32] rows as [i8;18] prefixes.
                         unsafe {
                             std::slice::from_raw_parts(
-                                lr.ns_filter.as_ptr() as *const [i8; 18],
+                                lr.ns_filter.as_ptr().cast::<[i8; 18]>(),
                                 lr.ns_filter.len(),
                             )
                         }
@@ -3007,7 +3007,7 @@ mod tests {
 
         for y in 0..h {
             for x in 0..w {
-                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({}, {})", x, y);
+                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({x}, {y})");
             }
         }
     }
@@ -3046,7 +3046,7 @@ mod tests {
 
         for y in 0..h {
             for x in 0..w {
-                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({}, {})", x, y);
+                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({x}, {y})");
             }
         }
     }
@@ -3143,7 +3143,7 @@ mod tests {
 
         for y in 0..h {
             for x in 0..w {
-                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({}, {})", x, y);
+                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({x}, {y})");
             }
         }
     }
@@ -3196,7 +3196,7 @@ mod tests {
 
         for y in 0..h {
             for x in 0..w {
-                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({}, {})", x, y);
+                assert_eq!(p[p_off + y * stride + x], 128, "mismatch at ({x}, {y})");
             }
         }
     }

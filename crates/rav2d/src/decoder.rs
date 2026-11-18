@@ -31,7 +31,7 @@ pub enum InloopFilterType {
 }
 
 impl InloopFilterType {
-    /// Raw in-loop-filter bit word matching dav2d.h's DAV2D_INLOOPFILTER_*
+    /// Raw in-loop-filter bit word matching dav2d.h's `DAV2D_INLOOPFILTER`_*
     /// (DEBLOCK=1<<0, CDEF=1<<1, CCSO=1<<2, WIENER=1<<3, GDF=1<<4). The enum's
     /// numeric repr already matches these C bits; bit 2 is published as
     /// `Restoration` but semantically means CCSO per dav2d.h.
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_version() {
-        assert!(!version().is_empty());
+        assert_ne!(version(), "");
     }
 
     #[test]

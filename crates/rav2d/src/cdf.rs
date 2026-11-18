@@ -1990,7 +1990,7 @@ fn entry_reset_count(data: &mut [u16], off: usize, n1d: usize) {
 
 fn visit_mv_entries(mut f: impl FnMut(usize, usize)) {
     for j in 0..7usize {
-        f(j * 8, (9 + j) >> 1);
+        f(j * 8, usize::midpoint(9, j));
     } // shell_lower (variable n1d)
     for j in 0..7usize {
         f(56 + j * 8, (10 + j).min(14) >> 1);
