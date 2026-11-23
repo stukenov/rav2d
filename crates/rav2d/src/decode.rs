@@ -13504,6 +13504,14 @@ fn tip_frame_recon_sb<BD: crate::pixel::BitDepth>(
 ) -> Result<(), ()> {
     use crate::levels::{InterPredMode, MotionMode, Mv, MvXY, RefPair, TIP_FRAME, TxPartition};
 
+    // For 4:0:0 the partition walk still hands over a chroma size (see
+    // decode_b); there is no chroma plane to predict, so drop it here too.
+    let cbs = if fi.has_chroma_layout {
+        cbs
+    } else {
+        BlockSize::Invalid
+    };
+
     // Build the synthesized block (decode.c:4385-4402). cwp_idx selects the TIP
     // global compound weight from `dav2d_tip_wts`.
     const TIP_WTS: [i8; 8] = [8, 12, 16, 18, 20, 4, 6, -4];
